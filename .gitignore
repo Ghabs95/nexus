@@ -45,6 +45,7 @@ venv.bak/
 .env
 .env.local
 .env.*.local
+*.secret
 
 # Temporary Files
 temp_voice.mp3
@@ -63,4 +64,3 @@ htmlcov/
 # Misc
 .cache/
 *.pid
-*.secret

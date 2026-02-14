@@ -1,0 +1,16 @@
+[Unit]
+Description=Nexus Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus
+EnvironmentFile=/home/ubuntu/git/ghabs/nexus/vars.secret
+Environment="PATH=/home/ubuntu/git/ghabs/nexus/venv/bin"
+ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python src/telegram_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -53,26 +53,76 @@ Step through an interactive menu:
    sudo apt-get install ffmpeg
    ```
 
-2. **Install Python dependencies**:
+2. **Create virtual environment** (optional but recommended):
+   ```bash
+   cd /home/ubuntu/git/ghabs/nexus
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. **Install Python dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set environment variables**:
+4. **Configure environment variables**:
+   
+   Edit `vars.secret` with your credentials:
    ```bash
-   export TELEGRAM_TOKEN="your_telegram_bot_token"
-   export AI_API_KEY="your_google_gemini_api_key"
-   export AI_MODEL="gemini-3.0-flash"  # or desired model
-   export ALLOWED_USER="your_user_id"
+   nano vars.secret
+   ```
+   
+   Add your values:
+   ```
+   TELEGRAM_TOKEN=your_telegram_bot_token
+   AI_API_KEY=your_google_gemini_api_key
+   AI_MODEL=gemini-2.0-flash
+   ALLOWED_USER=your_user_id
+   ```
+   
+   For manual testing, you can also export them:
+   ```bash
+   source vars.secret
    ```
 
 ### Running the Bot
 
+#### Option 1: Manual Execution
 ```bash
-python telegram_bot.py
+python src/telegram_bot.py
 ```
 
 The bot will start polling and display: `Nexus (Google Edition) Online...`
+
+#### Option 2: Systemd Service (Production - Recommended)
+
+For constant running with auto-restart:
+
+1. Copy the service file:
+   ```bash
+   sudo cp nexus-bot.service /etc/systemd/system/
+   ```
+
+2. Enable and start the service:
+   ```bash
+   sudo systemctl enable nexus-bot
+   sudo systemctl start nexus-bot
+   ```
+
+3. Check status:
+   ```bash
+   sudo systemctl status nexus-bot
+   ```
+
+4. View logs:
+   ```bash
+   sudo journalctl -u nexus-bot -f
+   ```
+
+Stop the service:
+   ```bash
+   sudo systemctl stop nexus-bot
+   ```
 
 ## Usage
 
@@ -88,7 +138,19 @@ The bot will start polling and display: `Nexus (Google Edition) Online...`
 4. Send voice or text description
 5. Task is saved with project and type metadata
 
-## File Structure
+## Project Structure
+
+```
+nexus/
+├── src/
+│   └── telegram_bot.py       # Main bot application
+├── requirements.txt          # Python dependencies
+├── README.md                 # This file
+├── .gitignore               # Git ignore rules
+└── nexus-bot.service        # Systemd service file
+```
+
+## File Storage
 
 Tasks are saved as markdown files in:
 ```
@@ -111,7 +173,7 @@ Add dark mode support to mobile app
 
 ## Configuration
 
-Edit the following dictionaries in `telegram_bot.py` to customize:
+Edit the following dictionaries in [src/telegram_bot.py](src/telegram_bot.py) to customize:
 
 - `PROJECTS` - Add or modify supported projects
 - `TYPES` - Customize task type categories
