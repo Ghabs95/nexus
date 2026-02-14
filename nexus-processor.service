@@ -12,6 +12,8 @@ Restart=always
 RestartSec=10
 # Environment variables can be loaded from file or set here
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/vars.secret
+# Required: GITHUB_AGENTS_REPO=ghabs/agents (where issues are created)
+# Required: gh CLI must be authenticated (gh auth login)
 
 [Install]
 WantedBy=multi-user.target

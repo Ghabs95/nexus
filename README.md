@@ -1,6 +1,7 @@
 # Nexus - Telegram AI Task Router Bot
 
-A Telegram bot powered by Google Gemini that intelligently routes voice messages and text input to project-specific GitHub inboxes. Perfect for quickly capturing ideas and tasks on the go.
+A Telegram bot powered by Google Gemini that intelligently routes voice messages and text input to project-specific
+GitHub inboxes. Perfect for quickly capturing ideas and tasks on the go.
 
 ## Features
 
@@ -13,13 +14,17 @@ A Telegram bot powered by Google Gemini that intelligently routes voice messages
 ## Two Operating Modes
 
 ### 1. Hands-Free Mode (Default)
+
 Simply send voice or text to the bot - it automatically:
+
 - Transcribes audio (if applicable)
 - Maps content to the appropriate project
 - Routes and saves the task
 
 ### 2. Selection Mode (`/new` command)
+
 Step through an interactive menu:
+
 1. Select a project
 2. Choose a task type (Feature, Bug, Improvement)
 3. Send voice or text input
@@ -41,6 +46,7 @@ Step through an interactive menu:
 ## Setup Instructions
 
 ### Prerequisites
+
 - Python 3.8+
 - Telegram account
 - Google Gemini API key
@@ -66,12 +72,12 @@ Step through an interactive menu:
    ```
 
 4. **Configure environment variables**:
-   
+
    Edit `vars.secret` with your credentials:
    ```bash
    nano vars.secret
    ```
-   
+
    Add your values:
    ```
    TELEGRAM_TOKEN=your_telegram_bot_token
@@ -79,7 +85,7 @@ Step through an interactive menu:
    AI_MODEL=gemini-2.0-flash
    ALLOWED_USER=your_user_id
    ```
-   
+
    For manual testing, you can also export them:
    ```bash
    source vars.secret
@@ -88,6 +94,7 @@ Step through an interactive menu:
 ### Running the Bot
 
 #### Option 1: Manual Execution
+
 ```bash
 python src/telegram_bot.py
 ```
@@ -120,23 +127,91 @@ For constant running with auto-restart:
    ```
 
 Stop the service:
+
    ```bash
    sudo systemctl stop nexus-bot
+   ```
+
+### Inbox Processor Service (Optional)
+
+To run the inbox processor in the background:
+
+1. Copy `nexus-processor.service`:
+   ```bash
+   sudo cp nexus-processor.service /etc/systemd/system/
+   ```
+2. Enable and start:
+   ```bash
+   sudo systemctl enable nexus-processor
+   sudo systemctl start nexus-processor
    ```
 
 ## Usage
 
 ### Auto-Router Mode
+
 1. Start a chat with the bot
 2. Send a voice message or text: *"Add pagination to user dashboard"*
 3. Bot transcribes, analyzes, and automatically saves to the appropriate project inbox
 
 ### Menu Mode
+
 1. Send `/new` command
 2. Select a project from the inline keyboard
 3. Select a task type
 4. Send voice or text description
 5. Task is saved with project and type metadata
+
+## Inbox Processor & Automation
+
+The `inbox_processor.py` watches for new tasks and automates the full workflow.
+
+### Architecture
+
+```mermaid
+flowchart TD
+    A["📱 Telegram Voice Note"] --> B["🤖 Nexus Bot"]
+    B --> C["📂 Inbox Processor"]
+    C --> D{"Task Type?"}
+
+    D -->|Feature| E["🟡 Tier 1: Full SOP"]
+    D -->|Bug| F["🟠 Tier 2: Shortened"]
+    D -->|Hotfix / Chore| G["🟢 Tier 3: Fast-Track"]
+
+    E --> H["Issue in agents repo\n+ Full SOP checklist\n+ label: workflow/full"]
+    F --> I["Issue in agents repo\n+ Shortened checklist\n+ label: workflow/shortened"]
+    G --> J["Issue in agents repo\n+ Minimal checklist\n+ label: workflow/fast-track"]
+
+    H --> K["@ProjectLead triages\n→ creates sub-issues\nin target repos"]
+    I --> K
+    J --> L["@ProjectLead assigns\n@copilot directly\nto sub-issue"]
+
+    K --> M["@copilot implements\nin target repo"]
+    L --> M
+```
+
+### What It Does
+
+1. **Parses** the task file for type and content
+2. **Creates a Git branch** (`feat/`, `fix/`, `refactor/`, `hotfix/`, `chore/`)
+3. **Moves** the file to the agent's active folder
+4. **Creates a GitHub Issue** in the agents repo with an embedded SOP checklist
+
+### Tiered Automation
+
+| Task Type    | Tier          | SOP Steps                 | Branch From |
+|--------------|---------------|---------------------------|-------------|
+| Feature      | 🟡 Full       | 10 steps (all agents)     | `develop`   |
+| Bug          | 🟠 Shortened  | 7 steps (skip Vision/UX)  | `develop`   |
+| Hotfix/Chore | 🟢 Fast-Track | 4 steps (@copilot direct) | `main`      |
+
+### Configuration (`vars.secret`)
+
+```bash
+GITHUB_AGENTS_REPO=ghabs/agents    # Where parent issues are created
+```
+
+> **Prerequisite:** `gh` CLI must be authenticated on the server (`gh auth login`).
 
 ## Project Structure
 
@@ -153,13 +228,16 @@ nexus/
 ## File Storage
 
 Tasks are saved as markdown files in:
+
 ```
 /home/ubuntu/git/{project}/.github/inbox/{task_type}_{message_id}.md
 ```
 
 Example file content:
+
 ```markdown
 # ✨ Feature
+
 **Project:** Wallible
 **Status:** Pending
 
