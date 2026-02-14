@@ -54,7 +54,6 @@ temp_voice.ogg
 
 # OS
 Thumbs.db
-.DS_Store
 
 # Testing
 .pytest_cache/
@@ -64,3 +63,4 @@ htmlcov/
 # Misc
 .cache/
 *.pid
+*.secret

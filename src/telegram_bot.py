@@ -95,6 +95,11 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
+    # Guard: Don't process commands as tasks
+    if update.message.text and update.message.text.startswith('/'):
+        logger.info(f"Ignoring command in hands_free_handler: {update.message.text}")
+        return
+
     text = ""
     status_msg = await update.message.reply_text("⚡ Gemini Listening...")
 
@@ -239,7 +244,8 @@ if __name__ == '__main__':
 
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler(["help", "start"], help_handler))
-    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, hands_free_handler))
+    # Exclude commands from the auto-router catch-all
+    app.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & (~filters.COMMAND), hands_free_handler))
 
     print("Nexus (Google Edition) Online...")
     app.run_polling()
