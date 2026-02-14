@@ -1,0 +1,17 @@
+[Unit]
+Description=Nexus Inbox Processor
+After=network.target
+
+[Service]
+# Adjust User/Group to match your server (e.g., ubuntu)
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus
+ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python src/inbox_processor.py
+Restart=always
+RestartSec=10
+# Environment variables can be loaded from file or set here
+EnvironmentFile=/home/ubuntu/git/ghabs/nexus/vars.secret
+
+[Install]
+WantedBy=multi-user.target

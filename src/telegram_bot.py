@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import sys
+from dotenv import load_dotenv
 from google import genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -8,30 +10,52 @@ from telegram.ext import (
     MessageHandler, CallbackQueryHandler, ConversationHandler, filters
 )
 
+# Load secrets from a local file if it exists
+SECRET_FILE = "vars.secret"
+if os.path.exists(SECRET_FILE):
+    logging.info(f"Loading environment from {SECRET_FILE}")
+    load_dotenv(SECRET_FILE)
+else:
+    logging.info(f"No {SECRET_FILE} found, relying on shell environment")
+
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("AI_API_KEY")
-GOOGLE_AI_MODEL = os.getenv("AI_MODEL")
+GOOGLE_AI_MODEL = os.getenv("AI_MODEL") or "gemini-1.5-flash"
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER")) if os.getenv("ALLOWED_USER") else None
-BASE_DIR = "/home/ubuntu/git"
+BASE_DIR = os.getenv("BASE_DIR", "/home/ubuntu/git")
 
 # --- LOGGING ---
 logger = logging.getLogger(__name__)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- VALIDATION ---
+logger.info(f"Using BASE_DIR: {BASE_DIR}")
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN is missing! Please set it in your environment or vars.secret.")
+    sys.exit(1)
+if not GOOGLE_API_KEY:
+    logger.error("AI_API_KEY (Google API Key) is missing! Please set it in your environment or vars.secret.")
+    sys.exit(1)
+if not ALLOWED_USER_ID:
+    logger.warning("ALLOWED_USER is missing! Handlers will not respond to anyone.")
 
 # Configure Gemini
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # --- DATA ---
 PROJECTS = {
-    "casit": "Case Italia",
-    "wlbl": "Wallible",
-    "bm": "Biome",
-    "inbox": "General Inbox"
+    "case_italia": "Case Italia",
+    "wallible": "Wallible",
+    "biome": "Biome",
+    "nexus": "General Inbox (Nexus)"
 }
 TYPES = {
     "feature": "✨ Feature",
-    "bug": "Hz Bug Fix",
+    "bug": "🩹 Bug Fix",
+    "hotfix": "🔥 Hotfix",
+    "release": "📦 Release",
+    "chore": "🧹 Chore",
     "improvement": "🚀 Improvement"
 }
 
@@ -43,7 +67,7 @@ SELECT_PROJECT, SELECT_TYPE, INPUT_TASK = range(3)
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists available commands and usage info."""
     logger.info(f"Help triggered by user: {update.effective_user.id}")
-    if update.effective_user.id != ALLOWED_USER_ID:
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -71,7 +95,7 @@ async def process_audio_with_gemini(voice_file_id, context):
     # 2. Upload & Transcribe (Gemini supports .ogg)
     logger.info("Uploading audio to Gemini...")
     audio_file = await client.aio.files.upload(path="temp_voice.ogg")
-    
+
     # Prompt just for transcription
     logger.info("Starting transcription...")
     response = await client.aio.models.generate_content(
@@ -91,7 +115,7 @@ async def process_audio_with_gemini(voice_file_id, context):
 # --- 1. HANDS-FREE MODE (Auto-Router) ---
 async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Hands-free triggered by user: {update.effective_user.id}")
-    if update.effective_user.id != ALLOWED_USER_ID:
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -112,7 +136,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Multimodal Prompt: "Listen and Route"
         logger.info("Uploading audio for auto-routing...")
         audio_file = await client.aio.files.upload(path="temp_voice.ogg")
-        
+
         response = await client.aio.models.generate_content(
             model=GOOGLE_AI_MODEL,
             contents=[
@@ -120,7 +144,8 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 You are a project router. Listen to the audio.
                 1. Transcribe the text.
                 2. Map it to one of these keys: {list(PROJECTS.keys())}.
-                3. Return JSON: {{"project": "key", "text": "transcription"}}
+                3. Classify type as one of: {list(TYPES.keys())}.
+                4. Return JSON: {{"project": "key", "type": "type_key", "text": "transcription"}}
                 """,
                 audio_file
             ]
@@ -136,8 +161,9 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         response = await client.aio.models.generate_content(
             model=GOOGLE_AI_MODEL,
             contents=f"""
-                Map this text to one of these keys: {list(PROJECTS.keys())}.
-                Return JSON: {{"project": "key", "text": "{text_input}"}}
+                1. Map this text to one of these keys: {list(PROJECTS.keys())}.
+                2. Classify type as one of: {list(TYPES.keys())}.
+                3. Return JSON: {{"project": "key", "type": "type_key", "text": "{text_input}"}}
                 Input: {text_input}
             """
         )
@@ -146,6 +172,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         result = json.loads(response.text.replace("```json", "").replace("```", ""))
         project = result.get("project", "inbox")
+        task_type = result.get("type", "feature")
         content = result.get("text", "")
     except:
         await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=status_msg.message_id,
@@ -158,7 +185,8 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     filename = f"voice_task_{update.message.message_id}.md"
 
     with open(os.path.join(target_dir, filename), "w") as f:
-        f.write(f"# Auto-Routed Task\n**Project:** {PROJECTS.get(project, project)}\n**Content:** {content}")
+        f.write(
+            f"# {TYPES.get(task_type, 'Task')}\n**Project:** {PROJECTS.get(project, project)}\n**Type:** {task_type}\n**Status:** Pending\n\n{content}")
 
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
@@ -171,7 +199,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # (Steps 1 & 2 are purely Telegram UI, no AI needed)
 
 async def start_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ALLOWED_USER_ID: return
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
     keyboard = [[InlineKeyboardButton(name, callback_data=code)] for code, name in PROJECTS.items()]
     await update.message.reply_text("📂 **Select Project:**", reply_markup=InlineKeyboardMarkup(keyboard),
                                     parse_mode='Markdown')
@@ -216,7 +244,8 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"{task_type}_{update.message.message_id}.md"
 
     with open(os.path.join(target_dir, filename), "w") as f:
-        f.write(f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Status:** Pending\n\n{text}")
+        f.write(
+            f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Type:** {task_type}\n**Status:** Pending\n\n{text}")
 
     await update.message.reply_text(f"✅ Saved to `{project}`.")
     return ConversationHandler.END
@@ -239,7 +268,7 @@ if __name__ == '__main__':
             INPUT_TASK: [MessageHandler(filters.TEXT | filters.VOICE, save_task)]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=True
+        per_message=False
     )
 
     app.add_handler(conv_handler)
