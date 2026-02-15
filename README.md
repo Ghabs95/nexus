@@ -75,7 +75,7 @@ Step through an interactive menu:
 
    Edit `vars.secret` with your credentials:
    ```bash
-   nano vars.secret
+GITHUB_AGENTS_REPO=Ghabs95/agents    # Where parent issues are created
    ```
 
    Add your values:
@@ -208,8 +208,48 @@ flowchart TD
 ### Configuration (`vars.secret`)
 
 ```bash
-GITHUB_AGENTS_REPO=ghabs/agents    # Where parent issues are created
+GITHUB_AGENTS_REPO=Ghabs95/agents    # Where parent issues are created
 ```
+
+## Bot Usage
+
+- Local run (development):
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python src/telegram_bot.py
+```
+
+- Run as systemd service (debian/ubuntu):
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now nexus-bot.service
+sudo systemctl status nexus-bot.service
+```
+
+- Common environment variables (set in `vars.secret`):
+
+```
+TELEGRAM_TOKEN=...
+GITHUB_TOKEN=...
+GITHUB_AGENTS_REPO=Ghabs95/agents
+INBOX_DIR=./.github/inbox
+```
+
+- Example bot commands and expected responses:
+
+```
+/status      -> "Pending: 3 tasks (case_italia:2, wallible:1)"
+/active      -> "Active: copilot:1, alice:2"
+/assign 42   -> "Assigned issue #42 to @me"
+/prepare 42  -> "Appended Copilot instructions to issue #42"
+/implement 42-> "Requested implementation; @ProjectLead notified for approval"
+```
+
+These examples are illustrative — actual counts and messages depend on your inbox and agent mappings.
 
 > **Prerequisite:** `gh` CLI must be authenticated on the server (`gh auth login`).
 

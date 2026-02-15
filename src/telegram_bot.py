@@ -1,10 +1,12 @@
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 from dotenv import load_dotenv
 from google import genai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     MessageHandler, CallbackQueryHandler, ConversationHandler, filters
@@ -80,9 +82,58 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Just send a **Voice Note** or **Text Message** directly. "
         "Gemini will automatically transcribe, route, and save the task "
         "based on its content!\n\n"
+        "📊 **Monitoring:**\n"
+        "/status - View pending tasks in inbox\n"
+        "/active - View tasks currently being worked on\n"
+        "/assign <issue#> - Assign GitHub issue to yourself\n"
+        "/implement <issue#> - Request Copilot agent implementation (needs ProjectLead approval)\n"
+        "/prepare <issue#> - Add Copilot-friendly instructions to issue\n\n"
         "ℹ️ /help - Show this list"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message and persistent reply keyboard."""
+    logger.info(f"Start triggered by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    welcome = (
+        "👋 Welcome to Nexus (Google Edition)!\n\n"
+        "Use the menu buttons to create tasks or monitor queues.\n"
+        "Send voice or text to create a task automatically."
+    )
+
+    keyboard = [
+        ["/new"],
+        ["/status"],
+        ["/active"],
+        ["/assign"],
+        ["/help"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+    await update.message.reply_text(welcome, reply_markup=reply_markup)
+
+
+async def on_startup(application):
+    """Register bot commands so they appear in the Telegram client menu."""
+    cmds = [
+        BotCommand("new", "Start selection mode"),
+        BotCommand("status", "Show pending tasks"),
+        BotCommand("active", "Show active tasks"),
+        BotCommand("assign", "Assign an issue"),
+        BotCommand("implement", "Request Copilot implementation"),
+        BotCommand("prepare", "Prepare issue for Copilot"),
+        BotCommand("help", "Show help")
+    ]
+    try:
+        await application.bot.set_my_commands(cmds)
+        logger.info("Registered bot commands for Telegram client menu")
+    except Exception:
+        logger.exception("Failed to set bot commands on startup")
 
 
 # --- HELPER: GEMINI AUDIO PROCESSOR ---
@@ -256,9 +307,326 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# --- MONITORING COMMANDS ---
+async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows pending tasks in inbox folders."""
+    logger.info(f"Status triggered by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    status_text = "📥 **Inbox Status** (Pending Tasks)\n\n"
+    total_tasks = 0
+
+    for project_key, project_name in PROJECTS.items():
+        inbox_dir = os.path.join(BASE_DIR, project_key, ".github", "inbox")
+        if os.path.exists(inbox_dir):
+            files = [f for f in os.listdir(inbox_dir) if f.endswith(".md")]
+            if files:
+                status_text += f"**{project_name}:** {len(files)} task(s)\n"
+                total_tasks += len(files)
+                # Show first 3 files as preview
+                for f in files[:3]:
+                    task_type = f.split('_')[0]
+                    emoji = TYPES.get(task_type, "📝")
+                    status_text += f"  • {emoji} `{f}`\n"
+                if len(files) > 3:
+                    status_text += f"  ... +{len(files) - 3} more\n"
+                status_text += "\n"
+
+    if total_tasks == 0:
+        status_text += "✨ No pending tasks in inbox!\n"
+    else:
+        status_text += f"**Total:** {total_tasks} pending task(s)"
+
+    await update.message.reply_text(status_text, parse_mode='Markdown')
+
+
+async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows active tasks being worked on."""
+    logger.info(f"Active triggered by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    active_text = "🚀 **Active Tasks** (In Progress)\n\n"
+    total_active = 0
+
+    # Check agents repo active folders
+    agents_base = os.path.join(BASE_DIR, "ghabs", "agents")
+    agent_folders = ["casit-agents", "wlbl-agents", "bm-agents"]
+    
+    for agent_folder in agent_folders:
+        active_dir = os.path.join(agents_base, agent_folder, ".github", "tasks", "active")
+        if os.path.exists(active_dir):
+            files = [f for f in os.listdir(active_dir) if f.endswith(".md")]
+            if files:
+                project_name = agent_folder.replace("-agents", "").replace("casit", "Case Italia").replace("wlbl", "Wallible").replace("bm", "Biome")
+                active_text += f"**{project_name}:** {len(files)} task(s)\n"
+                total_active += len(files)
+                for f in files[:3]:
+                    task_type = f.split('_')[0]
+                    emoji = TYPES.get(task_type, "📝")
+                    active_text += f"  • {emoji} `{f}`\n"
+                if len(files) > 3:
+                    active_text += f"  ... +{len(files) - 3} more\n"
+                active_text += "\n"
+
+    if total_active == 0:
+        active_text += "💤 No active tasks at the moment.\n"
+    else:
+        active_text += f"**Total:** {total_active} active task(s)"
+
+    await update.message.reply_text(active_text, parse_mode='Markdown')
+
+
+async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Assigns a GitHub issue to the user."""
+    logger.info(f"Assign triggered by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    # Parse issue number from command
+    # Format: /assign 123 or /assign #123 or /assign https://github.com/owner/repo/issues/123
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Usage: `/assign <issue#> [assignee]`\n\n"
+            "Examples:\n"
+            "  `/assign 5` (assigns to you / @me)\n"
+            "  `/assign 5 copilot` (assigns to configured Copilot user)\n"
+            "  `/assign https://github.com/Ghabs95/agents/issues/5 alice`",
+            parse_mode='Markdown'
+        )
+        return
+
+    issue_input = context.args[0]
+    
+    # Extract issue number
+    issue_number = None
+    if issue_input.startswith("#"):
+        issue_number = issue_input[1:]
+    elif issue_input.startswith("http"):
+        # Extract from URL
+        match = re.search(r'/issues/(\d+)', issue_input)
+        if match:
+            issue_number = match.group(1)
+    else:
+        issue_number = issue_input
+
+    if not issue_number or not issue_number.isdigit():
+        await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
+        return
+
+    # Get repo from env or use default
+    repo = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+    # Optional assignee argument: `/assign 5 copilot` or `/assign 5 alice`
+    assignee = "@me"
+    if len(context.args) > 1:
+        raw_assignee = context.args[1]
+        if raw_assignee.lower() == "copilot":
+            assignee = os.getenv("GITHUB_COPILOT_USER", "copilot")
+        else:
+            assignee = raw_assignee
+    
+    # Assign using gh CLI
+    msg = await update.message.reply_text(f"🔄 Assigning issue #{issue_number}...")
+    
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "edit", issue_number, "--repo", repo, "--add-assignee", assignee],
+            check=True,
+            text=True,
+            capture_output=True
+        )
+        display_assignee = assignee
+        if display_assignee == "@me":
+            display_assignee = "you (@me)"
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"✅ Issue #{issue_number} assigned to {display_assignee}!\n\nhttps://github.com/{repo}/issues/{issue_number}",
+            parse_mode='Markdown'
+        )
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if e.stderr else "Unknown error"
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"❌ Failed to assign issue #{issue_number}\n\nError: {error_msg}"
+        )
+    except FileNotFoundError:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="❌ Error: `gh` CLI not found on server."
+        )
+
+
+async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Requests Copilot agent implementation for an issue (approval workflow).
+
+    Adds an `agent:requested` label and notifies `@ProjectLead` with a comment
+    so they can approve (add `agent:approved`) or click "Code with agent mode".
+    """
+    logger.info(f"Implement requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Usage: `/implement <issue#>`\n\nExamples:\n  `/implement 5`\n  `/implement #5`\n  `/implement https://github.com/Ghabs95/agents/issues/5`",
+            parse_mode='Markdown'
+        )
+        return
+
+    issue_input = context.args[0]
+    issue_number = None
+    if issue_input.startswith("#"):
+        issue_number = issue_input[1:]
+    elif issue_input.startswith("http"):
+        match = re.search(r'/issues/(\d+)', issue_input)
+        if match:
+            issue_number = match.group(1)
+    else:
+        issue_number = issue_input
+
+    if not issue_number or not issue_number.isdigit():
+        await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
+        return
+
+    repo = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+
+    msg = await update.message.reply_text(f"🔔 Requesting Copilot implementation for issue #{issue_number}...")
+
+    try:
+        # Create the label if missing (ignore errors)
+        subprocess.run(["gh", "label", "create", "agent:requested", "--repo", repo, "--color", "E6E6FA", "--description", "Requested Copilot implementation"], check=False, text=True, capture_output=True)
+
+        # Add the request label
+        subprocess.run(["gh", "issue", "edit", issue_number, "--repo", repo, "--add-label", "agent:requested"], check=True, text=True, capture_output=True)
+
+        comment = (
+            f"@ProjectLead — Copilot implementation has been requested via Telegram.\n\n"
+            f"Please review the issue and either click 'Code with agent mode' in the GitHub UI or add the label `agent:approved` to start implementation.\n\n"
+            f"Issue: https://github.com/{repo}/issues/{issue_number}"
+        )
+
+        subprocess.run(["gh", "issue", "comment", issue_number, "--repo", repo, "--body", comment], check=True, text=True, capture_output=True)
+
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"✅ Requested implementation for issue #{issue_number}. ProjectLead has been notified.\n\nhttps://github.com/{repo}/issues/{issue_number}",
+            parse_mode='Markdown'
+        )
+    except subprocess.CalledProcessError as e:
+        err = e.stderr if e.stderr else str(e)
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"❌ Failed to request implementation for issue #{issue_number}.\n\nError: {err}"
+        )
+    except FileNotFoundError:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="❌ Error: `gh` CLI not found on server."
+        )
+
+
+async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Augments an issue with Copilot-friendly instructions and acceptance criteria."""
+    logger.info(f"Prepare requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ Usage: `/prepare <issue#>`\n\nExamples:\n  `/prepare 5`\n  `/prepare #5`\n  `/prepare https://github.com/Ghabs95/agents/issues/5`",
+            parse_mode='Markdown'
+        )
+        return
+
+    issue_input = context.args[0]
+    issue_number = None
+    if issue_input.startswith("#"):
+        issue_number = issue_input[1:]
+    elif issue_input.startswith("http"):
+        match = re.search(r'/issues/(\d+)', issue_input)
+        if match:
+            issue_number = match.group(1)
+    else:
+        issue_number = issue_input
+
+    if not issue_number or not issue_number.isdigit():
+        await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
+        return
+
+    repo = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+
+    msg = await update.message.reply_text(f"🔧 Preparing issue #{issue_number} for Copilot...")
+
+    try:
+        # Fetch current issue body and title
+        result = subprocess.run(["gh", "issue", "view", issue_number, "--repo", repo, "--json", "body,title"], check=True, text=True, capture_output=True)
+        data = json.loads(result.stdout)
+        body = data.get("body", "")
+        title = data.get("title", "")
+
+        # Extract helpful metadata if present
+        branch_match = re.search(r'Target Branch:\s*`([^`]+)`', body)
+        taskfile_match = re.search(r'Task File:\s*`([^`]+)`', body)
+        branch_name = branch_match.group(1) if branch_match else "<create-branch>"
+        task_file = taskfile_match.group(1) if taskfile_match else None
+
+        copilot_block = """
+## Copilot Instructions
+
+- Follow existing repository style and tests.
+- Create a branch: `{branch}` and open a PR against the appropriate base branch.
+- Include unit tests or update existing tests when applicable.
+- Keep changes minimal and focused; reference the task file if present.
+""".format(branch=branch_name)
+
+        if task_file:
+            copilot_block += f"\n**Suggested files to modify:** `{task_file}`\n"
+
+        copilot_block += "\n**Acceptance Criteria**\n- Add concise acceptance criteria here (one per line).\n"
+
+        new_body = body + "\n\n---\n\n" + copilot_block
+
+        # Update the issue body
+        subprocess.run(["gh", "issue", "edit", issue_number, "--repo", repo, "--body", new_body], check=True, text=True, capture_output=True)
+
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"✅ Prepared issue #{issue_number} for Copilot. You can now click 'Code with agent mode' in GitHub or ask ProjectLead to approve.\n\nhttps://github.com/{repo}/issues/{issue_number}",
+            parse_mode='Markdown'
+        )
+    except subprocess.CalledProcessError as e:
+        err = e.stderr if e.stderr else str(e)
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"❌ Failed to prepare issue #{issue_number}.\n\nError: {err}"
+        )
+    except FileNotFoundError:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="❌ Error: `gh` CLI not found on server."
+        )
+
+
 # --- MAIN ---
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Register commands on startup (Telegram client menu)
+    app.post_init = on_startup
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("new", start_selection)],
@@ -272,9 +640,15 @@ if __name__ == '__main__':
     )
 
     app.add_handler(conv_handler)
-    app.add_handler(CommandHandler(["help", "start"], help_handler))
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("status", status_handler))
+    app.add_handler(CommandHandler("active", active_handler))
+    app.add_handler(CommandHandler("assign", assign_handler))
+    app.add_handler(CommandHandler("implement", implement_handler))
+    app.add_handler(CommandHandler("prepare", prepare_handler))
     # Exclude commands from the auto-router catch-all
     app.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & (~filters.COMMAND), hands_free_handler))
 
     print("Nexus (Google Edition) Online...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)

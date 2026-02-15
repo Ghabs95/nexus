@@ -92,7 +92,7 @@ def get_sop_tier(task_type):
         return "full", SOP_FULL, "workflow:full"
 
 
-def create_github_issue(title, body, project, workflow_label, task_type):
+def create_github_issue(title, body, project, workflow_label, task_type, tier_name):
     """Creates a GitHub Issue in the agents repo with SOP checklist."""
     type_label = f"type:{task_type}"
     project_label = f"project:{project}"
@@ -104,6 +104,11 @@ def create_github_issue(title, body, project, workflow_label, task_type):
         "--body", body,
         "--label", f"{project_label},{type_label},{workflow_label}"
     ]
+
+    # Auto-assign copilot for fast-track tasks
+    if tier_name == "fast-track":
+        cmd.extend(["--assignee", "@me"])  # Assigns to the authenticated user (bot runner)
+        logger.info("🤖 Auto-assigning to Copilot (fast-track)")
 
     try:
         result = subprocess.run(cmd, check=True, text=True, capture_output=True)
@@ -259,7 +264,8 @@ def process_file(filepath):
             body=issue_body,
             project=project_name,
             workflow_label=workflow_label,
-            task_type=task_type
+            task_type=task_type,
+            tier_name=tier_name
         )
 
         if issue_url:

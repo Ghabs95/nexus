@@ -7,6 +7,8 @@ After=network.target
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/git/ghabs/nexus
+# Include virtualenv and system paths so `gh` and other system binaries are available
+Environment="PATH=/home/ubuntu/git/ghabs/nexus/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python src/inbox_processor.py
 Restart=always
 RestartSec=10
