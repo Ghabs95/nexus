@@ -64,3 +64,6 @@ htmlcov/
 # Misc
 .cache/
 *.pid
+
+# Runtime Data
+data/

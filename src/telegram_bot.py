@@ -50,7 +50,8 @@ if not ALLOWED_USER_ID:
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # --- TRACKING ---
-TRACKED_ISSUES_FILE = "tracked_issues.json"
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+TRACKED_ISSUES_FILE = os.path.join(DATA_DIR, "tracked_issues.json")
 GITHUB_REPO = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
 
 
@@ -68,6 +69,8 @@ def load_tracked_issues():
 def save_tracked_issues(data):
     """Save tracked issues to file."""
     try:
+        # Ensure data directory exists
+        os.makedirs(DATA_DIR, exist_ok=True)
         with open(TRACKED_ISSUES_FILE, "w") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
@@ -406,7 +409,8 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 1. Transcribe the text.
                 2. Map it to one of these keys: {list(PROJECTS.keys())}.
                 3. Classify type as one of: {list(TYPES.keys())}.
-                4. Return JSON: {{"project": "key", "type": "type_key", "text": "transcription"}}
+                4. Generate a concise issue name (3-6 words, kebab-case, no project name).
+                5. Return JSON: {{"project": "key", "type": "type_key", "text": "transcription", "issue_name": "issue-name-here"}}
                 """,
                 audio_file
             ]
@@ -424,7 +428,8 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             contents=f"""
                 1. Map this text to one of these keys: {list(PROJECTS.keys())}.
                 2. Classify type as one of: {list(TYPES.keys())}.
-                3. Return JSON: {{"project": "key", "type": "type_key", "text": "{text_input}"}}
+                3. Generate a concise issue name (3-6 words, kebab-case, no project name).
+                4. Return JSON: {{"project": "key", "type": "type_key", "text": "{text_input}", "issue_name": "issue-name-here"}}
                 Input: {text_input}
             """
         )
@@ -435,6 +440,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         project = result.get("project", "inbox")
         task_type = result.get("type", "feature")
         content = result.get("text", "")
+        issue_name = result.get("issue_name", "")
     except:
         await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=status_msg.message_id,
                                             text="⚠️ JSON Error")
@@ -447,7 +453,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     with open(os.path.join(target_dir, filename), "w") as f:
         f.write(
-            f"# {TYPES.get(task_type, 'Task')}\n**Project:** {PROJECTS.get(project, project)}\n**Type:** {task_type}\n**Status:** Pending\n\n{content}")
+            f"# {TYPES.get(task_type, 'Task')}\n**Project:** {PROJECTS.get(project, project)}\n**Type:** {task_type}\n**Issue Name:** {issue_name}\n**Status:** Pending\n\n{content}")
 
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
@@ -499,14 +505,32 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = update.message.text
 
+    # Generate issue name with Gemini
+    issue_name = ""
+    try:
+        response = await client.aio.models.generate_content(
+            model=GOOGLE_AI_MODEL,
+            contents=f"""Generate a concise issue name (3-6 words, kebab-case) for this task.
+Task: {text[:300]}
+Project: {PROJECTS.get(project)}
+Type: {TYPES.get(task_type)}
+
+Return only the issue name, nothing else."""
+        )
+        issue_name = response.text.strip().strip('"`\'')
+    except Exception as e:
+        logger.warning(f"Failed to generate issue name: {e}")
+        issue_name = ""
+
     # Write File
     target_dir = os.path.join(BASE_DIR, project, ".github", "inbox")
     os.makedirs(target_dir, exist_ok=True)
     filename = f"{task_type}_{update.message.message_id}.md"
 
     with open(os.path.join(target_dir, filename), "w") as f:
+        issue_name_line = f"**Issue Name:** {issue_name}\n" if issue_name else ""
         f.write(
-            f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Type:** {task_type}\n**Status:** Pending\n\n{text}")
+            f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Type:** {task_type}\n{issue_name_line}**Status:** Pending\n\n{text}")
 
     await update.message.reply_text(f"✅ Saved to `{project}`.")
     return ConversationHandler.END
@@ -961,27 +985,49 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if issue_logs:
         issue_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         latest = issue_logs[0]
+        logger.info(f"Reading log file: {latest}")
         try:
             with open(latest, "r") as f:
                 lines = f.readlines()[-50:]
-            timeline += f"- [{os.path.basename(latest)}]\n"
+            logger.info(f"Read {len(lines)} lines from log file")
+            timeline += f"\n**{os.path.basename(latest)}**\n"
             for line in lines:
-                timeline += f"  {line.rstrip()}\n"
+                timeline += f"{line.rstrip()}\n"
         except Exception as e:
-            timeline += f"- Failed to read {os.path.basename(latest)}: {e}\n"
+            logger.error(f"Error reading log file: {e}", exc_info=True)
+            timeline += f"\n❌ Failed to read {os.path.basename(latest)}: {e}\n"
     else:
         latest_tail = read_latest_log_tail(task_file, max_lines=50)
         if latest_tail:
+            timeline += "\nLatest Task Logs:\n"
             for log in latest_tail:
-                timeline += f"- {log}\n"
+                timeline += f"{log}\n"
         else:
-            timeline += "- No task logs found.\n"
+            timeline += "\n- No task logs found.\n"
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=msg.message_id,
-        text=timeline
-    )
+    # Telegram message limit safety: send in chunks
+    max_len = 3500
+    if len(timeline) <= max_len:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=timeline
+        )
+    else:
+        # Split into chunks
+        chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
+        for idx, chunk in enumerate(chunks):
+            if idx == 0:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=chunk
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunk
+                )
 
 
 async def logsfull_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1247,6 +1293,9 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=(
                 f"✅ Agent continued for issue #{issue_num}. PID: {pid}\n\n"
                 f"Prompt: {continuation_prompt}\n\n"
+                f"ℹ️ **Note:** The agent will first check if the workflow has already progressed.\n"
+                f"If another agent is already handling the next step, this agent will exit gracefully.\n"
+                f"Use `/continue` only when an agent is truly stuck mid-step.\n\n"
                 f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
             )
         )
