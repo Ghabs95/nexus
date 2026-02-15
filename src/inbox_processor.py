@@ -238,7 +238,16 @@ def process_file(filepath):
         shutil.move(filepath, new_filepath)
 
         # Create GitHub Issue with SOP checklist
-        issue_title = f"[{project_name}] {slug}"
+        # Build type prefix for issue title
+        type_prefixes = {
+            "feature": "feat",
+            "bug": "fix",
+            "hotfix": "hotfix",
+            "chore": "chore",
+            "refactor": "refactor",
+        }
+        prefix = type_prefixes.get(task_type, task_type)
+        issue_title = f"[{project_name}] {prefix}/{slug}"
         issue_body = f"""## Task
 {content}
 
