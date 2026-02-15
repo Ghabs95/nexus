@@ -145,7 +145,7 @@ async def process_audio_with_gemini(voice_file_id, context):
 
     # 2. Upload & Transcribe (Gemini supports .ogg)
     logger.info("Uploading audio to Gemini...")
-    audio_file = await client.aio.files.upload(path="temp_voice.ogg")
+    audio_file = await client.aio.files.upload(file="temp_voice.ogg")
 
     # Prompt just for transcription
     logger.info("Starting transcription...")
@@ -186,7 +186,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Multimodal Prompt: "Listen and Route"
         logger.info("Uploading audio for auto-routing...")
-        audio_file = await client.aio.files.upload(path="temp_voice.ogg")
+        audio_file = await client.aio.files.upload(file="temp_voice.ogg")
 
         response = await client.aio.models.generate_content(
             model=GOOGLE_AI_MODEL,

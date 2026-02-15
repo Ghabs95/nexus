@@ -62,29 +62,29 @@ def slugify(text):
 
 # SOP Checklist Templates
 SOP_FULL = """## SOP Checklist — New Feature
-- [ ] 1. **Vision & Scope** — @Ghabs: Founder's Check
-- [ ] 2. **Technical Feasibility** — @Atlas: HOW and WHEN
-- [ ] 3. **Architecture Design** — @Architect: ADR + breakdown
-- [ ] 4. **UX Design** — @ProductDesigner: Wireframes
+- [ ] 1. **Vision & Scope** — `Ghabs`: Founder's Check
+- [ ] 2. **Technical Feasibility** — `Atlas`: HOW and WHEN
+- [ ] 3. **Architecture Design** — `Architect`: ADR + breakdown
+- [ ] 4. **UX Design** — `ProductDesigner`: Wireframes
 - [ ] 5. **Implementation** — Tier 2 Lead: Code + tests
-- [ ] 6. **Quality Gate** — @QAGuard: Coverage check
-- [ ] 7. **Compliance Gate** — @Privacy: PIA (if user data)
-- [ ] 8. **Deployment** — @OpsCommander: Production
-- [ ] 9. **Documentation** — @Scribe: Changelog + docs"""
+- [ ] 6. **Quality Gate** — `QAGuard`: Coverage check
+- [ ] 7. **Compliance Gate** — `Privacy`: PIA (if user data)
+- [ ] 8. **Deployment** — `OpsCommander`: Production
+- [ ] 9. **Documentation** — `Scribe`: Changelog + docs"""
 
 SOP_SHORTENED = """## SOP Checklist — Bug Fix
-- [ ] 1. **Triage** — @ProjectLead: Severity + routing
+- [ ] 1. **Triage** — `ProjectLead`: Severity + routing
 - [ ] 2. **Root Cause Analysis** — Tier 2 Lead
 - [ ] 3. **Fix** — Tier 2 Lead: Code + regression test
-- [ ] 4. **Verify** — @QAGuard: Regression suite
-- [ ] 5. **Deploy** — @OpsCommander
-- [ ] 6. **Document** — @Scribe: Changelog"""
+- [ ] 4. **Verify** — `QAGuard`: Regression suite
+- [ ] 5. **Deploy** — `OpsCommander`
+- [ ] 6. **Document** — `Scribe`: Changelog"""
 
 SOP_FAST_TRACK = """## SOP Checklist — Fast-Track
-- [ ] 1. **Triage** — @ProjectLead: Route to repo
-- [ ] 2. **Implementation** — @copilot: Code + tests
-- [ ] 3. **Verify** — @QAGuard: Quick check
-- [ ] 4. **Deploy** — @OpsCommander"""
+- [ ] 1. **Triage** — `ProjectLead`: Route to repo
+- [ ] 2. **Implementation** — Copilot: Code + tests
+- [ ] 3. **Verify** — `QAGuard`: Quick check
+- [ ] 4. **Deploy** — `OpsCommander`"""
 
 
 def get_sop_tier(task_type):
@@ -168,12 +168,20 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
     logger.info(f"   Workspace: {workspace_dir}")
     logger.info(f"   Workflow: /{workflow_name} (tier: {tier_name})")
 
+    # Log copilot output to a file for debugging
+    log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"copilot_{timestamp}.log")
+    logger.info(f"   Log file: {log_path}")
+
     try:
+        log_file = open(log_path, "w")
         process = subprocess.Popen(
             cmd,
             cwd=agents_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=log_file,
+            stderr=subprocess.STDOUT
         )
         logger.info(f"🚀 Copilot CLI launched (PID: {process.pid})")
         return process.pid
