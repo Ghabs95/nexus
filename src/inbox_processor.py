@@ -29,6 +29,35 @@ auto_chained_agents = {}  # Track issue -> log_file to avoid re-chaining same co
 # Initialize Gemini client if API key is available
 gemini_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
 
+# Data directory for persistent state
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+LAUNCHED_AGENTS_FILE = os.path.join(DATA_DIR, "launched_agents.json")
+
+def load_launched_agents():
+    """Load recently launched agents from persistent storage."""
+    if os.path.exists(LAUNCHED_AGENTS_FILE):
+        try:
+            with open(LAUNCHED_AGENTS_FILE) as f:
+                data = json.load(f)
+                # Clean up entries older than 5 minutes
+                cutoff = time.time() - 300
+                return {k: v for k, v in data.items() if v.get('timestamp', 0) > cutoff}
+        except Exception as e:
+            logger.error(f"Failed to load launched agents: {e}")
+    return {}
+
+def save_launched_agents(data):
+    """Save launched agents to persistent storage."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(LAUNCHED_AGENTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save launched agents: {e}")
+
+# Load persisted state
+launched_agents_tracker = load_launched_agents()
+
 # Project Configuration
 # Each project maps to its agents directory (for Copilot CLI) and workspace (for file operations).
 # The workspace is the parent folder containing the actual sub-repos.
@@ -362,15 +391,36 @@ def check_completed_agents():
                             if not next_agent:
                                 continue  # No agent mentioned, skip this issue
                             
-                            # Check if an agent is already running for this issue
+                            # CRITICAL: Check for duplicate launches
+                            # Check 1: Running processes
                             check_result = subprocess.run(
                                 ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
                                 text=True, capture_output=True
                             )
                             if check_result.stdout:
-                                logger.debug(f"Agent already running for issue #{issue_num}, skipping auto-chain")
-                                auto_chained_agents[comment_chain_key] = True  # Mark as processed
+                                logger.info(f"⏭️ Agent already running for issue #{issue_num} (PID found), skipping auto-chain")
+                                auto_chained_agents[comment_chain_key] = True
                                 continue
+                            
+                            # Check 2: Recently launched (persistent tracker)
+                            launched_agents_tracker = load_launched_agents()  # Reload to catch other process launches
+                            if issue_num in launched_agents_tracker:
+                                last_launch = launched_agents_tracker[issue_num]
+                                age = time.time() - last_launch.get('timestamp', 0)
+                                if age < 120:  # Within last 2 minutes
+                                    logger.info(f"⏭️ Agent recently launched for issue #{issue_num} ({age:.0f}s ago), skipping duplicate")
+                                    auto_chained_agents[comment_chain_key] = True
+                                    continue
+                            
+                            # Check 3: Recent log files (within last 2 minutes)
+                            recent_logs = glob.glob(os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", f"copilot_{issue_num}_*.log"), recursive=True)
+                            if recent_logs:
+                                recent_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                                latest_log_age = time.time() - os.path.getmtime(recent_logs[0])
+                                if latest_log_age < 120:  # Within last 2 minutes
+                                    logger.info(f"⏭️ Recent log file for issue #{issue_num} ({latest_log_age:.0f}s old), skipping duplicate")
+                                    auto_chained_agents[comment_chain_key] = True
+                                    continue
                             
                             # Launch the agent
                             try:
@@ -447,6 +497,14 @@ def check_completed_agents():
                                 if pid:
                                     logger.info(f"🔗 Auto-chained from GitHub comment to @{next_agent} for issue #{issue_num} (PID: {pid})")
                                     auto_chained_agents[comment_chain_key] = True
+                                    
+                                    # Track launch in persistent storage
+                                    launched_agents_tracker[issue_num] = {
+                                        'pid': pid,
+                                        'timestamp': time.time(),
+                                        'agent': next_agent
+                                    }
+                                    save_launched_agents(launched_agents_tracker)
                                     
                                     # Send notification
                                     message = (
@@ -574,15 +632,26 @@ def check_completed_agents():
                         agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
                         workspace_abs = os.path.join(BASE_DIR, config["workspace"])
                         
-                        # Check if an agent is already running for this issue (prevent duplicate launches)
+                        # CRITICAL: Check for duplicate launches
+                        # Check 1: Running processes
                         check_running = subprocess.run(
                             ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
                             text=True, capture_output=True
                         )
                         if check_running.stdout:
-                            logger.debug(f"Agent already running for issue #{issue_num}, skipping auto-chain from log")
-                            auto_chained_agents[chain_key] = True  # Mark as processed
+                            logger.info(f"⏭️ Agent already running for issue #{issue_num} (PID found), skipping auto-chain from log")
+                            auto_chained_agents[chain_key] = True
                             continue
+                        
+                        # Check 2: Recently launched (persistent tracker)
+                        launched_agents_tracker = load_launched_agents()  # Reload
+                        if issue_num in launched_agents_tracker:
+                            last_launch = launched_agents_tracker[issue_num]
+                            age = time.time() - last_launch.get('timestamp', 0)
+                            if age < 120:  # Within last 2 minutes
+                                logger.info(f"⏭️ Agent recently launched for issue #{issue_num} ({age:.0f}s ago), skipping duplicate from log")
+                                auto_chained_agents[chain_key] = True
+                                continue
                         
                         # Launch next agent with clear instructions
                         continuation_prompt = (
@@ -616,6 +685,14 @@ def check_completed_agents():
                         if pid:
                             logger.info(f"🔗 Auto-chained to @{next_agent} for issue #{issue_num} (PID: {pid})")
                             auto_chained_agents[chain_key] = True
+                            
+                            # Track launch in persistent storage
+                            launched_agents_tracker[issue_num] = {
+                                'pid': pid,
+                                'timestamp': time.time(),
+                                'agent': next_agent
+                            }
+                            save_launched_agents(launched_agents_tracker)
                             
                             # Send notification
                             message = (
@@ -672,8 +749,17 @@ SOP_FAST_TRACK = """## SOP Checklist — Fast-Track
 
 
 def get_sop_tier(task_type):
-    """Returns (tier_name, sop_template, workflow_label) based on task type."""
-    if any(t in task_type for t in ["hotfix", "chore"]):
+    """Returns (tier_name, sop_template, workflow_label) based on task type.
+    
+    Workflow mapping:
+    - hotfix, chore, feature-simple, improvement-simple → fast-track (4 steps): 
+        Triage, Implementation, Verify, Deploy
+    - bug → shortened (6 steps): 
+        Triage, RCA, Fix, Verify, Deploy, Doc
+    - feature, improvement, release → full (9 steps): 
+        Vision, Feasibility, Architecture, UX, Implementation, QA, Compliance, Deploy, Doc
+    """
+    if any(t in task_type for t in ["hotfix", "chore", "simple"]):
         return "fast-track", SOP_FAST_TRACK, "workflow:fast-track"
     elif "bug" in task_type:
         return "shortened", SOP_SHORTENED, "workflow:shortened"
@@ -747,14 +833,30 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
                 f"Issue: {issue_url}\n"
                 f"Tier: {tier_name}\n"
                 f"Workflow: /{workflow_name}\n\n"
-                f"Review the previous work in the GitHub comments and task file, then complete your step.\n"
+                f"Review the previous work in the GitHub comments and task file, then complete your step.\n\n"
+                f"**GIT WORKFLOW (CRITICAL):**\n"
+                f"1. Check the issue body for **Target Branch** field (e.g., `feat/surveyor-plan`)\n"
+                f"2. Identify the correct sub-repo within the workspace (e.g., casit-be, casit-app, casit-omi)\n"
+                f"3. In that sub-repo: \n"
+                f"   - For feat/fix/chore: create branch from `develop`: `git checkout develop && git pull && git checkout -b <branch-name>`\n"
+                f"   - For hotfix: create branch from `main`: `git checkout main && git pull && git checkout -b <branch-name>`\n"
+                f"4. Make your changes and commit with descriptive messages\n"
+                f"5. Push the branch: `git push -u origin <branch-name>`\n"
+                f"6. Include branch name in your GitHub comment (e.g., 'Pushed to feat/surveyor-plan in casit-be')\n\n"
+                f"⛔ **GIT SAFETY RULES (STRICT):**\n"
+                f"❌ NEVER push to protected branches: `main`, `develop`, `master`, `test`, `staging`, `production`\n"
+                f"❌ NEVER delete any branch: No `git branch -d` or `git push --delete`\n"
+                f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
+                f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
+                f"⚠️  Violating these rules can break production and cause team disruption\n\n"
                 f"When you finish your work:\n"
-                f"1. Update the task file with your results\n"
-                f"2. Post a GitHub comment summarizing your work\n"
-                f"3. END YOUR COMMENT with a clear completion marker:\n\n"
+                f"1. Commit and push all changes to the target branch\n"
+                f"2. Update the task file with your results\n"
+                f"3. Post a GitHub comment summarizing your work and confirming the push\n"
+                f"4. END YOUR COMMENT with a clear completion marker:\n\n"
                 f"   **Required format:** 'Ready for @NextAgentName'\n"
                 f"   Example: 'Ready for @ProductDesigner to begin UX design'\n\n"
-                f"4. Exit when done - DO NOT attempt to invoke the next agent\n\n"
+                f"5. Exit when done - DO NOT attempt to invoke the next agent\n\n"
                 f"The system will automatically detect your completion and launch the next agent.\n\n"
                 f"Task context:\n{task_content}"
             )
@@ -772,9 +874,26 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
                 f"3. If your step is already complete with a completion marker, simply EXIT - do NOT continue\n"
                 f"4. ONLY proceed if you are actually stuck DURING your step (incomplete work)\n\n"
                 f"{base_prompt}\n\n"
+                f"**GIT WORKFLOW (CRITICAL):**\n"
+                f"1. Check the issue body for **Target Branch** field (e.g., `feat/surveyor-plan`)\n"
+                f"2. Identify the correct sub-repo within the workspace (e.g., casit-be, casit-app, casit-omi)\n"
+                f"3. In that sub-repo: \n"
+                f"   - For feat/fix/chore: create from `develop`: `git checkout develop && git pull && git checkout -b <branch-name>`\n"
+                f"   - For hotfix: create from `main`: `git checkout main && git pull && git checkout -b <branch-name>`\n"
+                f"   - If branch exists: `git checkout <branch-name> && git pull`\n"
+                f"4. Make your changes and commit with descriptive messages\n"
+                f"5. Push the branch: `git push -u origin <branch-name>`\n"
+                f"6. Include branch name in your GitHub comment\n\n"
+                f"⛔ **GIT SAFETY RULES (STRICT):**\n"
+                f"❌ NEVER push to protected branches: `main`, `develop`, `master`, `test`, `staging`, `production`\n"
+                f"❌ NEVER delete any branch: No `git branch -d` or `git push --delete`\n"
+                f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
+                f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
+                f"⚠️  Violating these rules can break production and cause team disruption\n\n"
                 f"If you do proceed:\n"
                 f"- Review your previous work (check logs, session state, and git branches)\n"
                 f"- Complete ONLY your step\n"
+                f"- Commit and push all changes\n"
                 f"- Post completion marker: 'Ready for `@NextAgent`'\n"
                 f"- EXIT immediately\n\n"
                 f"When you complete your step, end your GitHub comment with:\n"
@@ -789,19 +908,34 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
             f"Tier: {tier_name}\n"
             f"Workflow: /{workflow_name}\n\n"
             f"**YOUR JOB:** Triage and route only. DO NOT try to implement or invoke other agents.\n\n"
+            f"**GIT WORKFLOW INSTRUCTION (for downstream agents):**\n"
+            f"The issue body contains **Target Branch** field (e.g., `feat/surveyor-plan`).\n"
+            f"When you route to implementation agents (@BackendLead, @MobileLead, etc.), remind them:\n"
+            f"1. Work in the appropriate sub-repo (casit-be, casit-app, casit-omi, etc.)\n"
+            f"2. Create branch from correct base:\n"
+            f"   - feat/fix/chore/refactor/docs branches: from `develop`\n"
+            f"   - hotfix branches: from `main`\n"
+            f"3. Commit and push all changes to that branch\n"
+            f"4. Mention the branch and push status in GitHub comments\n"
+            f"5. ⛔ SAFETY: NEVER push to protected branches (main/develop/master/test/staging/production)\n"
+            f"6. ⛔ SAFETY: NEVER delete branches\n"
+            f"7. ✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n\n"
             f"REQUIRED ACTIONS:\n"
             f"1. Analyze the task requirements\n"
-            f"2. Update the task file with triage details\n"
-            f"3. Post a GitHub comment showing:\n"
+            f"2. Identify which sub-repo(s) are affected\n"
+            f"3. Update the task file with triage details\n"
+            f"4. Post a GitHub comment showing:\n"
             f"   - Task severity\n"
+            f"   - Target sub-repo(s)\n"
+            f"   - Target branch (from issue body)\n"
             f"   - Which agent should handle it next\n"
             f"   - Use format: 'Ready for @NextAgent' (e.g., 'Ready for @Atlas')\n"
-            f"4. **EXIT** - The system will auto-route to the next agent\n\n"
+            f"5. **EXIT** - The system will auto-route to the next agent\n\n"
             f"**DO NOT:**\n"
             f"❌ Read other agent configuration files\n"
             f"❌ Use any 'invoke', 'task', or 'run tool' to start other agents\n"
             f"❌ Try to implement the feature yourself\n"
-            f"❌ Make unnecessary commits or branch changes\n\n"
+            f"❌ Make unnecessary commits or branch changes (you're just triaging)\n\n"
             f"**REQUIRED COMPLETION MARKER:**\n"
             f"Your final comment MUST include: 'Ready for @NextAgentName'\n"
             f"Example: 'Ready for @Atlas to assess technical feasibility'\n\n"
@@ -947,13 +1081,20 @@ def process_file(filepath):
         # Build type prefix for issue title
         type_prefixes = {
             "feature": "feat",
+            "feature-simple": "feat",
             "bug": "fix",
             "hotfix": "hotfix",
             "chore": "chore",
             "refactor": "refactor",
+            "improvement": "feat",
+            "improvement-simple": "feat",
         }
-        prefix = type_prefixes.get(task_type, task_type)
+        prefix = type_prefixes.get(task_type, task_type.split("-")[0] if "-" in task_type else task_type)
         issue_title = f"[{project_name}] {prefix}/{slug}"
+        
+        # Determine target branch name
+        branch_name = f"{prefix}/{slug}"
+        
         issue_body = f"""## Task
 {content}
 
@@ -965,6 +1106,7 @@ def process_file(filepath):
 
 **Project:** {project_name}
 **Tier:** {tier_name}
+**Target Branch:** `{branch_name}`
 **Task File:** `{new_filepath}`"""
 
         issue_url = create_github_issue(

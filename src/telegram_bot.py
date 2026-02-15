@@ -243,12 +243,14 @@ PROJECTS = {
     "nexus": "General Inbox (Nexus)"
 }
 TYPES = {
-    "feature": "✨ Feature",
-    "bug": "🩹 Bug Fix",
-    "hotfix": "🔥 Hotfix",
-    "release": "📦 Release",
-    "chore": "🧹 Chore",
-    "improvement": "🚀 Improvement"
+    "feature": "✨ Feature (9-step workflow)",
+    "feature-simple": "✨ Simple Feature (4-step fast-track)",
+    "bug": "🩹 Bug Fix (6-step workflow)",
+    "hotfix": "🔥 Hotfix (4-step fast-track)",
+    "release": "📦 Release (9-step workflow)",
+    "chore": "🧹 Chore (4-step fast-track)",
+    "improvement": "🚀 Improvement (9-step workflow)",
+    "improvement-simple": "🚀 Simple Improvement (4-step fast-track)"
 }
 
 # --- STATES ---
@@ -274,6 +276,11 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Just send a **Voice Note** or **Text Message** directly. "
         "Gemini will automatically transcribe, route, and save the task "
         "based on its content!\n\n"
+        "📋 **Workflow Tiers:**\n"
+        "• 🔥 Hotfix/Chore → 4-step fast-track (quick fixes)\n"
+        "• 🩹 Bug → 6-step shortened (triage → fix → deploy)\n"
+        "• ✨ Feature → 9-step full (design → implement → deploy)\n"
+        "• ✨ Simple Feature → 4-step fast-track (skip design for easy features)\n\n"
         "📊 **Monitoring & Tracking:**\n"
         "/status - View pending tasks in inbox\n"
         "/active - View tasks currently being worked on\n"
@@ -306,8 +313,12 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         "👋 Welcome to Nexus (Google Edition)!\n\n"
         "Use the menu buttons to create tasks or monitor queues.\n"
-        "For commands that need parameters, type / and select the command, then add the parameters before sending.\n"
-        "Send voice or text to create a task automatically."
+        "Send voice or text to create a task automatically.\n\n"
+        "💡 **Workflow Tiers:**\n"
+        "• 🔥 Hotfix/Chore/Simple Feature → 4 steps (fast)\n"
+        "• 🩹 Bug → 6 steps (moderate)\n"
+        "• ✨ Feature/Improvement → 9 steps (full)\n\n"
+        "Type /help for all commands."
     )
 
     keyboard = [
@@ -409,6 +420,10 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 1. Transcribe the text.
                 2. Map it to one of these keys: {list(PROJECTS.keys())}.
                 3. Classify type as one of: {list(TYPES.keys())}.
+                   - Use 'feature-simple' for straightforward features without UX/architecture needs
+                   - Use 'feature' for complex features needing design review
+                   - Use 'improvement-simple' for minor enhancements
+                   - Use 'improvement' for significant enhancements
                 4. Generate a concise issue name (3-6 words, kebab-case, no project name).
                 5. Return JSON: {{"project": "key", "type": "type_key", "text": "transcription", "issue_name": "issue-name-here"}}
                 """,
@@ -428,6 +443,10 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             contents=f"""
                 1. Map this text to one of these keys: {list(PROJECTS.keys())}.
                 2. Classify type as one of: {list(TYPES.keys())}.
+                   - Use 'feature-simple' for straightforward features without UX/architecture needs
+                   - Use 'feature' for complex features needing design review
+                   - Use 'improvement-simple' for minor enhancements
+                   - Use 'improvement' for significant enhancements
                 3. Generate a concise issue name (3-6 words, kebab-case, no project name).
                 4. Return JSON: {{"project": "key", "type": "type_key", "text": "{text_input}", "issue_name": "issue-name-here"}}
                 Input: {text_input}
