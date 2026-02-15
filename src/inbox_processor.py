@@ -32,6 +32,7 @@ gemini_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
 # Data directory for persistent state
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 LAUNCHED_AGENTS_FILE = os.path.join(DATA_DIR, "launched_agents.json")
+WORKFLOW_STATE_FILE = os.path.join(DATA_DIR, "workflow_state.json")
 
 def load_launched_agents():
     """Load recently launched agents from persistent storage."""
@@ -54,6 +55,39 @@ def save_launched_agents(data):
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save launched agents: {e}")
+
+def load_workflow_state():
+    """Load workflow state (paused/stopped issues) from persistent storage."""
+    if os.path.exists(WORKFLOW_STATE_FILE):
+        try:
+            with open(WORKFLOW_STATE_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load workflow state: {e}")
+    return {}
+
+def save_workflow_state(data):
+    """Save workflow state to persistent storage."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(WORKFLOW_STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save workflow state: {e}")
+
+def set_workflow_state(issue_num, state):
+    """Set workflow state for an issue (paused, stopped, or active)."""
+    data = load_workflow_state()
+    if state == "active":
+        data.pop(str(issue_num), None)  # Remove entry to mark as active
+    else:
+        data[str(issue_num)] = {"state": state, "timestamp": time.time()}
+    save_workflow_state(data)
+
+def get_workflow_state(issue_num):
+    """Get workflow state for an issue. Returns 'active', 'paused', 'stopped', or None."""
+    data = load_workflow_state()
+    return data.get(str(issue_num), {}).get("state")
 
 # Load persisted state
 launched_agents_tracker = load_launched_agents()
@@ -352,6 +386,12 @@ def check_completed_agents():
                     if not issue_num:
                         continue
                     
+                    # Check workflow state (paused/stopped = skip auto-chain)
+                    state = get_workflow_state(issue_num)
+                    if state in ("paused", "stopped"):
+                        logger.debug(f"Skipping auto-chain for issue #{issue_num} (state: {state})")
+                        continue
+                    
                     # Check if we've already processed this issue
                     comment_chain_key = f"comment_{issue_num}"
                     if comment_chain_key in auto_chained_agents:
@@ -537,6 +577,12 @@ def check_completed_agents():
                 continue
             
             issue_num = match.group(1)
+            
+            # Check workflow state (paused/stopped = skip auto-chain)
+            state = get_workflow_state(issue_num)
+            if state in ("paused", "stopped"):
+                logger.debug(f"Skipping auto-chain for issue #{issue_num} (state: {state})")
+                continue
             
             # Skip if we've already chained from this exact log file
             chain_key = f"{issue_num}_{os.path.basename(log_file)}"

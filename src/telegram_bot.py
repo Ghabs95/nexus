@@ -293,6 +293,9 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reprocess <issue#> - Re-run agent processing\n"
         "/continue <issue#> - Check stuck agent status\n"
         "/kill <issue#> - Stop running agent process\n"
+        "/pause <issue#> - Pause auto-chaining (agents work but no auto-launch)\n"
+        "/resume <issue#> - Resume auto-chaining\n"
+        "/stop <issue#> - Stop workflow completely (closes issue, kills agent)\n"
         "/respond <issue#> <text> - Respond to agent questions\n\n"
         "🔧 **GitHub Management:**\n"
         "/assign <issue#> - Assign GitHub issue to yourself\n"
@@ -346,6 +349,9 @@ async def on_startup(application):
         BotCommand("reprocess", "Re-run agent processing"),
         BotCommand("continue", "Check stuck agent status"),
         BotCommand("kill", "Stop running agent"),
+        BotCommand("pause", "Pause auto-chaining"),
+        BotCommand("resume", "Resume auto-chaining"),
+        BotCommand("stop", "Stop workflow completely"),
         BotCommand("respond", "Respond to agent questions"),
         BotCommand("assign", "Assign an issue"),
         BotCommand("implement", "Request implementation"),
@@ -1383,6 +1389,107 @@ async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pause auto-chaining for a workflow (workflow continues but no auto-launch of next agent)."""
+    logger.info(f"Pause requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: /pause <issue#>\n\nExample: /pause 4")
+        return
+
+    issue_num = context.args[0].lstrip("#")
+    if not issue_num.isdigit():
+        await update.effective_message.reply_text("❌ Invalid issue number.")
+        return
+
+    from inbox_processor import set_workflow_state
+    set_workflow_state(issue_num, "paused")
+    
+    await update.effective_message.reply_text(
+        f"⏸️ **Workflow paused for issue #{issue_num}**\n\n"
+        f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
+        f"Use /resume {issue_num} to re-enable auto-chaining."
+    )
+
+
+async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume auto-chaining for a paused workflow."""
+    logger.info(f"Resume requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: /resume <issue#>\n\nExample: /resume 4")
+        return
+
+    issue_num = context.args[0].lstrip("#")
+    if not issue_num.isdigit():
+        await update.effective_message.reply_text("❌ Invalid issue number.")
+        return
+
+    from inbox_processor import set_workflow_state
+    set_workflow_state(issue_num, "active")
+    
+    await update.effective_message.reply_text(
+        f"▶️ **Workflow resumed for issue #{issue_num}**\n\n"
+        f"Auto-chaining is re-enabled. The next agent will be launched when the current step completes.\n"
+        f"Check /active to see current progress."
+    )
+
+
+async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop and close a workflow (marks as stopped, prevents auto-chaining and agent launches)."""
+    logger.info(f"Stop requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: /stop <issue#>\n\nExample: /stop 4")
+        return
+
+    issue_num = context.args[0].lstrip("#")
+    if not issue_num.isdigit():
+        await update.effective_message.reply_text("❌ Invalid issue number.")
+        return
+
+    from inbox_processor import set_workflow_state
+    
+    # Kill any running agent first
+    pid = find_agent_pid_for_issue(issue_num)
+    if pid:
+        try:
+            subprocess.run(["kill", "-9", str(pid)], check=True, timeout=5)
+            logger.info(f"Killed agent PID {pid} for issue #{issue_num}")
+        except Exception as e:
+            logger.error(f"Failed to kill agent: {e}")
+    
+    # Mark workflow as stopped
+    set_workflow_state(issue_num, "stopped")
+    
+    # Also close the GitHub issue
+    try:
+        subprocess.run(
+            ["gh", "issue", "close", issue_num, "--repo", GITHUB_REPO,
+             "--comment", "🛑 Workflow stopped by @Ghabs. Run /resume to re-enable."],
+            check=False, text=True, capture_output=True, timeout=10
+        )
+    except Exception as e:
+        logger.warning(f"Could not close issue: {e}")
+    
+    await update.effective_message.reply_text(
+        f"🛑 **Workflow STOPPED for issue #{issue_num}**\n\n"
+        f"• Auto-chaining disabled\n"
+        f"• Running agent killed (if any)\n"
+        f"• Issue closed on GitHub\n\n"
+        f"Use /resume {issue_num} to un-stop the workflow."
+    )
+
+
 async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View recent comments on a GitHub issue."""
     logger.info(f"Comments requested by user: {update.effective_user.id}")
@@ -1653,6 +1760,9 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("reprocess", reprocess_handler))
     app.add_handler(CommandHandler("continue", continue_handler))
     app.add_handler(CommandHandler("kill", kill_handler))
+    app.add_handler(CommandHandler("pause", pause_handler))
+    app.add_handler(CommandHandler("resume", resume_handler))
+    app.add_handler(CommandHandler("stop", stop_handler))
     app.add_handler(CommandHandler("respond", respond_handler))
     app.add_handler(CommandHandler("assign", assign_handler))
     app.add_handler(CommandHandler("implement", implement_handler))
