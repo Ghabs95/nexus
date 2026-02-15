@@ -1,4 +1,5 @@
 import glob
+import json
 import logging
 import os
 import re
@@ -13,12 +14,30 @@ BASE_DIR = os.getenv("BASE_DIR", "/home/ubuntu/git")
 GITHUB_AGENTS_REPO = os.getenv("GITHUB_AGENTS_REPO", "ghabs/agents")
 SLEEP_INTERVAL = 10
 
-# Agent Folder Mapping
-AGENT_MAPPING = {
-    "case_italia": "ghabs/agents/casit-agents",
-    "wallible": "ghabs/agents/wlbl-agents",
-    "biome": "ghabs/agents/bm-agents",
-    "nexus": "ghabs/nexus"
+# Project Configuration
+# Each project maps to its agents directory (for Copilot CLI) and workspace (for file operations).
+# The workspace is the parent folder containing the actual sub-repos.
+PROJECT_CONFIG = {
+    "case_italia": {
+        "agents_dir": "ghabs/agents/casit-agents",
+        "workspace": "case_italia",
+        "github_repo": GITHUB_AGENTS_REPO,
+    },
+    "wallible": {
+        "agents_dir": "ghabs/agents/wlbl-agents",
+        "workspace": "wallible",
+        "github_repo": GITHUB_AGENTS_REPO,
+    },
+    "biome": {
+        "agents_dir": "ghabs/agents/bm-agents",
+        "workspace": "biome",
+        "github_repo": GITHUB_AGENTS_REPO,
+    },
+    "nexus": {
+        "agents_dir": None,  # Nexus tasks are handled directly
+        "workspace": "ghabs/nexus",
+        "github_repo": "Ghabs95/nexus",
+    }
 }
 
 # Logging
@@ -31,18 +50,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("InboxProcessor")
-
-
-def run_git(cwd, command):
-    """Runs a git command in the specified directory."""
-    try:
-        result = subprocess.run(
-            command, cwd=cwd, check=True, text=True, capture_output=True
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Git error in {cwd}: {e.stderr}")
-        raise
 
 
 def slugify(text):
@@ -59,21 +66,19 @@ SOP_FULL = """## SOP Checklist — New Feature
 - [ ] 2. **Technical Feasibility** — @Atlas: HOW and WHEN
 - [ ] 3. **Architecture Design** — @Architect: ADR + breakdown
 - [ ] 4. **UX Design** — @ProductDesigner: Wireframes
-- [ ] 5. **Branching** — Tier 2 Lead: `{branch_name}` from `{base_branch}`
-- [ ] 6. **Implementation** — Tier 2 Lead: Code + tests
-- [ ] 7. **Quality Gate** — @QAGuard: Coverage check
-- [ ] 8. **Compliance Gate** — @Privacy: PIA (if user data)
-- [ ] 9. **Deployment** — @OpsCommander: Production
-- [ ] 10. **Documentation** — @Scribe: Changelog + docs"""
+- [ ] 5. **Implementation** — Tier 2 Lead: Code + tests
+- [ ] 6. **Quality Gate** — @QAGuard: Coverage check
+- [ ] 7. **Compliance Gate** — @Privacy: PIA (if user data)
+- [ ] 8. **Deployment** — @OpsCommander: Production
+- [ ] 9. **Documentation** — @Scribe: Changelog + docs"""
 
 SOP_SHORTENED = """## SOP Checklist — Bug Fix
 - [ ] 1. **Triage** — @ProjectLead: Severity + routing
 - [ ] 2. **Root Cause Analysis** — Tier 2 Lead
-- [ ] 3. **Branching** — Tier 2 Lead: `{branch_name}` from `{base_branch}`
-- [ ] 4. **Fix** — Tier 2 Lead: Code + regression test
-- [ ] 5. **Verify** — @QAGuard: Regression suite
-- [ ] 6. **Deploy** — @OpsCommander
-- [ ] 7. **Document** — @Scribe: Changelog"""
+- [ ] 3. **Fix** — Tier 2 Lead: Code + regression test
+- [ ] 4. **Verify** — @QAGuard: Regression suite
+- [ ] 5. **Deploy** — @OpsCommander
+- [ ] 6. **Document** — @Scribe: Changelog"""
 
 SOP_FAST_TRACK = """## SOP Checklist — Fast-Track
 - [ ] 1. **Triage** — @ProjectLead: Route to repo
@@ -92,23 +97,28 @@ def get_sop_tier(task_type):
         return "full", SOP_FULL, "workflow:full"
 
 
-def create_github_issue(title, body, project, workflow_label, task_type, tier_name):
-    """Creates a GitHub Issue in the agents repo with SOP checklist."""
+def get_workflow_name(tier_name):
+    """Returns the workflow slash-command name for the tier."""
+    if tier_name == "fast-track":
+        return "bug_fix"  # Fast-track follows simplified bug_fix flow
+    elif tier_name == "shortened":
+        return "bug_fix"
+    else:
+        return "new_feature"
+
+
+def create_github_issue(title, body, project, workflow_label, task_type, tier_name, github_repo):
+    """Creates a GitHub Issue in the specified repo with SOP checklist."""
     type_label = f"type:{task_type}"
     project_label = f"project:{project}"
 
     cmd = [
         "gh", "issue", "create",
-        "--repo", GITHUB_AGENTS_REPO,
+        "--repo", github_repo,
         "--title", title,
         "--body", body,
         "--label", f"{project_label},{type_label},{workflow_label}"
     ]
-
-    # Auto-assign copilot for fast-track tasks
-    if tier_name == "fast-track":
-        cmd.extend(["--assignee", "@me"])  # Assigns to the authenticated user (bot runner)
-        logger.info("🤖 Auto-assigning to Copilot (fast-track)")
 
     try:
         result = subprocess.run(cmd, check=True, text=True, capture_output=True)
@@ -123,6 +133,58 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
         return None
 
 
+def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_content):
+    """Invokes Copilot CLI on the agents directory to process the task.
+
+    Runs asynchronously (Popen) since agent execution can take several minutes.
+    The @ProjectLead agent will follow the SOP workflow to:
+    1. Triage the task
+    2. Determine the target sub-repo within the workspace
+    3. Route to the correct Tier 2 Lead for implementation
+    """
+    workflow_name = get_workflow_name(tier_name)
+
+    prompt = (
+        f"You are @ProjectLead. A new task has arrived and a GitHub issue has been created.\n\n"
+        f"Issue: {issue_url}\n"
+        f"Tier: {tier_name}\n\n"
+        f"Follow the /{workflow_name} workflow.\n"
+        f"1. Triage this task and determine severity.\n"
+        f"2. Identify which sub-repo(s) in the workspace are affected.\n"
+        f"3. Route to the correct Tier 2 Lead (check the routing table in your agent definition).\n"
+        f"4. Create the appropriate branch in the target sub-repo.\n"
+        f"5. Begin implementation following the SOP steps.\n\n"
+        f"Task content:\n{task_content}"
+    )
+
+    cmd = [
+        "copilot",
+        "-p", prompt,
+        "--add-dir", workspace_dir,
+        "--allow-all-tools"
+    ]
+
+    logger.info(f"🤖 Launching Copilot CLI agent in {agents_dir}")
+    logger.info(f"   Workspace: {workspace_dir}")
+    logger.info(f"   Workflow: /{workflow_name} (tier: {tier_name})")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=agents_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        logger.info(f"🚀 Copilot CLI launched (PID: {process.pid})")
+        return process.pid
+    except FileNotFoundError:
+        logger.error("'copilot' CLI not found. Install: brew install copilot-cli")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to launch Copilot CLI: {e}")
+        return None
+
+
 def process_file(filepath):
     """Processes a single task file."""
     logger.info(f"Processing: {filepath}")
@@ -131,120 +193,44 @@ def process_file(filepath):
         with open(filepath, "r") as f:
             content = f.read()
 
-        # Parse Metadata (Regex)
-        # Looking for: **Type:** feature
+        # Parse Metadata
         type_match = re.search(r'\*\*Type:\*\*\s*(.+)', content)
         task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
-        # Looking for content (everything after the headers)
-        # We assume headers end with double newline usually, or just take the whole text for slug
-        # Let's clean headers out for the slug
-        body = re.sub(r'^#.*\n', '', content)  # Remove title
-        body = re.sub(r'\*\*.*\*\*.*\n', '', body)  # Remove keys
+        # Extract body for slug
+        body = re.sub(r'^#.*\n', '', content)
+        body = re.sub(r'\*\*.*\*\*.*\n', '', body)
         slug = slugify(body.strip())
 
         if not slug:
             slug = "generic-task"
 
-        # Determine Branch Name and Base Branch
-        # Based on Conventional Branch
-        branch_prefix = "feat"  # or feature
-        base_branch = "develop"  # Default for feat, fix, chore, release
-
-        if "bug" in task_type:
-            branch_prefix = "fix"  # or bugfix
-        elif "hotfix" in task_type:
-            branch_prefix = "hotfix"
-            base_branch = "main"  # Hotfixes come from main/master
-        elif "release" in task_type:
-            branch_prefix = "release"
-        elif "chore" in task_type:
-            branch_prefix = "chore"
-        elif "improvement" in task_type:
-            branch_prefix = "refactor"
-
-        branch_name = f"{branch_prefix}/{slug}"
-
-        # Git Operations
+        # Determine project from filepath
         # filepath is .../project/.github/inbox/file.md
-        # git_root is .../project
-        git_root = os.path.dirname(os.path.dirname(os.path.dirname(filepath)))
+        # project_root is .../project
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(filepath)))
+        project_name = os.path.basename(project_root)
 
-        logger.info(f"Target Repo: {git_root}")
+        config = PROJECT_CONFIG.get(project_name)
+        if not config:
+            logger.warning(f"⚠️ No project config for '{project_name}', skipping.")
+            return
 
-        # Check if git_root is a git repo
-        is_git_repo = os.path.isdir(os.path.join(git_root, ".git"))
+        logger.info(f"Project: {project_name}")
 
-        if is_git_repo:
-            logger.info(f"Creating Branch: {branch_name} from {base_branch}")
-            # 1. Checkout base branch and pull
-            if base_branch == "main":
-                try:
-                    run_git(git_root, ["git", "checkout", "main"])
-                except:
-                    logger.warning("main branch not found, trying master")
-                    run_git(git_root, ["git", "checkout", "master"])
-            else:
-                run_git(git_root, ["git", "checkout", base_branch])
-
-            run_git(git_root, ["git", "pull"])
-
-            # 2. Create new branch
-            # Check if branch exists?
-            try:
-                run_git(git_root, ["git", "checkout", "-b", branch_name])
-            except:
-                logger.warning(f"Branch {branch_name} might exist, checking out...")
-                run_git(git_root, ["git", "checkout", branch_name])
-        else:
-            logger.warning(f"⚠️  {git_root} is NOT a git repository. Skipping branch creation.")
-
-        # 3. Append Branch Name to File
-        # This allows the Agent (User + Copilot) to know the target branch
-        try:
-            with open(filepath, 'a') as f:
-                f.write(f"\n\n**Target Branch:** `{branch_name}`\n")
-            logger.info(f"Appended branch name to {filepath}")
-        except Exception as e:
-            logger.error(f"Failed to append branch name: {e}")
-
-        # 4. Move file to Agent Repo 'active' folder
-        project_name = os.path.basename(git_root)
-        agent_rel_path = AGENT_MAPPING.get(project_name)
-
-        if agent_rel_path:
-            # Construct agent active dir: BASE_DIR/../agent_path/.github/tasks/active
-            # assuming BASE_DIR is .../git
-            # agent_path is ghabs/agents/casit-agents
-            agent_active_dir = os.path.join(BASE_DIR, agent_rel_path, ".github", "tasks", "active")
-            os.makedirs(agent_active_dir, exist_ok=True)
-            new_filepath = os.path.join(agent_active_dir, os.path.basename(filepath))
-            logger.info(f"Moving file to Agent Repo: {new_filepath}")
-            shutil.move(filepath, new_filepath)
-        else:
-            logger.warning(f"No agent mapping found for {project_name}, keeping file in active of project")
-            # Fallback to local active
-            inbox_dir = os.path.dirname(filepath)
-            active_dir = os.path.join(os.path.dirname(inbox_dir), "active")
-            os.makedirs(active_dir, exist_ok=True)
-            new_filepath = os.path.join(active_dir, os.path.basename(filepath))
-            shutil.move(filepath, new_filepath)
-
-        # 4. Commit and Push (only if git repo)
-        if is_git_repo:
-            run_git(git_root, ["git", "add", "."])
-            run_git(git_root, ["git", "commit", "-m", f"Initialize task: {slug}"])
-            # run_git(git_root, ["git", "push", "-u", "origin", branch_name])
-        # Commented push out for safety in local test run, user can uncomment.
-
-        # 5. Create GitHub Issue with SOP checklist
+        # Determine SOP tier
         tier_name, sop_template, workflow_label = get_sop_tier(task_type)
-        sop_checklist = sop_template.format(
-            branch_name=branch_name,
-            base_branch=base_branch
-        )
+        sop_checklist = sop_template
 
-        issue_title = f"[{project_name}] {branch_name}"
+        # Move file to project workspace active folder
+        active_dir = os.path.join(project_root, ".github", "tasks", "active")
+        os.makedirs(active_dir, exist_ok=True)
+        new_filepath = os.path.join(active_dir, os.path.basename(filepath))
+        logger.info(f"Moving task to active: {new_filepath}")
+        shutil.move(filepath, new_filepath)
+
+        # Create GitHub Issue with SOP checklist
+        issue_title = f"[{project_name}] {slug}"
         issue_body = f"""## Task
 {content}
 
@@ -254,7 +240,6 @@ def process_file(filepath):
 
 ---
 
-**Target Branch:** `{branch_name}`
 **Project:** {project_name}
 **Tier:** {tier_name}
 **Task File:** `{new_filepath}`"""
@@ -265,28 +250,52 @@ def process_file(filepath):
             project=project_name,
             workflow_label=workflow_label,
             task_type=task_type,
-            tier_name=tier_name
+            tier_name=tier_name,
+            github_repo=config["github_repo"]
         )
 
         if issue_url:
             # Append issue URL to the task file
             try:
                 with open(new_filepath, 'a') as f:
-                    f.write(f"\n**Issue:** {issue_url}\n")
+                    f.write(f"\n\n**Issue:** {issue_url}\n")
             except Exception as e:
                 logger.error(f"Failed to append issue URL: {e}")
 
-        logger.info(f"✅ Workflow Complete for {branch_name} (Tier: {tier_name})")
+        # Invoke Copilot CLI agent (if agents_dir is configured)
+        agents_dir_val = config["agents_dir"]
+        if agents_dir_val is not None and issue_url:
+            agents_abs = os.path.join(BASE_DIR, agents_dir_val)
+            workspace_abs = os.path.join(BASE_DIR, config["workspace"])
+
+            pid = invoke_copilot_agent(
+                agents_dir=agents_abs,
+                workspace_dir=workspace_abs,
+                issue_url=issue_url,
+                tier_name=tier_name,
+                task_content=content
+            )
+
+            if pid:
+                # Log PID for tracking
+                try:
+                    with open(new_filepath, 'a') as f:
+                        f.write(f"**Agent PID:** {pid}\n")
+                except Exception as e:
+                    logger.error(f"Failed to append PID: {e}")
+        else:
+            logger.info(f"ℹ️ No agents directory for {project_name}, skipping Copilot CLI invocation.")
+
+        logger.info(f"✅ Dispatch complete for [{project_name}] {slug} (Tier: {tier_name})")
 
     except Exception as e:
         logger.error(f"Failed to process {filepath}: {e}")
 
 
 def main():
-    logger.info(f"Warning Inbox Processor started on {BASE_DIR}")
+    logger.info(f"Inbox Processor started on {BASE_DIR}")
     while True:
-        # Scan for md files in */.github/inbox/*.md
-        # BASE_DIR/project/.github/inbox/*.md
+        # Scan for md files in project/.github/inbox/*.md
         pattern = os.path.join(BASE_DIR, "**", ".github", "inbox", "*.md")
         files = glob.glob(pattern, recursive=True)
 

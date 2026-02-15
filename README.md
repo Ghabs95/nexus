@@ -178,32 +178,34 @@ flowchart TD
     D -->|Bug| F["🟠 Tier 2: Shortened"]
     D -->|Hotfix / Chore| G["🟢 Tier 3: Fast-Track"]
 
-    E --> H["Issue in agents repo\n+ Full SOP checklist\n+ label: workflow/full"]
-    F --> I["Issue in agents repo\n+ Shortened checklist\n+ label: workflow/shortened"]
-    G --> J["Issue in agents repo\n+ Minimal checklist\n+ label: workflow/fast-track"]
+    E --> H["GitHub Issue\n+ Full SOP checklist"]
+    F --> I["GitHub Issue\n+ Shortened checklist"]
+    G --> J["GitHub Issue\n+ Minimal checklist"]
 
-    H --> K["@ProjectLead triages\n→ creates sub-issues\nin target repos"]
+    H --> K["🤖 Copilot CLI\n@ProjectLead in agents dir\n+ --add-dir workspace"]
     I --> K
-    J --> L["@ProjectLead assigns\n@copilot directly\nto sub-issue"]
+    J --> K
 
-    K --> M["@copilot implements\nin target repo"]
-    L --> M
+    K --> L["@ProjectLead triages\n→ routes to Tier 2 Lead\n→ creates branch in sub-repo"]
+    L --> M["Agent implements\nin target sub-repo"]
 ```
 
 ### What It Does
 
 1. **Parses** the task file for type and content
-2. **Creates a Git branch** (`feat/`, `fix/`, `refactor/`, `hotfix/`, `chore/`)
-3. **Moves** the file to the agent's active folder
-4. **Creates a GitHub Issue** in the agents repo with an embedded SOP checklist
+2. **Moves** the file to the project workspace's `active` folder
+3. **Creates a GitHub Issue** in the agents repo with an embedded SOP checklist
+4. **Dispatches to Copilot CLI** — launches `copilot -p` in the agents directory with
+   `--add-dir` pointing to the project workspace, so `@ProjectLead` can triage and
+   route to the correct sub-repo and Tier 2 Lead
 
 ### Tiered Automation
 
-| Task Type    | Tier          | SOP Steps                 | Branch From |
-|--------------|---------------|---------------------------|-------------|
-| Feature      | 🟡 Full       | 10 steps (all agents)     | `develop`   |
-| Bug          | 🟠 Shortened  | 7 steps (skip Vision/UX)  | `develop`   |
-| Hotfix/Chore | 🟢 Fast-Track | 4 steps (@copilot direct) | `main`      |
+| Task Type    | Tier          | SOP Steps                 | Workflow       |
+|--------------|---------------|---------------------------|----------------|
+| Feature      | 🟡 Full       | 9 steps (all agents)      | `/new_feature` |
+| Bug          | 🟠 Shortened  | 6 steps (skip Vision/UX)  | `/bug_fix`     |
+| Hotfix/Chore | 🟢 Fast-Track | 4 steps (@copilot direct) | `/bug_fix`     |
 
 ### Configuration (`vars.secret`)
 

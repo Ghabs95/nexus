@@ -352,17 +352,19 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_text = "🚀 **Active Tasks** (In Progress)\n\n"
     total_active = 0
 
-    # Check agents repo active folders
-    agents_base = os.path.join(BASE_DIR, "ghabs", "agents")
-    agent_folders = ["casit-agents", "wlbl-agents", "bm-agents"]
-    
-    for agent_folder in agent_folders:
-        active_dir = os.path.join(agents_base, agent_folder, ".github", "tasks", "active")
+    # Check project workspace active folders
+    project_dirs = {
+        "case_italia": "Case Italia",
+        "wallible": "Wallible",
+        "biome": "Biome",
+    }
+
+    for project_key, display_name in project_dirs.items():
+        active_dir = os.path.join(BASE_DIR, project_key, ".github", "tasks", "active")
         if os.path.exists(active_dir):
             files = [f for f in os.listdir(active_dir) if f.endswith(".md")]
             if files:
-                project_name = agent_folder.replace("-agents", "").replace("casit", "Case Italia").replace("wlbl", "Wallible").replace("bm", "Biome")
-                active_text += f"**{project_name}:** {len(files)} task(s)\n"
+                active_text += f"**{display_name}:** {len(files)} task(s)\n"
                 total_active += len(files)
                 for f in files[:3]:
                     task_type = f.split('_')[0]
