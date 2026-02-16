@@ -823,6 +823,14 @@ def get_workflow_name(tier_name):
         return "new_feature"
 
 
+def is_final_agent(tier_name, agent_name):
+    """Check if this agent is the final step in the workflow."""
+    workflow = WORKFLOW_CHAIN.get(tier_name, [])
+    if workflow and workflow[-1][0] == agent_name:
+        return True
+    return False
+
+
 def create_github_issue(title, body, project, workflow_label, task_type, tier_name, github_repo):
     """Creates a GitHub Issue in the specified repo with SOP checklist."""
     type_label = f"type:{task_type}"

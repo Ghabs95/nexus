@@ -297,6 +297,9 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/resume <issue#> - Resume auto-chaining\n"
         "/stop <issue#> - Stop workflow completely (closes issue, kills agent)\n"
         "/respond <issue#> <text> - Respond to agent questions\n\n"
+        "🤝 **Agent Management:**\n"
+        "/agents <project> - List all agents for a project\n"
+        "/direct <project> <@agent> <message> - Send direct request to an agent\n\n"
         "🔧 **GitHub Management:**\n"
         "/assign <issue#> - Assign GitHub issue to yourself\n"
         "/implement <issue#> - Request Copilot agent implementation\n"
@@ -339,6 +342,7 @@ async def on_startup(application):
     """Register bot commands so they appear in the Telegram client menu."""
     cmds = [
         BotCommand("new", "Start task creation"),
+        BotCommand("cancel", "Cancel current process"),
         BotCommand("status", "Show pending tasks"),
         BotCommand("active", "Show active tasks"),
         BotCommand("track", "Subscribe to issue updates"),
@@ -352,6 +356,8 @@ async def on_startup(application):
         BotCommand("pause", "Pause auto-chaining"),
         BotCommand("resume", "Resume auto-chaining"),
         BotCommand("stop", "Stop workflow completely"),
+        BotCommand("agents", "List project agents"),
+        BotCommand("direct", "Send direct agent request"),
         BotCommand("respond", "Respond to agent questions"),
         BotCommand("assign", "Assign an issue"),
         BotCommand("implement", "Request implementation"),
@@ -676,14 +682,14 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Parse issue number from command
-    # Format: /assign 123 or /assign #123 or /assign https://github.com/owner/repo/issues/123
+    # Format: /assign 0 or /assign #0 or /assign https://github.com/owner/repo/issues/0
     if not context.args:
         await update.effective_message.reply_text(
             "⚠️ Usage: `/assign <issue#> [assignee]`\n\n"
             "Examples:\n"
-            "  `/assign 5` (assigns to you / @me)\n"
-            "  `/assign 5 copilot` (assigns to configured Copilot user)\n"
-            "  `/assign https://github.com/Ghabs95/agents/issues/5 alice`",
+            "  `/assign 0` (assigns to you / @me)\n"
+            "  `/assign 0 copilot` (assigns to configured Copilot user)\n"
+            "  `/assign https://github.com/Ghabs95/agents/issues/0 alice`",
             parse_mode='Markdown'
         )
         return
@@ -764,7 +770,7 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Usage: `/implement <issue#>`\n\nExamples:\n  `/implement 5`\n  `/implement #5`\n  `/implement https://github.com/Ghabs95/agents/issues/5`",
+            "⚠️ Usage: `/implement <issue#>`\n\nExamples:\n  `/implement 0`\n  `/implement #0`\n  `/implement https://github.com/Ghabs95/agents/issues/0`",
             parse_mode='Markdown'
         )
         return
@@ -833,7 +839,7 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Usage: `/prepare <issue#>`\n\nExamples:\n  `/prepare 5`\n  `/prepare #5`\n  `/prepare https://github.com/Ghabs95/agents/issues/5`",
+            "⚠️ Usage: `/prepare <issue#>`\n\nExamples:\n  `/prepare 0`\n  `/prepare #0`\n  `/prepare https://github.com/Ghabs95/agents/issues/0`",
             parse_mode='Markdown'
         )
         return
@@ -920,7 +926,7 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.effective_message.reply_text(
-            "⚠️ Usage: /track <issue#>\n\nExample: /track 5"
+            "⚠️ Usage: /track <issue#>\n\nExample: /track 0"
         )
         return
 
@@ -1241,7 +1247,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /continue <issue#> [prompt]\n\nExample: /continue 4 Please proceed with implementation")
+        await update.effective_message.reply_text("⚠️ Usage: /continue <issue#> [prompt]\n\nExample: /continue 0 Please proceed with implementation")
         return
 
     issue_num = context.args[0].lstrip("#")
@@ -1397,7 +1403,7 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /pause <issue#>\n\nExample: /pause 4")
+        await update.effective_message.reply_text("⚠️ Usage: /pause <issue#>\n\nExample: /pause 0")
         return
 
     issue_num = context.args[0].lstrip("#")
@@ -1423,7 +1429,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /resume <issue#>\n\nExample: /resume 4")
+        await update.effective_message.reply_text("⚠️ Usage: /resume <issue#>\n\nExample: /resume 0")
         return
 
     issue_num = context.args[0].lstrip("#")
@@ -1449,7 +1455,7 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /stop <issue#>\n\nExample: /stop 4")
+        await update.effective_message.reply_text("⚠️ Usage: /stop <issue#>\n\nExample: /stop 0")
         return
 
     issue_num = context.args[0].lstrip("#")
@@ -1490,6 +1496,190 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def get_agents_for_project(project_dir):
+    """Parse agents from .github/agents/*.agent.md files.
+    
+    Returns a dictionary: {agent_display_name: agent_filename}
+    Example: {'Architect': 'architect.agent.md', 'BackendLead': 'backend.agent.md'}
+    """
+    agents_github_dir = os.path.join(project_dir, ".github", "agents")
+    agents_map = {}
+    
+    if not os.path.exists(agents_github_dir):
+        return agents_map
+    
+    try:
+        for filename in sorted(os.listdir(agents_github_dir)):
+            if filename.endswith(".agent.md"):
+                filepath = os.path.join(agents_github_dir, filename)
+                # Parse the name from the YAML frontmatter
+                try:
+                    with open(filepath, 'r') as f:
+                        lines = f.readlines()
+                        in_frontmatter = False
+                        for line in lines:
+                            if line.strip() == "---":
+                                in_frontmatter = not in_frontmatter
+                            elif in_frontmatter and line.startswith("name:"):
+                                agent_name = line.split("name:", 1)[1].strip()
+                                agents_map[agent_name] = filename
+                                break
+                except Exception as e:
+                    logger.warning(f"Failed to parse agent file {filename}: {e}")
+    except Exception as e:
+        logger.warning(f"Error listing agent files: {e}")
+    
+    return agents_map
+
+
+async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all agents for a specific project."""
+    logger.info(f"Agents requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: /agents <project>\n\nExample: /agents case_italia")
+        return
+
+    project = context.args[0].lower()
+    from inbox_processor import PROJECT_CONFIG
+    
+    if project not in PROJECT_CONFIG:
+        await update.effective_message.reply_text(
+            f"❌ Unknown project '{project}'\n\n"
+            f"Available: " + ", ".join(PROJECT_CONFIG.keys())
+        )
+        return
+    
+    agents_dir = os.path.join(BASE_DIR, PROJECT_CONFIG[project]["agents_dir"])
+    if not os.path.exists(agents_dir):
+        await update.effective_message.reply_text(f"⚠️ Agents directory not found for '{project}'")
+        return
+    
+    try:
+        agents_map = get_agents_for_project(agents_dir)
+        
+        if not agents_map:
+            await update.effective_message.reply_text(f"No agents configured for '{project}'")
+            return
+        
+        agents_list = "\n".join([f"• @{agent}" for agent in sorted(agents_map.keys())])
+        await update.effective_message.reply_text(
+            f"🤖 **Agents for {project}:**\n\n{agents_list}\n\n"
+            f"Use `/direct <project> <@agent> <message>` to send a direct request."
+        )
+    except Exception as e:
+        logger.error(f"Error listing agents: {e}")
+        await update.effective_message.reply_text(f"❌ Error: {e}")
+
+
+async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a direct request to a specific agent for a project."""
+    logger.info(f"Direct request by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if len(context.args) < 3:
+        await update.effective_message.reply_text(
+            "⚠️ Usage: /direct <project> <@agent> <message>\n\n"
+            "Example: /direct case_italia @BackendLead Add caching to API endpoints"
+        )
+        return
+
+    project = context.args[0].lower()
+    agent = context.args[1].lstrip("@")
+    message = " ".join(context.args[2:])
+    
+    from inbox_processor import PROJECT_CONFIG
+    
+    if project not in PROJECT_CONFIG:
+        await update.effective_message.reply_text(f"❌ Unknown project '{project}'")
+        return
+    
+    # Verify agent exists
+    agents_dir = os.path.join(BASE_DIR, PROJECT_CONFIG[project]["agents_dir"])
+    agents_map = get_agents_for_project(agents_dir)
+    
+    if agent not in agents_map:
+        available = ", ".join([f"@{a}" for a in sorted(agents_map.keys())])
+        await update.effective_message.reply_text(
+            f"❌ Unknown agent '@{agent}' for {project}\n\n"
+            f"Available: {available}"
+        )
+        return
+    
+    msg = await update.effective_message.reply_text(f"🚀 Creating direct request for @{agent}...")
+    
+    try:
+        # Create an issue with a direct request to the specific agent
+        title = f"Direct Request: {message[:50]}"
+        body = f"""**Direct Request** to @{agent}
+
+{message}
+
+**Project:** {project}
+**Assigned to:** @{agent}
+
+---
+*Created via /direct command - invoke {agent} immediately*"""
+        
+        result = subprocess.run(
+            ["gh", "issue", "create", "--repo", GITHUB_REPO,
+             "--title", title,
+             "--body", body,
+             "--no-editor", "--label", "workflow:fast-track"],
+            text=True, capture_output=True, timeout=15
+        )
+        
+        if result.returncode != 0:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to create issue"
+            )
+            return
+        
+        # Extract issue number
+        import re as re_module
+        match = re_module.search(r'#(\d+)', result.stderr + result.stdout)
+        if not match:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to get issue number"
+            )
+            return
+        
+        issue_num = match.group(1)
+        issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+        
+        # Post a completion marker comment to trigger immediate auto-chain to this agent
+        comment_body = f"🎯 Direct request from @Ghabs\n\nReady for `@{agent}`"
+        subprocess.run(
+            ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO, "--body", comment_body],
+            check=False, text=True, capture_output=True, timeout=10
+        )
+        
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"✅ Direct request created for @{agent} (Issue #{issue_num})\n\n"
+                 f"Message: {message}\n\n"
+                 f"The auto-chaining system will invoke @{agent} on the next cycle (~60s)\n\n"
+                 f"🔗 {issue_url}"
+        )
+    except Exception as e:
+        logger.error(f"Error in direct request: {e}")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=f"❌ Error: {e}"
+        )
+
+
 async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View recent comments on a GitHub issue."""
     logger.info(f"Comments requested by user: {update.effective_user.id}")
@@ -1498,7 +1688,7 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /comments <issue#>\n\nExample: /comments 4")
+        await update.effective_message.reply_text("⚠️ Usage: /comments <issue#>\n\nExample: /comments 0")
         return
 
     issue_num = context.args[0].lstrip("#")
@@ -1620,7 +1810,7 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
             "⚠️ Usage: /respond <issue#> <your response>\n\n"
-            "Example: /respond 4 The surveyor feature should allow users to view property boundaries and measurements"
+            "Example: /respond 0 The surveyor feature should allow users to view property boundaries and measurements"
         )
         return
 
@@ -1763,6 +1953,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("pause", pause_handler))
     app.add_handler(CommandHandler("resume", resume_handler))
     app.add_handler(CommandHandler("stop", stop_handler))
+    app.add_handler(CommandHandler("agents", agents_handler))
+    app.add_handler(CommandHandler("direct", direct_handler))
     app.add_handler(CommandHandler("respond", respond_handler))
     app.add_handler(CommandHandler("assign", assign_handler))
     app.add_handler(CommandHandler("implement", implement_handler))
