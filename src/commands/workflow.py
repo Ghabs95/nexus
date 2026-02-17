@@ -5,7 +5,10 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
 from models import WorkflowState
-from config import ALLOWED_USER_ID
+from config import ALLOWED_USER_ID, USE_NEXUS_CORE
+from nexus_core_helpers import (
+    pause_workflow_sync, resume_workflow_sync, get_workflow_status_sync
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,29 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
 
+    # Try nexus-core first if enabled
+    if USE_NEXUS_CORE:
+        success = pause_workflow_sync(issue_num, reason="User requested via Telegram")
+        if success:
+            # Also update legacy StateManager for compatibility
+            StateManager.set_workflow_state(issue_num, WorkflowState.PAUSED)
+            StateManager.audit_log(int(issue_num), "WORKFLOW_PAUSED", "via nexus-core")
+            
+            # Get workflow status for richer feedback
+            status = get_workflow_status_sync(issue_num)
+            status_text = ""
+            if status:
+                status_text = (f"\n\n**Workflow:** {status['name']}\n"
+                             f"**Step:** {status['current_step']}/{status['total_steps']} - {status['current_step_name']}")
+            
+            await update.effective_message.reply_text(
+                f"⏸️ **Workflow paused for issue #{issue_num}**{status_text}\n\n"
+                f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
+                f"Use /resume {issue_num} to re-enable auto-chaining."
+            )
+            return
+    
+    # Fallback to legacy StateManager
     StateManager.set_workflow_state(issue_num, WorkflowState.PAUSED)
     StateManager.audit_log(int(issue_num), "WORKFLOW_PAUSED")
 
@@ -52,6 +78,29 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
 
+    # Try nexus-core first if enabled
+    if USE_NEXUS_CORE:
+        success = resume_workflow_sync(issue_num)
+        if success:
+            # Also update legacy StateManager for compatibility
+            StateManager.set_workflow_state(issue_num, WorkflowState.ACTIVE)
+            StateManager.audit_log(int(issue_num), "WORKFLOW_RESUMED", "via nexus-core")
+            
+            # Get workflow status for richer feedback
+            status = get_workflow_status_sync(issue_num)
+            status_text = ""
+            if status:
+                status_text = (f"\n\n**Workflow:** {status['name']}\n"
+                             f"**Step:** {status['current_step']}/{status['total_steps']} - {status['current_step_name']}")
+            
+            await update.effective_message.reply_text(
+                f"▶️ **Workflow resumed for issue #{issue_num}**{status_text}\n\n"
+                f"Auto-chaining is re-enabled. The next agent will be launched when the current step completes.\n"
+                f"Check /active to see current progress."
+            )
+            return
+    
+    # Fallback to legacy StateManager
     StateManager.set_workflow_state(issue_num, WorkflowState.ACTIVE)
     StateManager.audit_log(int(issue_num), "WORKFLOW_RESUMED")
 

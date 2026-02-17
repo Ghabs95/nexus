@@ -12,13 +12,15 @@ import requests
 from config import (
     BASE_DIR, GITHUB_AGENTS_REPO, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
-    WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG
+    WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
+    USE_NEXUS_CORE
 )
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
 from agent_launcher import invoke_copilot_agent
 from ai_orchestrator import get_orchestrator
+from nexus_core_helpers import create_workflow_for_issue_sync
 from error_handling import (
     run_command_with_retry, 
     format_error_for_user,
@@ -1058,6 +1060,26 @@ def process_file(filepath):
                     f.write(f"\n\n**Issue:** {issue_url}\n")
             except Exception as e:
                 logger.error(f"Failed to append issue URL: {e}")
+            
+            # Create nexus-core workflow if enabled
+            if USE_NEXUS_CORE:
+                # Extract issue number from URL
+                issue_num = issue_url.split('/')[-1]
+                workflow_id = create_workflow_for_issue_sync(
+                    issue_number=issue_num,
+                    issue_title=slug,
+                    project_name=project_name,
+                    tier_name=tier_name,
+                    task_type=task_type,
+                    description=content
+                )
+                if workflow_id:
+                    logger.info(f"✅ Created nexus-core workflow: {workflow_id}")
+                    try:
+                        with open(new_filepath, 'a') as f:
+                            f.write(f"**Workflow ID:** {workflow_id}\n")
+                    except Exception as e:
+                        logger.error(f"Failed to append workflow ID: {e}")
 
         # Invoke Copilot CLI agent (if agents_dir is configured)
         agents_dir_val = config["agents_dir"]

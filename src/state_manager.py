@@ -188,3 +188,50 @@ class StateManager:
         except Exception as e:
             logger.error(f"Failed to read audit log: {e}")
             return []
+    # --- NEXUS-CORE INTEGRATION ---
+    
+    @staticmethod
+    def load_workflow_mapping() -> Dict[str, str]:
+        """Load issue_number -> workflow_id mapping."""
+        from config import WORKFLOW_ID_MAPPING_FILE
+        ensure_data_dir()
+        if os.path.exists(WORKFLOW_ID_MAPPING_FILE):
+            try:
+                with open(WORKFLOW_ID_MAPPING_FILE) as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load workflow mapping: {e}")
+        return {}
+
+    @staticmethod
+    def save_workflow_mapping(data: Dict[str, str]) -> None:
+        """Save issue_number -> workflow_id mapping."""
+        from config import WORKFLOW_ID_MAPPING_FILE
+        ensure_data_dir()
+        try:
+            with open(WORKFLOW_ID_MAPPING_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save workflow mapping: {e}")
+
+    @staticmethod
+    def map_issue_to_workflow(issue_num: str, workflow_id: str) -> None:
+        """Map an issue number to a workflow ID."""
+        data = StateManager.load_workflow_mapping()
+        data[str(issue_num)] = workflow_id
+        StateManager.save_workflow_mapping(data)
+        logger.info(f"Mapped issue #{issue_num} -> workflow {workflow_id}")
+
+    @staticmethod
+    def get_workflow_id_for_issue(issue_num: str) -> Optional[str]:
+        """Get workflow ID for an issue number."""
+        data = StateManager.load_workflow_mapping()
+        return data.get(str(issue_num))
+
+    @staticmethod
+    def remove_workflow_mapping(issue_num: str) -> None:
+        """Remove workflow mapping for an issue."""
+        data = StateManager.load_workflow_mapping()
+        data.pop(str(issue_num), None)
+        StateManager.save_workflow_mapping(data)
+        logger.info(f"Removed workflow mapping for issue #{issue_num}")

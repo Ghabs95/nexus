@@ -105,6 +105,15 @@ FINAL_AGENTS = {
     "fast-track": "OpsCommander"
 }
 
+# --- NEXUS-CORE FRAMEWORK CONFIGURATION ---
+# Enable nexus-core workflow engine (set to False to use legacy StateManager)
+USE_NEXUS_CORE = os.getenv("USE_NEXUS_CORE", "true").lower() == "true"
+NEXUS_CORE_STORAGE_DIR = os.path.join(DATA_DIR, "nexus-core-workflows")
+WORKFLOW_ID_MAPPING_FILE = os.path.join(DATA_DIR, "workflow_id_mapping.json")
+
+# Nexus-Core storage backend configuration
+NEXUS_CORE_STORAGE_BACKEND = os.getenv("NEXUS_CORE_STORAGE", "file")  # Options: file, postgres, redis
+
 # --- PROJECT CONFIGURATION ---
 PROJECT_CONFIG = {
     "case_italia": {
