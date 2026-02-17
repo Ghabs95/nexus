@@ -7,74 +7,99 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 from google import genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     MessageHandler, CallbackQueryHandler, ConversationHandler, filters
 )
-from inbox_processor import PROJECT_CONFIG, get_sop_tier, invoke_copilot_agent
 
-# Load secrets from a local file if it exists
-SECRET_FILE = "vars.secret"
-if os.path.exists(SECRET_FILE):
-    logging.info(f"Loading environment from {SECRET_FILE}")
-    load_dotenv(SECRET_FILE)
-else:
-    logging.info(f"No {SECRET_FILE} found, relying on shell environment")
-
-# --- CONFIGURATION ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GOOGLE_API_KEY = os.getenv("AI_API_KEY")
-GOOGLE_AI_MODEL = os.getenv("AI_MODEL") or "gemini-1.5-flash"
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER")) if os.getenv("ALLOWED_USER") else None
-BASE_DIR = os.getenv("BASE_DIR", "/home/ubuntu/git")
+# Import configuration from centralized config module
+from config import (
+    TELEGRAM_TOKEN, GOOGLE_API_KEY, GOOGLE_AI_MODEL, ALLOWED_USER_ID, BASE_DIR,
+    DATA_DIR, TRACKED_ISSUES_FILE, GITHUB_AGENTS_REPO, PROJECT_CONFIG, ensure_data_dir,
+    TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID
+)
+from state_manager import StateManager
+from models import WorkflowState
+from commands.workflow import pause_handler, resume_handler, stop_handler
+from inbox_processor import get_sop_tier, invoke_copilot_agent
+from error_handling import format_error_for_user, run_command_with_retry
+from analytics import get_stats_report
+from rate_limiter import get_rate_limiter, RateLimit
+from report_scheduler import ReportScheduler
+from user_manager import get_user_manager
+from alerting import init_alerting_system
 
 # --- LOGGING ---
 logger = logging.getLogger(__name__)
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# --- VALIDATION ---
-logger.info(f"Using BASE_DIR: {BASE_DIR}")
-if not TELEGRAM_TOKEN:
-    logger.error("TELEGRAM_TOKEN is missing! Please set it in your environment or vars.secret.")
-    sys.exit(1)
-if not GOOGLE_API_KEY:
-    logger.error("AI_API_KEY (Google API Key) is missing! Please set it in your environment or vars.secret.")
-    sys.exit(1)
-if not ALLOWED_USER_ID:
-    logger.warning("ALLOWED_USER is missing! Handlers will not respond to anyone.")
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(TELEGRAM_BOT_LOG_FILE)
+    ]
+)
 
 # Configure Gemini
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
-# --- TRACKING ---
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-TRACKED_ISSUES_FILE = os.path.join(DATA_DIR, "tracked_issues.json")
-GITHUB_REPO = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+# Initialize rate limiter
+rate_limiter = get_rate_limiter()
+
+# Initialize user manager
+user_manager = get_user_manager()
+
+# Legacy alias for compatibility
+GITHUB_REPO = GITHUB_AGENTS_REPO
+
+
+# --- RATE LIMITING DECORATOR ---
+def rate_limited(action: str, limit: RateLimit = None):
+    """
+    Decorator to add rate limiting to Telegram command handlers.
+    
+    Args:
+        action: Rate limit action name (e.g., "logs", "stats", "implement")
+        limit: Optional custom rate limit (uses default if not provided)
+    
+    Usage:
+        @rate_limited("logs")
+        async def logs_handler(update, context):
+            ...
+    """
+    def decorator(func):
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            user_id = update.effective_user.id
+            
+            # Check rate limit
+            allowed, error_msg = rate_limiter.check_limit(user_id, action, limit)
+            
+            if not allowed:
+                # Rate limit exceeded
+                await update.message.reply_text(error_msg)
+                logger.warning(f"Rate limit blocked: user={user_id}, action={action}")
+                return
+            
+            # Record the request
+            rate_limiter.record_request(user_id, action)
+            
+            # Call the actual handler
+            return await func(update, context)
+        
+        return wrapper
+    return decorator
 
 
 def load_tracked_issues():
     """Load tracked issues from file."""
-    if os.path.exists(TRACKED_ISSUES_FILE):
-        try:
-            with open(TRACKED_ISSUES_FILE) as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load tracked issues: {e}")
-    return {}
+    return StateManager.load_tracked_issues()
 
 
 def save_tracked_issues(data):
     """Save tracked issues to file."""
-    try:
-        # Ensure data directory exists
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(TRACKED_ISSUES_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to save tracked issues: {e}")
+    StateManager.save_tracked_issues(data)
 
 
 def get_issue_details(issue_num):
@@ -284,10 +309,15 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 **Monitoring & Tracking:**\n"
         "/status - View pending tasks in inbox\n"
         "/active - View tasks currently being worked on\n"
-        "/track <issue#> - Subscribe to issue updates\n"
-        "/untrack <issue#> - Stop tracking an issue\n"
+        "/track <issue#> - Subscribe to issue updates (global)\n"
+        "/track <project> <issue#> - Track issue per-project (casit/wlbl/bm)\n"
+        "/untrack <issue#> - Stop tracking globally\n"
+        "/untrack <project> <issue#> - Stop tracking per-project\n"
+        "/myissues - View all your tracked issues\n"
         "/logs <issue#> - View task execution logs\n"
         "/logsfull <issue#> - Full log lines (no truncation)\n"
+        "/audit <issue#> - View workflow audit trail (state changes, agent launches, timeouts)\n"
+        "/stats [days] - View system analytics and performance metrics (default: 30 days)\n"
         "/comments <issue#> - View issue comments\n\n"
         "🔁 **Recovery & Control:**\n"
         "/reprocess <issue#> - Re-run agent processing\n"
@@ -347,8 +377,11 @@ async def on_startup(application):
         BotCommand("active", "Show active tasks"),
         BotCommand("track", "Subscribe to issue updates"),
         BotCommand("untrack", "Stop tracking an issue"),
+        BotCommand("myissues", "View your tracked issues"),
         BotCommand("logs", "View task execution logs"),
         BotCommand("logsfull", "Full issue logs"),
+        BotCommand("audit", "View workflow audit trail"),
+        BotCommand("stats", "View system analytics"),
         BotCommand("comments", "View issue comments"),
         BotCommand("reprocess", "Re-run agent processing"),
         BotCommand("continue", "Check stuck agent status"),
@@ -757,6 +790,7 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+@rate_limited("implement")
 async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Requests Copilot agent implementation for an issue (approval workflow).
 
@@ -917,71 +951,203 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Subscribe to issue updates and track status changes."""
+    """Subscribe to issue updates and track status changes.
+    
+    Usage:
+      /track <issue#>              - Track issue in default repo (legacy)
+      /track <project> <issue#>    - Track issue in specific project
+    
+    Examples:
+      /track 123
+      /track casit 456
+      /track wlbl 789
+    """
     global tracked_issues
     logger.info(f"Track requested by user: {update.effective_user.id}")
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
+    user = update.effective_user
+    
     if not context.args:
         await update.effective_message.reply_text(
-            "⚠️ Usage: /track <issue#>\n\nExample: /track 0"
+            "⚠️ Usage:\n"
+            "/track <issue#> - Track issue globally\n"
+            "/track <project> <issue#> - Track issue per-project\n\n"
+            "Projects: casit, wlbl, bm\n\n"
+            "Examples:\n"
+            "  /track 123\n"
+            "  /track casit 456"
         )
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
-        return
-
-    tracked_issues[issue_num] = {
-        "added_at": datetime.now().isoformat(),
-        "last_seen_state": None,
-        "last_seen_labels": []
-    }
-    save_tracked_issues(tracked_issues)
-
-    details = get_issue_details(issue_num)
-    if details:
+    # Parse arguments - support both /track <issue> and /track <project> <issue>
+    if len(context.args) >= 2:
+        # Per-project tracking: /track <project> <issue>
+        project = context.args[0].lower()
+        issue_num = context.args[1].lstrip("#")
+        
+        # Validate project
+        valid_projects = ['casit', 'wlbl', 'bm']
+        if project not in valid_projects:
+            await update.effective_message.reply_text(
+                f"❌ Invalid project '{project}'.\n"
+                f"Valid projects: {', '.join(valid_projects)}"
+            )
+            return
+        
+        if not issue_num.isdigit():
+            await update.effective_message.reply_text("❌ Invalid issue number.")
+            return
+        
+        # Track for user in specific project
+        user_manager.track_issue(
+            telegram_id=user.id,
+            project=project,
+            issue_number=issue_num,
+            username=user.username,
+            first_name=user.first_name
+        )
+        
         await update.effective_message.reply_text(
-            f"👁️ Now tracking issue #{issue_num}\n\n"
-            f"Title: {details.get('title', 'N/A')}\n"
-            f"Status: {details.get('state', 'N/A')}\n"
-            f"Labels: {', '.join([l['name'] for l in details.get('labels', [])])}\n\n"
-            f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+            f"👁️ Now tracking {project.upper()} issue #{issue_num} for you\n\n"
+            f"Use /myissues to see all your tracked issues\n"
+            f"Use /untrack {project} {issue_num} to stop tracking"
         )
     else:
-        await update.effective_message.reply_text(
-            f"⚠️ Could not fetch issue details, but tracking started.\n\n"
-            f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
-        )
+        # Legacy global tracking: /track <issue>
+        issue_num = context.args[0].lstrip("#")
+        if not issue_num.isdigit():
+            await update.effective_message.reply_text("❌ Invalid issue number.")
+            return
+
+        # Add to global system tracking
+        tracked_issues[issue_num] = {
+            "added_at": datetime.now().isoformat(),
+            "last_seen_state": None,
+            "last_seen_labels": []
+        }
+        save_tracked_issues(tracked_issues)
+
+        details = get_issue_details(issue_num)
+        if details:
+            await update.effective_message.reply_text(
+                f"👁️ Now tracking issue #{issue_num} (global)\n\n"
+                f"Title: {details.get('title', 'N/A')}\n"
+                f"Status: {details.get('state', 'N/A')}\n"
+                f"Labels: {', '.join([l['name'] for l in details.get('labels', [])])}\n\n"
+                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}\n\n"
+                f"💡 Tip: Use /track <project> <issue#> for per-project tracking"
+            )
+        else:
+            await update.effective_message.reply_text(
+                f"⚠️ Could not fetch issue details, but tracking started.\n\n"
+                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+            )
 
 
 async def untrack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop tracking an issue."""
+    """Stop tracking an issue.
+    
+    Usage:
+      /untrack <issue#>              - Stop global tracking
+      /untrack <project> <issue#>    - Stop per-project tracking
+    """
     global tracked_issues
     logger.info(f"Untrack requested by user: {update.effective_user.id}")
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
+    user = update.effective_user
+
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /untrack <issue#>")
+        await update.effective_message.reply_text(
+            "⚠️ Usage:\n"
+            "/untrack <issue#> - Stop global tracking\n"
+            "/untrack <project> <issue#> - Stop per-project tracking\n\n"
+            "Examples:\n"
+            "  /untrack 123\n"
+            "  /untrack casit 456"
+        )
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if issue_num in tracked_issues:
-        del tracked_issues[issue_num]
-        save_tracked_issues(tracked_issues)
-        await update.effective_message.reply_text(
-            f"✅ Stopped tracking issue #{issue_num}\n\n"
-            f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+    # Parse arguments - support both /untrack <issue> and /untrack <project> <issue>
+    if len(context.args) >= 2:
+        # Per-project untracking
+        project = context.args[0].lower()
+        issue_num = context.args[1].lstrip("#")
+        
+        success = user_manager.untrack_issue(
+            telegram_id=user.id,
+            project=project,
+            issue_number=issue_num
         )
+        
+        if success:
+            await update.effective_message.reply_text(
+                f"✅ Stopped tracking {project.upper()} issue #{issue_num}"
+            )
+        else:
+            await update.effective_message.reply_text(
+                f"❌ You weren't tracking {project.upper()} issue #{issue_num}"
+            )
     else:
-        await update.effective_message.reply_text(f"❌ Issue #{issue_num} is not being tracked.")
+        # Legacy global untracking
+        issue_num = context.args[0].lstrip("#")
+        if issue_num in tracked_issues:
+            del tracked_issues[issue_num]
+            save_tracked_issues(tracked_issues)
+            await update.effective_message.reply_text(
+                f"✅ Stopped tracking issue #{issue_num} (global)\n\n"
+                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+            )
+        else:
+            await update.effective_message.reply_text(f"❌ Issue #{issue_num} is not being tracked globally.")
 
 
+async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all issues tracked by the user across projects."""
+    logger.info(f"My issues requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    user = update.effective_user
+    
+    # Get user's tracked issues
+    tracked = user_manager.get_user_tracked_issues(user.id)
+    
+    if not tracked:
+        await update.effective_message.reply_text(
+            "📋 You're not tracking any issues yet.\n\n"
+            "Use /track <project> <issue#> to start tracking.\n\n"
+            "Examples:\n"
+            "  /track casit 123\n"
+            "  /track wlbl 456"
+        )
+        return
+    
+    # Build message
+    message = "📋 <b>Your Tracked Issues</b>\n\n"
+    
+    total_issues = 0
+    for project, issues in sorted(tracked.items()):
+        if issues:
+            message += f"<b>{project.upper()}</b>\n"
+            for issue_num in issues:
+                total_issues += 1
+                message += f"  • #{issue_num}\n"
+            message += "\n"
+    
+    message += f"<b>Total:</b> {total_issues} issue(s)\n\n"
+    message += "<i>Use /untrack &lt;project&gt; &lt;issue#&gt; to stop tracking</i>"
+    
+    await update.effective_message.reply_text(message, parse_mode='HTML')
+
+
+@rate_limited("logs")
 async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show combined timeline of GitHub activity and bot/processor logs for an issue."""
     logger.info(f"Logs requested by user: {update.effective_user.id}")
@@ -1061,6 +1227,7 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
 
+@rate_limited("logs")
 async def logsfull_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show combined timeline of GitHub activity and full log lines for an issue."""
     logger.info(f"Logsfull requested by user: {update.effective_user.id}")
@@ -1136,6 +1303,174 @@ async def logsfull_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=part)
 
 
+async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display workflow audit trail for an issue (timeline of state changes, agent launches, etc)."""
+    logger.info(f"Audit trail requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: /audit <issue#>")
+        return
+
+    issue_num = context.args[0].lstrip("#")
+    if not issue_num.isdigit():
+        await update.effective_message.reply_text("❌ Invalid issue number.")
+        return
+
+    try:
+        # Import here to avoid circular imports
+        from state_manager import StateManager
+        
+        msg = await update.effective_message.reply_text(f"📊 Fetching audit trail for issue #{issue_num}...", parse_mode="Markdown")
+        
+        # Get audit history from StateManager
+        audit_history = StateManager.get_audit_history(issue_num, limit=100)
+        
+        if not audit_history:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"📊 **Audit Trail for Issue #{issue_num}**\n\nNo audit events recorded yet."
+            )
+            return
+        
+        # Format audit trail
+        timeline = f"📊 **Audit Trail for Issue #{issue_num}**\n"
+        timeline += "=" * 40 + "\n\n"
+        
+        for event in audit_history:
+            # Format: timestamp | Issue #N | EVENT_TYPE | details
+            try:
+                parts = event.split(" | ", 3)
+                timestamp = parts[0] if len(parts) > 0 else "?"
+                issue_ref = parts[1] if len(parts) > 1 else "?"
+                event_type = parts[2] if len(parts) > 2 else "?"
+                details = parts[3] if len(parts) > 3 else ""
+                
+                # Format event with emoji based on type
+                event_emoji = {
+                    "AGENT_LAUNCHED": "🚀",
+                    "AGENT_TIMEOUT_KILL": "⏱️",
+                    "AGENT_RETRY": "🔄",
+                    "AGENT_FAILED": "❌",
+                    "WORKFLOW_PAUSED": "⏸️",
+                    "WORKFLOW_RESUMED": "▶️",
+                    "WORKFLOW_STOPPED": "🛑",
+                    "AGENT_COMPLETION": "✅",
+                    "WORKFLOW_STARTED": "🎬"
+                }.get(event_type, "•")
+                
+                timeline += f"{event_emoji} **{event_type}** ({timestamp})\n"
+                if details:
+                    timeline += f"   {details}\n"
+                timeline += "\n"
+            except Exception as e:
+                logger.warning(f"Error parsing audit event: {e}")
+                timeline += f"• {event}\n\n"
+        
+        # Telegram message limit safety
+        max_len = 3500
+        if len(timeline) <= max_len:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=timeline,
+                parse_mode="Markdown"
+            )
+        else:
+            # Split into chunks
+            chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=chunks[0],
+                parse_mode="Markdown"
+            )
+            for chunk in chunks[1:]:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunk,
+                    parse_mode="Markdown"
+                )
+    except Exception as e:
+        logger.error(f"Error in audit_handler: {e}", exc_info=True)
+        error_msg = format_error_for_user(e, "while fetching audit trail")
+        await update.effective_message.reply_text(error_msg)
+
+
+@rate_limited("stats")
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display system analytics and performance statistics."""
+    logger.info(f"Stats requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    msg = await update.effective_message.reply_text("📊 Generating analytics report...", parse_mode="Markdown")
+    
+    try:
+        # Get audit log path from config
+        audit_log_path = os.path.join(DATA_DIR, "audit.log")
+        
+        # Parse optional lookback days argument
+        lookback_days = 30  # default
+        if context.args and len(context.args) > 0:
+            try:
+                lookback_days = int(context.args[0])
+                if lookback_days < 1 or lookback_days > 365:
+                    await update.effective_message.reply_text("⚠️ Lookback days must be between 1 and 365. Using default 30 days.")
+                    lookback_days = 30
+            except ValueError:
+                await update.effective_message.reply_text("⚠️ Invalid lookback days. Using default 30 days.")
+                lookback_days = 30
+        
+        # Generate report
+        report = get_stats_report(audit_log_path, lookback_days=lookback_days)
+        
+        # Send report (handle Telegram message length limits)
+        max_len = 3500
+        if len(report) <= max_len:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=report,
+                parse_mode="Markdown"
+            )
+        else:
+            # Split into chunks
+            chunks = [report[i:i+max_len] for i in range(0, len(report), max_len)]
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=chunks[0],
+                parse_mode="Markdown"
+            )
+            for chunk in chunks[1:]:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunk,
+                    parse_mode="Markdown"
+                )
+    
+    except FileNotFoundError:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text="📊 No audit log found. System has not logged any workflow events yet."
+        )
+    except Exception as e:
+        logger.error(f"Error in stats_handler: {e}", exc_info=True)
+        error_msg = format_error_for_user(e, "while generating analytics report")
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=msg.message_id,
+            text=error_msg
+        )
+
+
+@rate_limited("reprocess")
 async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Re-run agent processing for an open issue."""
     logger.info(f"Reprocess requested by user: {update.effective_user.id}")
@@ -1395,105 +1730,12 @@ async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pause auto-chaining for a workflow (workflow continues but no auto-launch of next agent)."""
-    logger.info(f"Pause requested by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
-        return
-
-    if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /pause <issue#>\n\nExample: /pause 0")
-        return
-
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
-        return
-
-    from inbox_processor import set_workflow_state
-    set_workflow_state(issue_num, "paused")
-    
-    await update.effective_message.reply_text(
-        f"⏸️ **Workflow paused for issue #{issue_num}**\n\n"
-        f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
-        f"Use /resume {issue_num} to re-enable auto-chaining."
-    )
+async def pause_handler_REMOVED():
+    """This function has been moved to commands/workflow.py"""
+    pass
 
 
-async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resume auto-chaining for a paused workflow."""
-    logger.info(f"Resume requested by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
-        return
-
-    if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /resume <issue#>\n\nExample: /resume 0")
-        return
-
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
-        return
-
-    from inbox_processor import set_workflow_state
-    set_workflow_state(issue_num, "active")
-    
-    await update.effective_message.reply_text(
-        f"▶️ **Workflow resumed for issue #{issue_num}**\n\n"
-        f"Auto-chaining is re-enabled. The next agent will be launched when the current step completes.\n"
-        f"Check /active to see current progress."
-    )
-
-
-async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop and close a workflow (marks as stopped, prevents auto-chaining and agent launches)."""
-    logger.info(f"Stop requested by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
-        return
-
-    if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /stop <issue#>\n\nExample: /stop 0")
-        return
-
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
-        return
-
-    from inbox_processor import set_workflow_state
-    
-    # Kill any running agent first
-    pid = find_agent_pid_for_issue(issue_num)
-    if pid:
-        try:
-            subprocess.run(["kill", "-9", str(pid)], check=True, timeout=5)
-            logger.info(f"Killed agent PID {pid} for issue #{issue_num}")
-        except Exception as e:
-            logger.error(f"Failed to kill agent: {e}")
-    
-    # Mark workflow as stopped
-    set_workflow_state(issue_num, "stopped")
-    
-    # Also close the GitHub issue
-    try:
-        subprocess.run(
-            ["gh", "issue", "close", issue_num, "--repo", GITHUB_REPO,
-             "--comment", "🛑 Workflow stopped by @Ghabs. Run /resume to re-enable."],
-            check=False, text=True, capture_output=True, timeout=10
-        )
-    except Exception as e:
-        logger.warning(f"Could not close issue: {e}")
-    
-    await update.effective_message.reply_text(
-        f"🛑 **Workflow STOPPED for issue #{issue_num}**\n\n"
-        f"• Auto-chaining disabled\n"
-        f"• Running agent killed (if any)\n"
-        f"• Issue closed on GitHub\n\n"
-        f"Use /resume {issue_num} to un-stop the workflow."
-    )
+# pause_handler, resume_handler, and stop_handler are now imported from commands.workflow
 
 
 def get_agents_for_project(project_dir):
@@ -1575,6 +1817,7 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"❌ Error: {e}")
 
 
+@rate_limited("direct")
 async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a direct request to a specific agent for a project."""
     logger.info(f"Direct request by user: {update.effective_user.id}")
@@ -1920,11 +2163,122 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses from notifications."""
+    query = update.callback_query
+    await query.answer()
+    
+    if not query.data:
+        return
+    
+    # Parse callback data: action_issuenum
+    parts = query.data.split('_', 1)
+    if len(parts) < 2:
+        return
+    
+    action = parts[0]
+    issue_num = parts[1]
+    
+    logger.info(f"Inline keyboard action: {action} for issue #{issue_num}")
+    
+    # Map actions to handler functions
+    action_handlers = {
+        'logs': logs_handler,
+        'logsfull': logsfull_handler,
+        'status': status_handler,
+        'pause': pause_handler,
+        'resume': resume_handler,
+        'stop': stop_handler,
+        'audit': audit_handler,
+        'reprocess': reprocess_handler,
+    }
+    
+    # For actions that need issue number in context.args
+    if action in action_handlers:
+        # Create a fake update with the command
+        context.args = [issue_num]
+        
+        # Call the appropriate handler
+        handler = action_handlers[action]
+        await handler(update, context)
+    elif action == 'respond':
+        # For respond, just show instructions
+        await query.edit_message_text(
+            f"✍️ To respond to issue #{issue_num}, use:\\n\\n"
+            f"`/respond {issue_num} <your message>`\\n\\n"
+            f"Example:\\n"
+            f"`/respond {issue_num} Approved, proceed with implementation`",
+            parse_mode='Markdown'
+        )
+    elif action == 'approve':
+        # Auto-approve implementation
+        context.args = [issue_num]
+        # Simulate approval by posting comment
+        await query.edit_message_text(f"✅ Approving implementation for issue #{issue_num}...")
+        
+        try:
+            subprocess.run(
+                ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO,
+                 "--body", "✅ Implementation approved by @Ghabs. Please proceed."],
+                check=True, timeout=10
+            )
+            await query.edit_message_text(
+                f"✅ Implementation approved for issue #{issue_num}\\n\\n"
+                f"Agent will continue automatically.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error approving: {e}")
+    elif action == 'reject':
+        # Reject implementation
+        context.args = [issue_num]
+        await query.edit_message_text(f"❌ Rejecting implementation for issue #{issue_num}...")
+        
+        try:
+            subprocess.run(
+                ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO,
+                 "--body", "❌ Implementation rejected by @Ghabs. Please revise."],
+                check=True, timeout=10
+            )
+            await query.edit_message_text(
+                f"❌ Implementation rejected for issue #{issue_num}\\n\\n"
+                f"Agent has been notified.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error rejecting: {e}")
+
+
 # --- MAIN ---
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Initialize report scheduler (start it after app runs)
+    report_scheduler = None
+    if os.getenv('ENABLE_SCHEDULED_REPORTS', 'true').lower() == 'true':
+        report_scheduler = ReportScheduler(bot=app.bot, chat_id=TELEGRAM_CHAT_ID)
+        logger.info("📊 Scheduled reports will be enabled after startup")
+    
+    # Initialize alerting system (start it after app runs)
+    alerting_system = None
+    if os.getenv('ENABLE_ALERTING', 'true').lower() == 'true':
+        alerting_system = init_alerting_system(bot=app.bot, chat_id=TELEGRAM_CHAT_ID)
+        logger.info("🚨 Alerting system will be enabled after startup")
+    
     # Register commands on startup (Telegram client menu)
-    app.post_init = on_startup
+    original_post_init = on_startup
+    
+    async def post_init_with_scheduler(application):
+        """Post init that also starts the report scheduler and alerting system."""
+        await original_post_init(application)
+        if report_scheduler:
+            report_scheduler.start()
+            logger.info("📊 Scheduled reports started")
+        if alerting_system:
+            alerting_system.start()
+            logger.info("🚨 Alerting system started")
+    
+    app.post_init = post_init_with_scheduler
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("new", start_selection)],
@@ -1944,8 +2298,11 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("track", track_handler))
     app.add_handler(CommandHandler("untrack", untrack_handler))
+    app.add_handler(CommandHandler("myissues", myissues_handler))
     app.add_handler(CommandHandler("logs", logs_handler))
     app.add_handler(CommandHandler("logsfull", logsfull_handler))
+    app.add_handler(CommandHandler("audit", audit_handler))
+    app.add_handler(CommandHandler("stats", stats_handler))
     app.add_handler(CommandHandler("comments", comments_handler))
     app.add_handler(CommandHandler("reprocess", reprocess_handler))
     app.add_handler(CommandHandler("continue", continue_handler))
@@ -1959,6 +2316,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("assign", assign_handler))
     app.add_handler(CommandHandler("implement", implement_handler))
     app.add_handler(CommandHandler("prepare", prepare_handler))
+    # Inline keyboard callback handler (must be before ConversationHandler callbacks)
+    app.add_handler(CallbackQueryHandler(inline_keyboard_handler, pattern=r'^(logs|logsfull|status|pause|resume|stop|audit|reprocess|respond|approve|reject)_'))
     # Exclude commands from the auto-router catch-all
     app.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & (~filters.COMMAND), hands_free_handler))
 

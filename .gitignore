@@ -53,6 +53,9 @@ temp_voice.ogg
 *.tmp
 *.log
 
+# Logs
+logs/
+
 # OS
 Thumbs.db
 

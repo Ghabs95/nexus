@@ -1,0 +1,18 @@
+[Unit]
+Description=Nexus Health Check Endpoint
+After=network.target nexus-bot.service nexus-processor.service
+Wants=nexus-bot.service nexus-processor.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus
+EnvironmentFile=/home/ubuntu/git/ghabs/nexus/vars.secret
+Environment="HEALTH_CHECK_PORT=8080"
+Environment="HEALTH_CHECK_HOST=127.0.0.1"
+ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python src/health_check.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
