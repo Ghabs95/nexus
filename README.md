@@ -61,7 +61,6 @@ Step through an interactive menu:
 
 - Python 3.8+
 - Telegram account
-- Google Gemini API key
 - FFmpeg (for audio processing)
 
 ### Installation
@@ -84,7 +83,7 @@ Step through an interactive menu:
    ```
    
    This installs all required packages including:
-   - `google-genai` - Google Gemini AI client
+   - `requests` - HTTP client for notifications and health checks
    - `python-telegram-bot` - Telegram bot framework
    - `python-dotenv` - Environment variable management
    - `pytest`, `pytest-mock`, `pytest-asyncio` - Testing framework (115 unit tests)
@@ -99,8 +98,6 @@ GITHUB_AGENTS_REPO=Ghabs95/agents    # Where parent issues are created
    Add your values:
    ```
    TELEGRAM_TOKEN=your_telegram_bot_token
-   AI_API_KEY=your_google_gemini_api_key
-   AI_MODEL=gemini-2.0-flash
    ALLOWED_USER=your_user_id
    ```
 
@@ -783,8 +780,10 @@ python3 -c "from agent_monitor import AgentMonitor; print('✅ AgentMonitor OK')
 ### 📚 Complete Documentation Suite
 
 - **[README.md](README.md)** (this file) - User guide, features, and command reference
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design, data flows, and component details
+- **[docs/RESTORE.md](docs/RESTORE.md)** - Complete restore & replication guide (system recovery)
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Production deployment guide and operations
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design, data flows, and component details
+- **[docs/AI-ORCHESTRATOR.md](docs/AI-ORCHESTRATOR.md)** - AI tool orchestration & Copilot/Gemini integration
 - **[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** - Development setup and contribution guidelines
 - **[docs/WEBHOOK-REFERENCE.md](docs/WEBHOOK-REFERENCE.md)** - Webhook server operations guide
 - **[docs/WEBHOOK-QUICKSTART.md](docs/WEBHOOK-QUICKSTART.md)** - Quick webhook setup guide
@@ -793,7 +792,9 @@ python3 -c "from agent_monitor import AgentMonitor; print('✅ AgentMonitor OK')
 
 | Need | Document | Section |
 |------|----------|---------|
+| Restore or replicate system | [RESTORE.md](docs/RESTORE.md) | Complete guide (infrastructure + services) |
 | Install system | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Initial Setup |
+| Understand AI tools & routing | [AI-ORCHESTRATOR.md](docs/AI-ORCHESTRATOR.md) | Tool selection strategy |
 | Setup webhooks | [WEBHOOK-REFERENCE.md](docs/WEBHOOK-REFERENCE.md) | GitHub Configuration |
 | Understand architecture | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System Overview |
 | Add new feature | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Making Changes |

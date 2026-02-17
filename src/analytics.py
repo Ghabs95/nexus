@@ -121,7 +121,10 @@ class AuditLogParser:
             logger.warning(f"Audit log not found: {self.audit_log_path}")
             return
         
-        cutoff_time = datetime.now() - timedelta(days=lookback_days)
+        # Use date-based cutoff to avoid time-of-day flakiness (include full days)
+        cutoff_time = (datetime.now() - timedelta(days=lookback_days)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         
         try:
             with open(self.audit_log_path, 'r') as f:

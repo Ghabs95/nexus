@@ -7,17 +7,18 @@ import shutil
 import subprocess
 import time
 import requests
-from google import genai
 
 # Import centralized configuration
 from config import (
     BASE_DIR, GITHUB_AGENTS_REPO, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
-    GOOGLE_API_KEY, GOOGLE_AI_MODEL, SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
-    WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE
+    SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
+    WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG
 )
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
+from agent_launcher import invoke_copilot_agent
+from ai_orchestrator import get_orchestrator
 from error_handling import (
     run_command_with_retry, 
     format_error_for_user,
@@ -36,8 +37,8 @@ from notifications import (
 LAUNCHED_AGENTS_FILE = StateManager.__dict__.get("LAUNCHED_AGENTS_FILE")
 WORKFLOW_STATE_FILE = StateManager.__dict__.get("WORKFLOW_STATE_FILE")
 
-# Initialize Gemini client if API key is available
-gemini_client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+# Initialize orchestrator (CLI-only)
+orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
 
 # Track alerted agents to avoid spam
 alerted_agents = set()
@@ -521,7 +522,7 @@ def check_completed_agents():
                                     f"End with a completion marker like: 'Ready for `@NextAgent`'"
                                 )
                                 
-                                pid = invoke_copilot_agent(
+                                pid, tool_used = invoke_copilot_agent(
                                     agents_dir=agents_abs,
                                     workspace_dir=workspace_abs,
                                     issue_url=issue_url,
@@ -532,14 +533,15 @@ def check_completed_agents():
                                 )
                                 
                                 if pid:
-                                    logger.info(f"🔗 Auto-chained from GitHub comment to @{next_agent} for issue #{issue_num} (PID: {pid})")
+                                    logger.info(f"🔗 Auto-chained from GitHub comment to @{next_agent} for issue #{issue_num} (PID: {pid}, tool: {tool_used})")
                                     auto_chained_agents[comment_chain_key] = True
                                     
                                     # Track launch in persistent storage
                                     launched_agents_tracker[issue_num] = {
                                         'pid': pid,
                                         'timestamp': time.time(),
-                                        'agent': next_agent
+                                        'agent': next_agent,
+                                        'tool': tool_used
                                     }
                                     save_launched_agents(launched_agents_tracker)
                                     
@@ -757,7 +759,7 @@ def check_completed_agents():
                             f"Simply complete your work, add the marker, and exit."
                         )
                         
-                        pid = invoke_copilot_agent(
+                        pid, tool_used = invoke_copilot_agent(
                             agents_dir=agents_abs,
                             workspace_dir=workspace_abs,
                             issue_url=issue_url,
@@ -768,14 +770,15 @@ def check_completed_agents():
                         )
                         
                         if pid:
-                            logger.info(f"🔗 Auto-chained to @{next_agent} for issue #{issue_num} (PID: {pid})")
+                            logger.info(f"🔗 Auto-chained to @{next_agent} for issue #{issue_num} (PID: {pid}, tool: {tool_used})")
                             auto_chained_agents[chain_key] = True
                             
                             # Track launch in persistent storage
                             launched_agents_tracker[issue_num] = {
                                 'pid': pid,
                                 'timestamp': time.time(),
-                                'agent': next_agent
+                                'agent': next_agent,
+                                'tool': tool_used
                             }
                             save_launched_agents(launched_agents_tracker)
                             
@@ -785,7 +788,8 @@ def check_completed_agents():
                                 f"Issue: #{issue_num}\n"
                                 f"Previous agent completed\n"
                                 f"Next agent: @{next_agent}\n"
-                                f"PID: {pid}\n\n"
+                                f"PID: {pid}\n"
+                                f"Tool: {tool_used}\n\n"
                                 f"🔗 https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_num}"
                             )
                             send_telegram_alert(message)
@@ -915,251 +919,41 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
         return None
 
 
-def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_content, 
-                         continuation=False, continuation_prompt=None):
-    """Invokes Copilot CLI on the agents directory to process the task.
-
-    Runs asynchronously (Popen) since agent execution can take several minutes.
-    The @ProjectLead agent will follow the SOP workflow to:
-    1. Triage the task
-    2. Determine the target sub-repo within the workspace
-    3. Route to the correct Tier 2 Lead for implementation
+def get_sop_tier(task_type, title="",body=""):
+    """Intelligently determine the SOP tier (workflow strategy) for a task.
     
-    Args:
-        agents_dir: Path to agents directory
-        workspace_dir: Path to workspace directory
-        issue_url: GitHub issue URL
-        tier_name: Workflow tier (full/shortened/fast-track)
-        task_content: Task description
-        continuation: If True, this is a continuation of previous work
-        continuation_prompt: Custom prompt for continuation
+    Uses WorkflowRouter for advanced ML-style routing based on content analysis.
     """
-    workflow_name = get_workflow_name(tier_name)
-
-    if continuation:
-        # Auto-chained continuation: use custom continuation_prompt directly
-        if continuation_prompt and continuation_prompt.startswith("You are @"):
-            # This is an auto-chain to a different agent, use it as-is
-            prompt = (
-                f"{continuation_prompt}\n\n"
-                f"Issue: {issue_url}\n"
-                f"Tier: {tier_name}\n"
-                f"Workflow: /{workflow_name}\n\n"
-                f"Review the previous work in the GitHub comments and task file, then complete your step.\n\n"
-                f"**GIT WORKFLOW (CRITICAL):**\n"
-                f"1. Check the issue body for **Target Branch** field (e.g., `feat/surveyor-plan`)\n"
-                f"2. Identify the correct sub-repo within the workspace (e.g., casit-be, casit-app, casit-omi)\n"
-                f"3. In that sub-repo: \n"
-                f"   - For feat/fix/chore: create branch from `develop`: `git checkout develop && git pull && git checkout -b <branch-name>`\n"
-                f"   - For hotfix: create branch from `main`: `git checkout main && git pull && git checkout -b <branch-name>`\n"
-                f"4. Make your changes and commit with descriptive messages\n"
-                f"5. Push the branch: `git push -u origin <branch-name>`\n"
-                f"6. Include branch name in your GitHub comment (e.g., 'Pushed to feat/surveyor-plan in casit-be')\n\n"
-                f"⛔ **GIT SAFETY RULES (STRICT):**\n"
-                f"❌ NEVER push to protected branches: `main`, `develop`, `master`, `test`, `staging`, `production`\n"
-                f"❌ NEVER delete any branch: No `git branch -d` or `git push --delete`\n"
-                f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
-                f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
-                f"⚠️  Violating these rules can break production and cause team disruption\n\n"
-                f"When you finish your work:\n"
-                f"1. Commit and push all changes to the target branch\n"
-                f"2. Update the task file with your results\n"
-                f"3. Post a GitHub comment summarizing your work and confirming the push\n"
-                f"4. END YOUR COMMENT with a clear completion marker:\n\n"
-                f"   **Required format:** 'Ready for @NextAgentName'\n"
-                f"   Example: 'Ready for @ProductDesigner to begin UX design'\n\n"
-                f"5. Exit when done - DO NOT attempt to invoke the next agent\n\n"
-                f"The system will automatically detect your completion and launch the next agent.\n\n"
-                f"Task context:\n{task_content}"
-            )
-        else:
-            # Manual continuation (user ran /continue): wrap with @ProjectLead context
-            base_prompt = continuation_prompt or "Please continue with the next step."
-            prompt = (
-                f"You are @ProjectLead. You previously started working on this task:\n\n"
-                f"Issue: {issue_url}\n"
-                f"Tier: {tier_name}\n"
-                f"Workflow: /{workflow_name}\n\n"
-                f"⚠️ **CRITICAL:** Before doing anything:\n"
-                f"1. Check the most recent GitHub comments\n"
-                f"2. If the next agent has already been invoked (e.g., '@Atlas has been assigned'), DO NOT invoke them again\n"
-                f"3. If your step is already complete with a completion marker, simply EXIT - do NOT continue\n"
-                f"4. ONLY proceed if you are actually stuck DURING your step (incomplete work)\n\n"
-                f"{base_prompt}\n\n"
-                f"**GIT WORKFLOW (CRITICAL):**\n"
-                f"1. Check the issue body for **Target Branch** field (e.g., `feat/surveyor-plan`)\n"
-                f"2. Identify the correct sub-repo within the workspace (e.g., casit-be, casit-app, casit-omi)\n"
-                f"3. In that sub-repo: \n"
-                f"   - For feat/fix/chore: create from `develop`: `git checkout develop && git pull && git checkout -b <branch-name>`\n"
-                f"   - For hotfix: create from `main`: `git checkout main && git pull && git checkout -b <branch-name>`\n"
-                f"   - If branch exists: `git checkout <branch-name> && git pull`\n"
-                f"4. Make your changes and commit with descriptive messages\n"
-                f"5. Push the branch: `git push -u origin <branch-name>`\n"
-                f"6. Include branch name in your GitHub comment\n\n"
-                f"⛔ **GIT SAFETY RULES (STRICT):**\n"
-                f"❌ NEVER push to protected branches: `main`, `develop`, `master`, `test`, `staging`, `production`\n"
-                f"❌ NEVER delete any branch: No `git branch -d` or `git push --delete`\n"
-                f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
-                f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
-                f"⚠️  Violating these rules can break production and cause team disruption\n\n"
-                f"If you do proceed:\n"
-                f"- Review your previous work (check logs, session state, and git branches)\n"
-                f"- Complete ONLY your step\n"
-                f"- Commit and push all changes\n"
-                f"- Post completion marker: 'Ready for `@NextAgent`'\n"
-                f"- EXIT immediately\n\n"
-                f"When you complete your step, end your GitHub comment with:\n"
-                f"'Ready for @NextAgent' (e.g., 'Ready for @Atlas')\n\n"
-                f"Original task content:\n{task_content}"
-            )
-    else:
-        # Fresh start prompt for @ProjectLead
-        prompt = (
-            f"You are @ProjectLead. A new task has arrived and a GitHub issue has been created.\n\n"
-            f"Issue: {issue_url}\n"
-            f"Tier: {tier_name}\n"
-            f"Workflow: /{workflow_name}\n\n"
-            f"**YOUR JOB:** Triage and route only. DO NOT try to implement or invoke other agents.\n\n"
-            f"**GIT WORKFLOW INSTRUCTION (for downstream agents):**\n"
-            f"The issue body contains **Target Branch** field (e.g., `feat/surveyor-plan`).\n"
-            f"When you route to implementation agents (@BackendLead, @MobileLead, etc.), remind them:\n"
-            f"1. Work in the appropriate sub-repo (casit-be, casit-app, casit-omi, etc.)\n"
-            f"2. Create branch from correct base:\n"
-            f"   - feat/fix/chore/refactor/docs branches: from `develop`\n"
-            f"   - hotfix branches: from `main`\n"
-            f"3. Commit and push all changes to that branch\n"
-            f"4. Mention the branch and push status in GitHub comments\n"
-            f"5. ⛔ SAFETY: NEVER push to protected branches (main/develop/master/test/staging/production)\n"
-            f"6. ⛔ SAFETY: NEVER delete branches\n"
-            f"7. ✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n\n"
-            f"REQUIRED ACTIONS:\n"
-            f"1. Analyze the task requirements\n"
-            f"2. Identify which sub-repo(s) are affected\n"
-            f"3. Update the task file with triage details\n"
-            f"4. Post a GitHub comment showing:\n"
-            f"   - Task severity\n"
-            f"   - Target sub-repo(s)\n"
-            f"   - Target branch (from issue body)\n"
-            f"   - Which agent should handle it next\n"
-            f"   - Use format: 'Ready for @NextAgent' (e.g., 'Ready for @Atlas')\n"
-            f"5. **EXIT** - The system will auto-route to the next agent\n\n"
-            f"**DO NOT:**\n"
-            f"❌ Read other agent configuration files\n"
-            f"❌ Use any 'invoke', 'task', or 'run tool' to start other agents\n"
-            f"❌ Try to implement the feature yourself\n"
-            f"❌ Make unnecessary commits or branch changes (you're just triaging)\n\n"
-            f"**REQUIRED COMPLETION MARKER:**\n"
-            f"Your final comment MUST include: 'Ready for @NextAgentName'\n"
-            f"Example: 'Ready for @Atlas to assess technical feasibility'\n\n"
-            f"Task details:\n{task_content}"
-        )
-
-    cmd = [
-        "copilot",
-        "-p", prompt,
-        "--add-dir", BASE_DIR,  # Parent directory for cross-project access
-        "--add-dir", workspace_dir,
-        "--add-dir", agents_dir,
-        "--allow-all-tools"
-    ]
-
-    mode = "continuation" if continuation else "initial"
-    logger.info(f"🤖 Launching Copilot CLI agent in {agents_dir} (mode: {mode})")
-    logger.info(f"   Workspace: {workspace_dir}")
-    logger.info(f"   Workflow: /{workflow_name} (tier: {tier_name})")
-
-    # Log copilot output to a file for debugging
-    log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    issue_match = re.search(r"/issues/(\d+)", issue_url or "")
-    issue_num = issue_match.group(1) if issue_match else "unknown"
-    log_path = os.path.join(log_dir, f"copilot_{issue_num}_{timestamp}.log")
-    logger.info(f"   Log file: {log_path}")
-
-    try:
-        log_file = open(log_path, "w")
-        process = subprocess.Popen(
-            cmd,
-            cwd=workspace_dir,  # Start in workspace, not agents dir
-            stdout=log_file,
-            stderr=subprocess.STDOUT
-        )
-        logger.info(f"🚀 Copilot CLI launched (PID: {process.pid})")
-        
-        # Audit log the agent launch
-        if issue_num != "unknown":
-            StateManager.audit_log(
-                int(issue_num),
-                "AGENT_LAUNCHED",
-                f"Launched Copilot agent in {os.path.basename(agents_dir)} "
-                f"(workflow: {workflow_name}/{tier_name}, mode: {mode}, PID: {process.pid})"
-            )
-        
-        return process.pid
-    except FileNotFoundError:
-        logger.error("'copilot' CLI not found. Install: brew install copilot-cli")
-        if issue_num != "unknown":
-            StateManager.audit_log(
-                int(issue_num),
-                "AGENT_LAUNCH_FAILED",
-                "Copilot CLI not found. Install: brew install copilot-cli"
-            )
-        return None
-    except Exception as e:
-        logger.error(f"Failed to launch Copilot CLI: {e}")
-        if issue_num != "unknown":
-            StateManager.audit_log(
-                int(issue_num),
-                "AGENT_LAUNCH_FAILED",
-                f"Exception: {str(e)}"
-            )
-        return None
+    router = WorkflowRouter(task_type, title, body)
+    tier_name, sop_template, workflow_label = router.route()
+    return tier_name, sop_template, workflow_label
 
 
 def generate_issue_name(content, project_name):
-    """Generate a concise issue name using Gemini AI.
+    """Generate a concise issue name using orchestrator (CLI only).
     
     Returns a slugified name in format: "this-is-the-issue-name"
-    Falls back to slugified content if Gemini is unavailable.
+    Falls back to slugified content if AI tools are unavailable.
     """
-    if not gemini_client:
-        logger.warning("Gemini unavailable, using fallback slug generation")
-        body = re.sub(r'^#.*\n', '', content)
-        body = re.sub(r'\*\*.*\*\*.*\n', '', body)
-        return slugify(body.strip()) or "generic-task"
-    
     try:
-        logger.info("Generating concise issue name with Gemini...")
-        response = gemini_client.models.generate_content(
-            model=GOOGLE_AI_MODEL,
-            contents=f"""Generate a concise, descriptive issue name (3-6 words max) for this task.
-
-Task content:
-{content[:500]}
-
-Project: {project_name}
-
-Return ONLY the issue name in kebab-case format (e.g., "implement-user-authentication").
-Do NOT include the project name, type prefix, or brackets.
-Be specific but brief."""
+        logger.info("Generating concise issue name with orchestrator...")
+        result = orchestrator.run_text_to_speech_analysis(
+            text=content[:500],
+            task="generate_name",
+            project_name=project_name
         )
-        
-        suggested_name = response.text.strip()
-        # Clean up response (remove quotes, extra formatting)
-        suggested_name = suggested_name.strip('"`\'').strip()
-        # Ensure it's slugified
+
+        suggested_name = result.get("text", "").strip().strip('"`\'').strip()
         slug = slugify(suggested_name)
-        
-        if slug and len(slug) > 0:
-            logger.info(f"✨ Gemini suggested: {slug}")
+
+        if slug:
+            logger.info(f"✨ Orchestrator suggested: {slug}")
             return slug
-        else:
-            logger.warning("Gemini returned invalid slug, using fallback")
-            raise ValueError("Invalid slug from Gemini")
-            
+        
+        raise ValueError("Empty slug from orchestrator")
+
     except Exception as e:
-        logger.warning(f"Gemini name generation failed: {e}, using fallback")
+        logger.warning(f"Name generation failed: {e}, using fallback")
         body = re.sub(r'^#.*\n', '', content)
         body = re.sub(r'\*\*.*\*\*.*\n', '', body)
         return slugify(body.strip()) or "generic-task"
@@ -1271,7 +1065,7 @@ def process_file(filepath):
             agents_abs = os.path.join(BASE_DIR, agents_dir_val)
             workspace_abs = os.path.join(BASE_DIR, config["workspace"])
 
-            pid = invoke_copilot_agent(
+            pid, tool_used = invoke_copilot_agent(
                 agents_dir=agents_abs,
                 workspace_dir=workspace_abs,
                 issue_url=issue_url,
@@ -1284,6 +1078,7 @@ def process_file(filepath):
                 try:
                     with open(new_filepath, 'a') as f:
                         f.write(f"**Agent PID:** {pid}\n")
+                        f.write(f"**Agent Tool:** {tool_used}\n")
                 except Exception as e:
                     logger.error(f"Failed to append PID: {e}")
         else:

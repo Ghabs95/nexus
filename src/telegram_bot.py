@@ -7,7 +7,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
-from google import genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
@@ -16,14 +15,16 @@ from telegram.ext import (
 
 # Import configuration from centralized config module
 from config import (
-    TELEGRAM_TOKEN, GOOGLE_API_KEY, GOOGLE_AI_MODEL, ALLOWED_USER_ID, BASE_DIR,
+    TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
     DATA_DIR, TRACKED_ISSUES_FILE, GITHUB_AGENTS_REPO, PROJECT_CONFIG, ensure_data_dir,
-    TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID
+    TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR
 )
 from state_manager import StateManager
 from models import WorkflowState
 from commands.workflow import pause_handler, resume_handler, stop_handler
-from inbox_processor import get_sop_tier, invoke_copilot_agent
+from agent_launcher import invoke_copilot_agent
+from inbox_processor import get_sop_tier
+from ai_orchestrator import get_orchestrator
 from error_handling import format_error_for_user, run_command_with_retry
 from analytics import get_stats_report
 from rate_limiter import get_rate_limiter, RateLimit
@@ -42,8 +43,8 @@ logging.basicConfig(
     ]
 )
 
-# Configure Gemini
-client = genai.Client(api_key=GOOGLE_API_KEY)
+# Initialize AI Orchestrator (CLI-only: gemini-cli + copilot-cli)
+orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
 
 # Initialize rate limiter
 rate_limiter = get_rate_limiter()
@@ -314,9 +315,9 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/untrack <issue#> - Stop tracking globally\n"
         "/untrack <project> <issue#> - Stop tracking per-project\n"
         "/myissues - View all your tracked issues\n"
-        "/logs <issue#> - View task execution logs\n"
+        "/logs [issue#] - View task logs (latest if no issue)\n"
         "/logsfull <issue#> - Full log lines (no truncation)\n"
-        "/audit <issue#> - View workflow audit trail (state changes, agent launches, timeouts)\n"
+        "/audit [issue#] - View workflow audit trail (latest if no issue)\n"
         "/stats [days] - View system analytics and performance metrics (default: 30 days)\n"
         "/comments <issue#> - View issue comments\n\n"
         "🔁 **Recovery & Control:**\n"
@@ -404,31 +405,27 @@ async def on_startup(application):
         logger.exception("Failed to set bot commands on startup")
 
 
-# --- HELPER: GEMINI AUDIO PROCESSOR ---
+# --- HELPER: AUDIO TRANSCRIPTION (via Orchestrator CLI) ---
 async def process_audio_with_gemini(voice_file_id, context):
-    """Downloads Telegram audio and sends to Gemini for text."""
-    # 1. Download (.ogg)
+    """Downloads Telegram audio and transcribes using orchestrator (CLI only)."""
+    # 1. Download audio to temp file
     new_file = await context.bot.get_file(voice_file_id)
     await new_file.download_to_drive("temp_voice.ogg")
 
-    # 2. Upload & Transcribe (Gemini supports .ogg)
-    logger.info("Uploading audio to Gemini...")
-    audio_file = await client.aio.files.upload(file="temp_voice.ogg")
+    # 2. Transcribe using orchestrator (gemini-cli + copilot-cli fallback)
+    logger.info("🎧 Transcribing audio with orchestrator...")
+    text = orchestrator.transcribe_audio_cli("temp_voice.ogg")
 
-    # Prompt just for transcription
-    logger.info("Starting transcription...")
-    response = await client.aio.models.generate_content(
-        model=GOOGLE_AI_MODEL,
-        contents=[
-            "Transcribe this audio exactly. Return ONLY the text.",
-            audio_file
-        ]
-    )
+    # 3. Cleanup
+    if os.path.exists("temp_voice.ogg"):
+        os.remove("temp_voice.ogg")
 
-    # Cleanup
-    if os.path.exists("temp_voice.ogg"): os.remove("temp_voice.ogg")
-
-    return response.text.strip()
+    if text:
+        logger.info(f"✅ Transcription successful ({len(text)} chars)")
+        return text.strip()
+    else:
+        logger.error("❌ Transcription failed")
+        return None
 
 
 # --- 1. HANDS-FREE MODE (Auto-Router) ---
@@ -444,70 +441,52 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     text = ""
-    status_msg = await update.message.reply_text("⚡ Gemini Listening...")
+    status_msg = await update.message.reply_text("⚡ AI Listening...")
 
     # A. Handle Audio
     if update.message.voice:
-        # Download
-        new_file = await context.bot.get_file(update.message.voice.file_id)
-        await new_file.download_to_drive("temp_voice.ogg")
+        text = await process_audio_with_gemini(update.message.voice.file_id, context)
+        if not text:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=status_msg.message_id,
+                text="⚠️ Transcription failed"
+            )
+            return
 
-        # Multimodal Prompt: "Listen and Route"
-        logger.info("Uploading audio for auto-routing...")
-        with open("temp_voice.ogg", "rb") as f:
-            audio_file = await client.aio.files.upload(file=f)
-
-        response = await client.aio.models.generate_content(
-            model=GOOGLE_AI_MODEL,
-            contents=[
-                f"""
-                You are a project router. Listen to the audio.
-                1. Transcribe the text.
-                2. Map it to one of these keys: {list(PROJECTS.keys())}.
-                3. Classify type as one of: {list(TYPES.keys())}.
-                   - Use 'feature-simple' for straightforward features without UX/architecture needs
-                   - Use 'feature' for complex features needing design review
-                   - Use 'improvement-simple' for minor enhancements
-                   - Use 'improvement' for significant enhancements
-                4. Generate a concise issue name (3-6 words, kebab-case, no project name).
-                5. Return JSON: {{"project": "key", "type": "type_key", "text": "transcription", "issue_name": "issue-name-here"}}
-                """,
-                audio_file
-            ]
+        result = orchestrator.run_text_to_speech_analysis(
+            text=text,
+            task="classify",
+            projects=list(PROJECTS.keys()),
+            types=list(TYPES.keys())
         )
-
-        # Cleanup
-        os.remove("temp_voice.ogg")
 
     # B. Handle Text
     else:
         logger.info("Processing text for auto-routing...")
-        text_input = update.message.text
-        response = await client.aio.models.generate_content(
-            model=GOOGLE_AI_MODEL,
-            contents=f"""
-                1. Map this text to one of these keys: {list(PROJECTS.keys())}.
-                2. Classify type as one of: {list(TYPES.keys())}.
-                   - Use 'feature-simple' for straightforward features without UX/architecture needs
-                   - Use 'feature' for complex features needing design review
-                   - Use 'improvement-simple' for minor enhancements
-                   - Use 'improvement' for significant enhancements
-                3. Generate a concise issue name (3-6 words, kebab-case, no project name).
-                4. Return JSON: {{"project": "key", "type": "type_key", "text": "{text_input}", "issue_name": "issue-name-here"}}
-                Input: {text_input}
-            """
+        text = update.message.text
+        result = orchestrator.run_text_to_speech_analysis(
+            text=text,
+            task="classify",
+            projects=list(PROJECTS.keys()),
+            types=list(TYPES.keys())
         )
 
     # Parse Result
     try:
-        result = json.loads(response.text.replace("```json", "").replace("```", ""))
+        if isinstance(result, dict) and result.get("parse_error") and result.get("text"):
+            result = json.loads(result["text"].replace("```json", "").replace("```", ""))
+
         project = result.get("project", "inbox")
         task_type = result.get("type", "feature")
-        content = result.get("text", "")
+        content = result.get("text", text or "")
         issue_name = result.get("issue_name", "")
-    except:
-        await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=status_msg.message_id,
-                                            text="⚠️ JSON Error")
+    except Exception:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=status_msg.message_id,
+            text="⚠️ JSON Error"
+        )
         return
 
     # Save to File
@@ -562,26 +541,26 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = ""
     if update.message.voice:
-        msg = await update.message.reply_text("🎧 Transcribing with Gemini...")
+        msg = await update.message.reply_text("🎧 Transcribing (CLI)...")
         # Re-use the helper function to just get text
         text = await process_audio_with_gemini(update.message.voice.file_id, context)
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg.message_id)
     else:
         text = update.message.text
 
-    # Generate issue name with Gemini
+    if not text:
+        await update.message.reply_text("⚠️ Transcription failed. Please try again.")
+        return ConversationHandler.END
+
+    # Generate issue name using orchestrator (CLI only)
     issue_name = ""
     try:
-        response = await client.aio.models.generate_content(
-            model=GOOGLE_AI_MODEL,
-            contents=f"""Generate a concise issue name (3-6 words, kebab-case) for this task.
-Task: {text[:300]}
-Project: {PROJECTS.get(project)}
-Type: {TYPES.get(task_type)}
-
-Return only the issue name, nothing else."""
+        name_result = orchestrator.run_text_to_speech_analysis(
+            text=text[:300],
+            task="generate_name",
+            project_name=PROJECTS.get(project)
         )
-        issue_name = response.text.strip().strip('"`\'')
+        issue_name = name_result.get("text", "").strip().strip('"`\'')
     except Exception as e:
         logger.warning(f"Failed to generate issue name: {e}")
         issue_name = ""
@@ -1156,7 +1135,49 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /logs <issue#>")
+        # Show recent task logs across projects
+        log_pattern = os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", "*.log")
+        log_files = glob.glob(log_pattern, recursive=True)
+        log_files.sort(key=os.path.getmtime, reverse=True)
+
+        if not log_files:
+            await update.effective_message.reply_text("⚠️ No task logs found yet.")
+            return
+
+        msg = await update.effective_message.reply_text("📋 Latest task logs (recent files)...")
+
+        timeline = "Latest task logs (recent files):\n\n"
+        for log_file in log_files[:3]:
+            timeline += f"**{os.path.basename(log_file)}**\n"
+            try:
+                with open(log_file, "r") as f:
+                    lines = f.readlines()[-40:]
+                for line in lines:
+                    timeline += f"{line.rstrip()}\n"
+            except Exception as e:
+                timeline += f"❌ Failed to read {os.path.basename(log_file)}: {e}\n"
+            timeline += "\n"
+
+        # Telegram message limit safety: send in chunks
+        max_len = 3500
+        if len(timeline) <= max_len:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=timeline
+            )
+        else:
+            chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=chunks[0]
+            )
+            for chunk in chunks[1:]:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunk
+                )
         return
 
     issue_num = context.args[0].lstrip("#")
@@ -1311,8 +1332,53 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /audit <issue#>")
-        return
+        # Show latest audit events across all issues
+        audit_log = os.path.join(LOGS_DIR, "audit.log")
+        if not os.path.exists(audit_log):
+            await update.effective_message.reply_text("⚠️ No audit log found yet.")
+            return
+
+        msg = await update.effective_message.reply_text("📊 Latest audit events...")
+        try:
+            with open(audit_log, "r") as f:
+                lines = f.readlines()[-50:]
+
+            timeline = "📊 **Latest Audit Events**\n" + ("=" * 40) + "\n\n"
+            for line in lines:
+                timeline += line.rstrip() + "\n"
+
+            # Telegram message limit safety
+            max_len = 3500
+            if len(timeline) <= max_len:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=timeline,
+                    parse_mode="Markdown"
+                )
+            else:
+                chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=chunks[0],
+                    parse_mode="Markdown"
+                )
+                for chunk in chunks[1:]:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=chunk,
+                        parse_mode="Markdown"
+                    )
+            return
+        except Exception as e:
+            logger.error(f"Error reading audit log: {e}")
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to read audit log: {e}"
+            )
+            return
 
     issue_num = context.args[0].lstrip("#")
     if not issue_num.isdigit():
@@ -1529,7 +1595,7 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
 
-    pid = invoke_copilot_agent(
+    pid, tool_used = invoke_copilot_agent(
         agents_dir=agents_abs,
         workspace_dir=workspace_abs,
         issue_url=issue_url,
@@ -1542,7 +1608,7 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
             text=(
-                f"✅ Reprocess started for issue #{issue_num}. Agent PID: {pid}\n\n"
+                f"✅ Reprocess started for issue #{issue_num}. Agent PID: {pid} (Tool: {tool_used})\n\n"
                 f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
             )
         )
@@ -1642,7 +1708,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
 
     # Launch with continuation context
-    pid = invoke_copilot_agent(
+    pid, tool_used = invoke_copilot_agent(
         agents_dir=agents_abs,
         workspace_dir=workspace_abs,
         issue_url=issue_url,
@@ -1657,7 +1723,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
             text=(
-                f"✅ Agent continued for issue #{issue_num}. PID: {pid}\n\n"
+                f"✅ Agent continued for issue #{issue_num}. PID: {pid} (Tool: {tool_used})\n\n"
                 f"Prompt: {continuation_prompt}\n\n"
                 f"ℹ️ **Note:** The agent will first check if the workflow has already progressed.\n"
                 f"If another agent is already handling the next step, this agent will exit gracefully.\n"
@@ -2119,7 +2185,7 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Please proceed with the next step of the workflow."
         )
 
-        pid = invoke_copilot_agent(
+        pid, tool_used = invoke_copilot_agent(
             agents_dir=agents_abs,
             workspace_dir=workspace_abs,
             issue_url=issue_url,
@@ -2131,7 +2197,7 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if pid:
             await update.effective_message.reply_text(
-                f"✅ Agent resumed for issue #{issue_num} (PID: {pid})\n\n"
+                f"✅ Agent resumed for issue #{issue_num} (PID: {pid}, Tool: {tool_used})\n\n"
                 f"Check /logs {issue_num} to monitor progress.\n\n"
                 f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
             )

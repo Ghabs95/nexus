@@ -18,11 +18,13 @@ from config import (
     BASE_DIR,
     GITHUB_AGENTS_REPO,
     PROJECT_CONFIG,
-    WORKFLOW_CHAIN
+    WORKFLOW_CHAIN,
+    ORCHESTRATOR_CONFIG
 )
 from state_manager import StateManager
 from error_handling import run_command_with_retry
 from notifications import notify_agent_completed, notify_workflow_started
+from ai_orchestrator import get_orchestrator, ToolUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +107,10 @@ def is_recent_launch(issue_number):
 
 
 def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_content, 
-                         continuation=False, continuation_prompt=None):
-    """Invokes Copilot CLI on the agents directory to process the task.
+                         continuation=False, continuation_prompt=None, use_gemini=False):
+    """Invokes an AI agent on the agents directory to process the task.
 
+    Uses orchestrator to determine best tool (Copilot or Gemini CLI) with fallback support.
     Runs asynchronously (Popen) since agent execution can take several minutes.
     
     Args:
@@ -118,9 +121,10 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
         task_content: Task description
         continuation: If True, this is a continuation of previous work
         continuation_prompt: Custom prompt for continuation
+        use_gemini: If True, prefer Gemini CLI; if False, prefer Copilot (default: False)
         
     Returns:
-        PID of launched process or None if failed
+        Tuple of (PID of launched process or None if failed, tool_used: str)
     """
     workflow_name = get_workflow_name(tier_name)
 
@@ -197,47 +201,40 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
             f"Task details:\n{task_content}"
         )
 
-    cmd = [
-        "copilot",
-        "-p", prompt,
-        "--add-dir", BASE_DIR,
-        "--add-dir", workspace_dir,
-        "--add-dir", agents_dir,
-        "--allow-all-tools"
-    ]
-
     mode = "continuation" if continuation else "initial"
-    logger.info(f"🤖 Launching Copilot CLI agent in {agents_dir} (mode: {mode})")
+    logger.info(f"🤖 Launching AI agent in {agents_dir} (mode: {mode})")
     logger.info(f"   Workspace: {workspace_dir}")
     logger.info(f"   Workflow: /{workflow_name} (tier: {tier_name})")
 
-    # Log copilot output to a file
-    log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    issue_match = re.search(r"/issues/(\d+)", issue_url or "")
-    issue_num = issue_match.group(1) if issue_match else "unknown"
-    log_path = os.path.join(log_dir, f"copilot_{issue_num}_{timestamp}.log")
-    logger.info(f"   Log file: {log_path}")
-
+    # Use orchestrator to launch agent
+    orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
+    
     try:
-        log_file = open(log_path, "w")
-        process = subprocess.Popen(
-            cmd,
-            cwd=workspace_dir,
-            stdout=log_file,
-            stderr=subprocess.STDOUT
+        pid, tool_used = orchestrator.invoke_agent(
+            agent_prompt=prompt,
+            workspace_dir=workspace_dir,
+            agents_dir=agents_dir,
+            base_dir=BASE_DIR,
+            issue_url=issue_url,
+            agent_name="ProjectLead",  # This is always ProjectLead for workflow routing
+            use_gemini=use_gemini
         )
-        logger.info(f"🚀 Copilot CLI launched (PID: {process.pid})")
+        
+        logger.info(f"🚀 Agent launched with {tool_used.value} (PID: {pid})")
+        
+        # Extract issue number for tracking
+        issue_match = re.search(r"/issues/(\d+)", issue_url or "")
+        issue_num = issue_match.group(1) if issue_match else "unknown"
         
         # Save to launched agents tracker
         if issue_num != "unknown":
             launched_agents = StateManager.load_launched_agents()
             launched_agents[str(issue_num)] = {
                 'timestamp': time.time(),
-                'pid': process.pid,
+                'pid': pid,
                 'tier': tier_name,
-                'mode': mode
+                'mode': mode,
+                'tool': tool_used.value
             }
             StateManager.save_launched_agents(launched_agents)
             
@@ -245,29 +242,38 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
             StateManager.audit_log(
                 int(issue_num),
                 "AGENT_LAUNCHED",
-                f"Launched Copilot agent in {os.path.basename(agents_dir)} "
-                f"(workflow: {workflow_name}/{tier_name}, mode: {mode}, PID: {process.pid})"
+                f"Launched {tool_used.value} agent in {os.path.basename(agents_dir)} "
+                f"(workflow: {workflow_name}/{tier_name}, mode: {mode}, PID: {pid})"
             )
         
-        return process.pid
-    except FileNotFoundError:
-        logger.error("'copilot' CLI not found. Install: brew install copilot-cli")
+        return pid, tool_used.value
+        
+    except ToolUnavailableError as e:
+        logger.error(f"❌ All AI tools unavailable: {e}")
+        
+        issue_match = re.search(r"/issues/(\d+)", issue_url or "")
+        issue_num = issue_match.group(1) if issue_match else "unknown"
         if issue_num != "unknown":
             StateManager.audit_log(
                 int(issue_num),
                 "AGENT_LAUNCH_FAILED",
-                "Copilot CLI not found"
+                f"All tools unavailable: {str(e)}"
             )
-        return None
+        
+        return None, None
     except Exception as e:
-        logger.error(f"Failed to launch Copilot CLI: {e}")
+        logger.error(f"❌ Failed to launch agent: {e}")
+        
+        issue_match = re.search(r"/issues/(\d+)", issue_url or "")
+        issue_num = issue_match.group(1) if issue_match else "unknown"
         if issue_num != "unknown":
             StateManager.audit_log(
                 int(issue_num),
                 "AGENT_LAUNCH_FAILED",
                 f"Exception: {str(e)}"
             )
-        return None
+        
+        return None, None
 
 
 def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
@@ -360,7 +366,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
     )
     
     # Launch agent
-    pid = invoke_copilot_agent(
+    pid, tool_used = invoke_copilot_agent(
         agents_dir=agents_abs,
         workspace_dir=workspace_abs,
         issue_url=issue_url,
@@ -371,7 +377,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
     )
     
     if pid:
-        logger.info(f"✅ Successfully launched @{next_agent} for issue #{issue_number} (PID: {pid})")
+        logger.info(f"✅ Successfully launched @{next_agent} for issue #{issue_number} (PID: {pid}, tool: {tool_used})")
         
         # Send notification
         try:

@@ -17,10 +17,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER")) if os.getenv("ALLOWED_USER") else None
 TELEGRAM_CHAT_ID = ALLOWED_USER_ID  # Same as allowed user (for alerts)
 
-# --- AI CONFIGURATION ---
-GOOGLE_API_KEY = os.getenv("AI_API_KEY")
-GOOGLE_AI_MODEL = os.getenv("AI_MODEL") or "gemini-1.5-flash"
-
 # --- PATHS & DIRECTORIES ---
 BASE_DIR = os.getenv("BASE_DIR", "/home/ubuntu/git")
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -39,6 +35,39 @@ GITHUB_NEXUS_REPO = "Ghabs95/nexus"
 # --- WEBHOOK CONFIGURATION ---
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8081"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # GitHub webhook secret for signature verification
+
+# --- AI ORCHESTRATOR CONFIGURATION ---
+# Tool selection strategy: which AI tool to use for which agent
+# Options: "copilot", "gemini"
+AI_TOOL_PREFERENCES = {
+    # Code generation & complex reasoning → Copilot (better reasoning, multi-file context)
+    "ProjectLead": "copilot",
+    "Atlas": "copilot",
+    "Architect": "copilot",
+    "Tier2Lead": "copilot",
+    
+    # Fast & simple analysis → Gemini (faster, good for classification)
+    "ProductDesigner": "gemini",
+    "QAGuard": "gemini",
+    "Scribe": "gemini",
+    "OpsCommander": "gemini",
+    "Privacy": "gemini",
+    
+    # Frontend/Backend specific (can prefer platform-aligned tool)
+    "FrontendLead": "copilot",
+    "BackendLead": "copilot",
+    "MobileLead": "copilot",
+}
+
+# Orchestrator configuration
+ORCHESTRATOR_CONFIG = {
+    "gemini_cli_path": os.getenv("GEMINI_CLI_PATH", "gemini"),  # Path to gemini-cli executable
+    "copilot_cli_path": os.getenv("COPILOT_CLI_PATH", "copilot"),  # Path to copilot executable
+    "tool_preferences": AI_TOOL_PREFERENCES,
+    "fallback_enabled": os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true",  # Enable fallback
+    "rate_limit_ttl": int(os.getenv("AI_RATE_LIMIT_TTL", "3600")),  # 1 hour default
+    "max_retries": int(os.getenv("AI_MAX_RETRIES", "2")),
+}
 
 # --- WORKFLOW CONFIGURATION ---
 WORKFLOW_CHAIN = {
@@ -126,9 +155,6 @@ def validate_configuration():
     # Check required environment variables
     if not TELEGRAM_TOKEN:
         errors.append("TELEGRAM_TOKEN is missing! Set it in vars.secret or environment.")
-    
-    if not GOOGLE_API_KEY:
-        errors.append("AI_API_KEY (Google API Key) is missing! Set it in vars.secret or environment.")
     
     if not ALLOWED_USER_ID:
         warnings.append("ALLOWED_USER is missing! Bot will not respond to anyone.")
