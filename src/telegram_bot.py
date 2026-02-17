@@ -405,43 +405,43 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     menu_texts = {
         "tasks": (
             "✨ **Task Creation**\n"
-            "- /new\n"
-            "- /cancel\n\n"
+            "- /new — Start task creation\n"
+            "- /cancel — Abort the current guided process\n\n"
             "Tip: send a voice note or text to auto-create a task."
         ),
         "monitor": (
             "📊 **Monitoring**\n"
-            "- /status\n"
-            "- /active\n"
-            "- /myissues\n"
-            "- /logs [issue#]\n"
-            "- /logsfull <issue#>\n"
-            "- /audit [issue#]\n"
-            "- /stats [days]\n"
-            "- /comments <issue#>\n"
-            "- /track <issue#> | /track <project> <issue#>\n"
-            "- /untrack <issue#> | /untrack <project> <issue#>"
+            "- /status — View pending tasks in inbox\n"
+            "- /active — View tasks currently being worked on\n"
+            "- /myissues — View your tracked issues\n"
+            "- /logs [issue#] — View task logs (latest if no issue)\n"
+            "- /logsfull <issue#> — Full log lines (no truncation)\n"
+            "- /audit [issue#] — View workflow audit trail\n"
+            "- /stats [days] — View system analytics (default: 30 days)\n"
+            "- /comments <issue#> — View issue comments\n"
+            "- /track <issue#> | /track <project> <issue#> — Subscribe to updates\n"
+            "- /untrack <issue#> | /untrack <project> <issue#> — Stop tracking"
         ),
         "workflow": (
             "🔁 **Workflow Control**\n"
-            "- /reprocess <issue#>\n"
-            "- /continue <issue#>\n"
-            "- /kill <issue#>\n"
-            "- /pause <issue#>\n"
-            "- /resume <issue#>\n"
-            "- /stop <issue#>\n"
-            "- /respond <issue#> <text>"
+            "- /reprocess <issue#> — Re-run agent processing\n"
+            "- /continue <issue#> — Resume a stuck agent\n"
+            "- /kill <issue#> — Stop a running agent\n"
+            "- /pause <issue#> — Pause auto-chaining\n"
+            "- /resume <issue#> — Resume auto-chaining\n"
+            "- /stop <issue#> — Stop workflow completely\n"
+            "- /respond <issue#> <text> — Respond to agent questions"
         ),
         "agents": (
             "🤝 **Agents**\n"
-            "- /agents <project>\n"
-            "- /direct <project> <@agent> <message>"
+            "- /agents <project> — List agents for a project\n"
+            "- /direct <project> <@agent> <message> — Send direct request"
         ),
         "github": (
             "🔧 **GitHub**\n"
-            "- /assign <issue#>\n"
-            "- /implement <issue#>\n"
-            "- /prepare <issue#>"
+            "- /assign <issue#> — Assign issue to yourself\n"
+            "- /implement <issue#> — Request Copilot implementation\n"
+            "- /prepare <issue#> — Add Copilot-friendly instructions"
         ),
         "help": "ℹ️ Use /help for the full command list."
     }
@@ -489,29 +489,29 @@ async def on_startup(application):
     cmds = [
         BotCommand("new", "Start task creation"),
         BotCommand("menu", "Open command menu"),
-        BotCommand("cancel", "Cancel current process"),
+        # BotCommand("cancel", "Cancel current process"),
         BotCommand("status", "Show pending tasks"),
         BotCommand("active", "Show active tasks"),
-        BotCommand("track", "Subscribe to issue updates"),
-        BotCommand("untrack", "Stop tracking an issue"),
-        BotCommand("myissues", "View your tracked issues"),
-        BotCommand("logs", "View task execution logs"),
-        BotCommand("logsfull", "Full issue logs"),
-        BotCommand("audit", "View workflow audit trail"),
-        BotCommand("stats", "View system analytics"),
-        BotCommand("comments", "View issue comments"),
-        BotCommand("reprocess", "Re-run agent processing"),
-        BotCommand("continue", "Check stuck agent status"),
-        BotCommand("kill", "Stop running agent"),
-        BotCommand("pause", "Pause auto-chaining"),
-        BotCommand("resume", "Resume auto-chaining"),
-        BotCommand("stop", "Stop workflow completely"),
-        BotCommand("agents", "List project agents"),
-        BotCommand("direct", "Send direct agent request"),
-        BotCommand("respond", "Respond to agent questions"),
-        BotCommand("assign", "Assign an issue"),
-        BotCommand("implement", "Request implementation"),
-        BotCommand("prepare", "Prepare for Copilot"),
+        # BotCommand("track", "Subscribe to issue updates"),
+        # BotCommand("untrack", "Stop tracking an issue"),
+        # BotCommand("myissues", "View your tracked issues"),
+        # BotCommand("logs", "View task execution logs"),
+        # BotCommand("logsfull", "Full issue logs"),
+        # BotCommand("audit", "View workflow audit trail"),
+        # BotCommand("stats", "View system analytics"),
+        # BotCommand("comments", "View issue comments"),
+        # BotCommand("reprocess", "Re-run agent processing"),
+        # BotCommand("continue", "Check stuck agent status"),
+        # BotCommand("kill", "Stop running agent"),
+        # BotCommand("pause", "Pause auto-chaining"),
+        # BotCommand("resume", "Resume auto-chaining"),
+        # BotCommand("stop", "Stop workflow completely"),
+        # BotCommand("agents", "List project agents"),
+        # BotCommand("direct", "Send direct agent request"),
+        # BotCommand("respond", "Respond to agent questions"),
+        # BotCommand("assign", "Assign an issue"),
+        # BotCommand("implement", "Request implementation"),
+        # BotCommand("prepare", "Prepare for Copilot"),
         BotCommand("help", "Show help")
     ]
     try:
@@ -627,6 +627,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
     keyboard = [[InlineKeyboardButton(name, callback_data=code)] for code, name in PROJECTS.items()]
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
     await update.message.reply_text("📂 **Select Project:**", reply_markup=InlineKeyboardMarkup(keyboard),
                                     parse_mode='Markdown')
     return SELECT_PROJECT
@@ -637,6 +638,7 @@ async def project_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data['project'] = query.data
     keyboard = [[InlineKeyboardButton(name, callback_data=code)] for code, name in TYPES.items()]
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
     await query.edit_message_text(f"📂 Project: **{PROJECTS[query.data]}**\n\n🛠 **Select Type:**",
                                   reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     return SELECT_TYPE
@@ -697,6 +699,14 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+
+async def flow_close_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Close button for the /new flow."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Cancelled.")
     return ConversationHandler.END
 
 
@@ -2465,18 +2475,31 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("new", start_selection)],
         states={
-            SELECT_PROJECT: [CallbackQueryHandler(project_selected)],
-            SELECT_TYPE: [CallbackQueryHandler(type_selected)],
+            SELECT_PROJECT: [
+                CallbackQueryHandler(
+                    project_selected,
+                    pattern=r'^(case_italia|wallible|biome|nexus)$'
+                ),
+                CallbackQueryHandler(flow_close_handler, pattern=r'^flow:close$')
+            ],
+            SELECT_TYPE: [
+                CallbackQueryHandler(
+                    type_selected,
+                    pattern=r'^(feature|feature-simple|bug|hotfix|release|chore|improvement|improvement-simple)$'
+                ),
+                CallbackQueryHandler(flow_close_handler, pattern=r'^flow:close$')
+            ],
             INPUT_TASK: [MessageHandler(filters.TEXT | filters.VOICE, save_task)]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=True
+        per_message=False
     )
 
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("menu", menu_handler))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("track", track_handler))
