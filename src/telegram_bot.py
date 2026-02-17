@@ -294,14 +294,14 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     help_text = (
-        "🤖 **Nexus (Google Edition) Commands**\n\n"
+        "🤖 **Nexus Commands**\n\n"
+        "Use /menu for a categorized, button-driven view.\n\n"
         "✨ **Task Creation:**\n"
         "/new - Start a menu-driven task creation\n"
         "/cancel - Abort the current guided process\n\n"
         "⚡ **Hands-Free Mode:**\n"
-        "Just send a **Voice Note** or **Text Message** directly. "
-        "Gemini will automatically transcribe, route, and save the task "
-        "based on its content!\n\n"
+        "Send a **Voice Note** or **Text Message** directly. "
+        "The bot will transcribe, route, and save the task.\n\n"
         "📋 **Workflow Tiers:**\n"
         "• 🔥 Hotfix/Chore → 4-step fast-track (quick fixes)\n"
         "• 🩹 Bug → 6-step shortened (triage → fix → deploy)\n"
@@ -318,7 +318,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/logs [issue#] - View task logs (latest if no issue)\n"
         "/logsfull <issue#> - Full log lines (no truncation)\n"
         "/audit [issue#] - View workflow audit trail (latest if no issue)\n"
-        "/stats [days] - View system analytics and performance metrics (default: 30 days)\n"
+        "/stats [days] - View system analytics (default: 30 days)\n"
         "/comments <issue#> - View issue comments\n\n"
         "🔁 **Recovery & Control:**\n"
         "/reprocess <issue#> - Re-run agent processing\n"
@@ -338,6 +338,120 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ℹ️ /help - Show this list"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+def build_menu_keyboard(button_rows, include_back=True):
+    """Build a menu keyboard with optional back button."""
+    keyboard = button_rows[:]
+    if include_back:
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:root")])
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="menu:close")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the main menu with submenus."""
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("✨ Task Creation", callback_data="menu:tasks")],
+        [InlineKeyboardButton("📊 Monitoring", callback_data="menu:monitor")],
+        [InlineKeyboardButton("🔁 Workflow Control", callback_data="menu:workflow")],
+        [InlineKeyboardButton("🤝 Agents", callback_data="menu:agents")],
+        [InlineKeyboardButton("🔧 GitHub", callback_data="menu:github")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")],
+        [InlineKeyboardButton("❌ Close", callback_data="menu:close")]
+    ]
+    await update.effective_message.reply_text(
+        "📍 **Nexus Menu**\nChoose a category:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle menu navigation callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data:
+        return
+
+    menu_key = query.data.split(":", 1)[1]
+
+    if menu_key == "close":
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    if menu_key == "root":
+        keyboard = [
+            [InlineKeyboardButton("✨ Task Creation", callback_data="menu:tasks")],
+            [InlineKeyboardButton("📊 Monitoring", callback_data="menu:monitor")],
+            [InlineKeyboardButton("🔁 Workflow Control", callback_data="menu:workflow")],
+            [InlineKeyboardButton("🤝 Agents", callback_data="menu:agents")],
+            [InlineKeyboardButton("🔧 GitHub", callback_data="menu:github")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")],
+            [InlineKeyboardButton("❌ Close", callback_data="menu:close")]
+        ]
+        await query.edit_message_text(
+            "📍 **Nexus Menu**\nChoose a category:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    menu_texts = {
+        "tasks": (
+            "✨ **Task Creation**\n"
+            "- /new\n"
+            "- /cancel\n\n"
+            "Tip: send a voice note or text to auto-create a task."
+        ),
+        "monitor": (
+            "📊 **Monitoring**\n"
+            "- /status\n"
+            "- /active\n"
+            "- /myissues\n"
+            "- /logs [issue#]\n"
+            "- /logsfull <issue#>\n"
+            "- /audit [issue#]\n"
+            "- /stats [days]\n"
+            "- /comments <issue#>\n"
+            "- /track <issue#> | /track <project> <issue#>\n"
+            "- /untrack <issue#> | /untrack <project> <issue#>"
+        ),
+        "workflow": (
+            "🔁 **Workflow Control**\n"
+            "- /reprocess <issue#>\n"
+            "- /continue <issue#>\n"
+            "- /kill <issue#>\n"
+            "- /pause <issue#>\n"
+            "- /resume <issue#>\n"
+            "- /stop <issue#>\n"
+            "- /respond <issue#> <text>"
+        ),
+        "agents": (
+            "🤝 **Agents**\n"
+            "- /agents <project>\n"
+            "- /direct <project> <@agent> <message>"
+        ),
+        "github": (
+            "🔧 **GitHub**\n"
+            "- /assign <issue#>\n"
+            "- /implement <issue#>\n"
+            "- /prepare <issue#>"
+        ),
+        "help": "ℹ️ Use /help for the full command list."
+    }
+
+    text = menu_texts.get(menu_key, "Unknown menu option.")
+    await query.edit_message_text(
+        text,
+        reply_markup=build_menu_keyboard([]),
+        parse_mode='Markdown'
+    )
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -360,6 +474,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         ["/new"],
+        ["/menu"],
         ["/status"],
         ["/active"],
         ["/help"]
@@ -373,6 +488,7 @@ async def on_startup(application):
     """Register bot commands so they appear in the Telegram client menu."""
     cmds = [
         BotCommand("new", "Start task creation"),
+        BotCommand("menu", "Open command menu"),
         BotCommand("cancel", "Cancel current process"),
         BotCommand("status", "Show pending tasks"),
         BotCommand("active", "Show active tasks"),
@@ -2360,6 +2476,7 @@ if __name__ == '__main__':
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("menu", menu_handler))
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("track", track_handler))
@@ -2382,6 +2499,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("assign", assign_handler))
     app.add_handler(CommandHandler("implement", implement_handler))
     app.add_handler(CommandHandler("prepare", prepare_handler))
+    # Menu navigation callbacks
+    app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r'^menu:'))
     # Inline keyboard callback handler (must be before ConversationHandler callbacks)
     app.add_handler(CallbackQueryHandler(inline_keyboard_handler, pattern=r'^(logs|logsfull|status|pause|resume|stop|audit|reprocess|respond|approve|reject)_'))
     # Exclude commands from the auto-router catch-all
