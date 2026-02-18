@@ -334,6 +334,58 @@ def notify_implementation_requested(issue_number: str, requester: str, project: 
     return send_notification(message, keyboard=keyboard)
 
 
+def notify_approval_required(
+    issue_number: str,
+    step_num: int,
+    step_name: str,
+    agent: str,
+    approvers: List[str],
+    project: str = "nexus",
+) -> bool:
+    """
+    Send notification that a workflow step is awaiting human approval.
+    
+    Args:
+        issue_number: GitHub issue number
+        step_num: Step number requiring approval
+        step_name: Step name requiring approval
+        agent: Agent that would execute the step
+        approvers: List of required approvers (shown informatively)
+        project: Project name (default: nexus)
+    
+    Returns:
+        True if sent successfully
+    """
+    approvers_text = ", ".join(f"@{a}" for a in approvers) if approvers else "any admin"
+    message = (
+        f"⏳ **Approval Required**\n\n"
+        f"Issue: #{issue_number}\n"
+        f"Step {step_num}: {step_name}\n"
+        f"Agent: @{agent}\n"
+        f"Approvers: {approvers_text}\n\n"
+        f"Approve to let the workflow continue, or deny to stop it."
+    )
+
+    keyboard = (
+        InlineKeyboard()
+        .add_button(
+            "✅ Approve",
+            callback_data=f"wfapprove_{issue_number}_{step_num}",
+        )
+        .add_button(
+            "❌ Deny",
+            callback_data=f"wfdeny_{issue_number}_{step_num}",
+        )
+        .new_row()
+        .add_button(
+            "🔗 GitHub",
+            url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}",
+        )
+    )
+
+    return send_notification(message, keyboard=keyboard)
+
+
 # Legacy compatibility function
 def send_telegram_alert(message: str) -> bool:
     """

@@ -103,11 +103,12 @@ def save_tracked_issues(data):
     StateManager.save_tracked_issues(data)
 
 
-def get_issue_details(issue_num):
+def get_issue_details(issue_num, repo: str = None):
     """Query GitHub API for issue details."""
     try:
+        repo = repo or GITHUB_REPO
         result = subprocess.run(
-            ["gh", "issue", "view", str(issue_num), "--repo", GITHUB_REPO, "--json",
+            ["gh", "issue", "view", str(issue_num), "--repo", repo, "--json",
              "number,title,state,labels,body,updatedAt"],
             check=True, text=True, capture_output=True
         )
@@ -266,7 +267,7 @@ PROJECTS = {
     "case_italia": "Case Italia",
     "wallible": "Wallible",
     "biome": "Biome",
-    "nexus": "General Inbox (Nexus)"
+    "nexus": "Nexus Core"
 }
 TYPES = {
     "feature": "✨ Feature (9-step workflow)",
@@ -1318,7 +1319,8 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
 
     # Task log files only (.github/tasks/logs/*.log)
-    details = get_issue_details(issue_num)
+    repo = config.get("github_repo", GITHUB_REPO)
+    details = get_issue_details(issue_num, repo=repo)
     timeline = "Task Logs:\n"
 
     task_file = None
@@ -1394,7 +1396,7 @@ async def logsfull_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.effective_message.reply_text(f"📋 Fetching full logs for issue #{issue_num}...")
-    issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+    issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
     details = get_issue_details(issue_num)
     timeline = "GitHub Activity:\n"
@@ -1481,22 +1483,19 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
                     message_id=msg.message_id,
-                    text=timeline,
-                    parse_mode="Markdown"
+                    text=timeline
                 )
             else:
                 chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
                     message_id=msg.message_id,
-                    text=chunks[0],
-                    parse_mode="Markdown"
+                    text=chunks[0]
                 )
                 for chunk in chunks[1:]:
                     await context.bot.send_message(
                         chat_id=update.effective_chat.id,
-                        text=chunk,
-                        parse_mode="Markdown"
+                        text=chunk
                     )
             return
         except Exception as e:
@@ -1570,8 +1569,7 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
-                text=timeline,
-                parse_mode="Markdown"
+                text=timeline
             )
         else:
             # Split into chunks
@@ -1579,14 +1577,12 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
-                text=chunks[0],
-                parse_mode="Markdown"
+                text=chunks[0]
             )
             for chunk in chunks[1:]:
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    text=chunk,
-                    parse_mode="Markdown"
+                    text=chunk
                 )
     except Exception as e:
         logger.error(f"Error in audit_handler: {e}", exc_info=True)
@@ -1737,7 +1733,7 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_id=msg.message_id,
             text=(
                 f"✅ Reprocess started for issue #{issue_num}. Agent PID: {pid} (Tool: {tool_used})\n\n"
-                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+                f"🔗 https://github.com/{repo}/issues/{issue_num}"
             )
         )
     else:
@@ -1796,7 +1792,8 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Get issue details and task file
-    details = get_issue_details(issue_num)
+    repo = config.get("github_repo", GITHUB_REPO)
+    details = get_issue_details(issue_num, repo=repo)
     if not details:
         await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
         return
@@ -1828,7 +1825,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
     tier_name, _, _ = get_sop_tier(task_type)
-    issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+    issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
     msg = await update.effective_message.reply_text(f"⏩ Continuing agent for issue #{issue_num}...")
 
@@ -1856,7 +1853,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"ℹ️ **Note:** The agent will first check if the workflow has already progressed.\n"
                 f"If another agent is already handling the next step, this agent will exit gracefully.\n"
                 f"Use `/continue` only when an agent is truly stuck mid-step.\n\n"
-                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+                f"🔗 https://github.com/{repo}/issues/{issue_num}"
             )
         )
     else:
@@ -2441,6 +2438,65 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
             )
         except Exception as e:
             await query.edit_message_text(f"❌ Error rejecting: {e}")
+    elif action == 'wfapprove':
+        # Approve a workflow approval gate: callback_data = wfapprove_{issue}_{step}
+        parts2 = issue_num.split('_', 1)
+        real_issue = parts2[0]
+        step_num = parts2[1] if len(parts2) > 1 else "?"
+        await query.edit_message_text(
+            f"✅ Approving workflow step {step_num} for issue #{real_issue}..."
+        )
+        try:
+            from nexus_core_helpers import get_workflow_engine
+            from state_manager import StateManager
+            workflow_id = StateManager.get_workflow_id_for_issue(real_issue)
+            if not workflow_id:
+                await query.edit_message_text(
+                    f"❌ No workflow found for issue #{real_issue}"
+                )
+                return
+            import asyncio
+            engine = get_workflow_engine()
+            approved_by = update.effective_user.username or str(update.effective_user.id)
+            await engine.approve_step(workflow_id, approved_by=approved_by)
+            StateManager.clear_pending_approval(real_issue)
+            StateManager.audit_log(int(real_issue), "APPROVAL_GRANTED", f"by {approved_by}")
+            await query.edit_message_text(
+                f"✅ Step {step_num} approved for issue #{real_issue}\\n\\n"
+                f"Workflow will continue automatically.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error approving workflow step: {e}")
+    elif action == 'wfdeny':
+        # Deny a workflow approval gate: callback_data = wfdeny_{issue}_{step}
+        parts2 = issue_num.split('_', 1)
+        real_issue = parts2[0]
+        step_num = parts2[1] if len(parts2) > 1 else "?"
+        await query.edit_message_text(
+            f"❌ Denying workflow step {step_num} for issue #{real_issue}..."
+        )
+        try:
+            from nexus_core_helpers import get_workflow_engine
+            from state_manager import StateManager
+            workflow_id = StateManager.get_workflow_id_for_issue(real_issue)
+            if not workflow_id:
+                await query.edit_message_text(
+                    f"❌ No workflow found for issue #{real_issue}"
+                )
+                return
+            engine = get_workflow_engine()
+            denied_by = update.effective_user.username or str(update.effective_user.id)
+            await engine.deny_step(workflow_id, denied_by=denied_by, reason="Denied via Telegram")
+            StateManager.clear_pending_approval(real_issue)
+            StateManager.audit_log(int(real_issue), "APPROVAL_DENIED", f"by {denied_by}")
+            await query.edit_message_text(
+                f"❌ Step {step_num} denied for issue #{real_issue}\\n\\n"
+                f"Workflow has been stopped.",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error denying workflow step: {e}")
 
 
 # --- MAIN ---

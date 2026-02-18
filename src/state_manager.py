@@ -235,3 +235,65 @@ class StateManager:
         data.pop(str(issue_num), None)
         StateManager.save_workflow_mapping(data)
         logger.info(f"Removed workflow mapping for issue #{issue_num}")
+
+    # --- APPROVAL GATE STATE ---
+
+    @staticmethod
+    def load_approval_state() -> Dict[str, dict]:
+        """Load pending approval state from persistent storage."""
+        from config import APPROVAL_STATE_FILE
+        ensure_data_dir()
+        if os.path.exists(APPROVAL_STATE_FILE):
+            try:
+                with open(APPROVAL_STATE_FILE) as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load approval state: {e}")
+        return {}
+
+    @staticmethod
+    def save_approval_state(data: Dict[str, dict]) -> None:
+        """Save approval state to persistent storage."""
+        from config import APPROVAL_STATE_FILE
+        ensure_data_dir()
+        try:
+            with open(APPROVAL_STATE_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save approval state: {e}")
+
+    @staticmethod
+    def set_pending_approval(
+        issue_num: str,
+        step_num: int,
+        step_name: str,
+        approvers: List[str],
+        approval_timeout: int,
+    ) -> None:
+        """Record that a workflow step is waiting for approval."""
+        data = StateManager.load_approval_state()
+        data[str(issue_num)] = {
+            "step_num": step_num,
+            "step_name": step_name,
+            "approvers": approvers,
+            "approval_timeout": approval_timeout,
+            "requested_at": time.time(),
+        }
+        StateManager.save_approval_state(data)
+        logger.info(
+            f"Set pending approval for issue #{issue_num} step {step_num} ({step_name})"
+        )
+
+    @staticmethod
+    def clear_pending_approval(issue_num: str) -> None:
+        """Remove approval gate record once resolved."""
+        data = StateManager.load_approval_state()
+        data.pop(str(issue_num), None)
+        StateManager.save_approval_state(data)
+        logger.info(f"Cleared pending approval for issue #{issue_num}")
+
+    @staticmethod
+    def get_pending_approval(issue_num: str) -> Optional[dict]:
+        """Return pending approval info for an issue, or None if not awaiting approval."""
+        data = StateManager.load_approval_state()
+        return data.get(str(issue_num))

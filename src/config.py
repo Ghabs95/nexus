@@ -136,8 +136,10 @@ def _get_project_config() -> dict:
     return _load_and_validate_project_config()
 
 
-# Use this as the public API for accessing PROJECT_CONFIG
-PROJECT_CONFIG = None  # Will be populated on first access via _get_project_config()
+# Initialize PROJECT_CONFIG on module load 
+# Note: This loads the config immediately when the module is imported
+# If you need truly lazy loading, wrap in a property descriptor instead
+PROJECT_CONFIG = _get_project_config()
 
 
 
@@ -365,6 +367,7 @@ ORCHESTRATOR_CONFIG = _LazyOrchestrator()
 USE_NEXUS_CORE = os.getenv("USE_NEXUS_CORE", "true").lower() == "true"
 NEXUS_CORE_STORAGE_DIR = os.path.join(DATA_DIR, "nexus-core-workflows")
 WORKFLOW_ID_MAPPING_FILE = os.path.join(DATA_DIR, "workflow_id_mapping.json")
+APPROVAL_STATE_FILE = os.path.join(DATA_DIR, "approval_state.json")
 
 # Nexus-Core storage backend configuration
 NEXUS_CORE_STORAGE_BACKEND = os.getenv("NEXUS_CORE_STORAGE", "file")  # Options: file, postgres, redis

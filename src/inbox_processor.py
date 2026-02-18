@@ -1,4 +1,5 @@
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -118,6 +119,27 @@ def slugify(text):
     return text[:50]
 
 
+def _extract_body_from_result(result_stdout: str) -> str:
+    """Extract issue body from gh result, handling JSON or raw string output."""
+    try:
+        parsed = json.loads(result_stdout)
+    except json.JSONDecodeError:
+        return result_stdout.strip()
+
+    if isinstance(parsed, dict):
+        return parsed.get("body", "")
+    if isinstance(parsed, str):
+        return parsed
+    return ""
+
+
+def _iter_project_configs():
+    """Yield (project_name, config) pairs for dict-based project configs."""
+    for project_name, cfg in PROJECT_CONFIG.items():
+        if isinstance(cfg, dict) and "github_repo" in cfg:
+            yield project_name, cfg
+
+
 # send_telegram_alert is now imported from notifications module
 
 
@@ -175,7 +197,7 @@ def check_agent_comments():
     try:
         # Query issues from all project repos
         all_issue_nums = []
-        for project_name in PROJECT_CONFIG.keys():
+        for project_name, _ in _iter_project_configs():
             repo = get_github_repo(project_name)
             try:
                 result = subprocess.run(
@@ -216,8 +238,19 @@ def check_agent_comments():
                 
                 try:
                     comment = json.loads(line)
-                    comment_id = str(comment.get("id"))
-                    body = comment.get("body", "")
+                    if isinstance(comment, dict):
+                        comment_id = str(comment.get("id")) if comment.get("id") else ""
+                        body = comment.get("body", "")
+                    elif isinstance(comment, str):
+                        body = comment
+                        comment_id = ""
+                    else:
+                        logger.warning("Skipping unexpected comment payload type")
+                        continue
+
+                    if not comment_id:
+                        digest = hashlib.sha1(f"{issue_num}:{body}".encode("utf-8")).hexdigest()
+                        comment_id = f"{issue_num}:{digest}"
                     
                     # Skip if we've already notified about this comment
                     if comment_id in notified_comments:
@@ -431,14 +464,13 @@ def check_completed_agents():
                                          "--json", "body"],
                                         max_attempts=2, timeout=10
                                     )
-                                    data = json.loads(result.stdout)
-                                    body = data.get("body", "")
+                                    body = _extract_body_from_result(result.stdout)
                                     
                                     task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
                                     if task_file_match:
                                         task_file = task_file_match.group(1)
                                         project_root = None
-                                        for key, cfg in PROJECT_CONFIG.items():
+                                        for key, cfg in _iter_project_configs():
                                             workspace = cfg.get("workspace")
                                             if workspace:
                                                 workspace_abs = os.path.join(BASE_DIR, workspace)
@@ -494,8 +526,7 @@ def check_completed_agents():
                                      "--json", "body"],
                                     max_attempts=2, timeout=10
                                 )
-                                data = json.loads(result.stdout)
-                                body = data.get("body", "")
+                                body = _extract_body_from_result(result.stdout)
                                 
                                 # Debug: log first 200 chars of body
                                 logger.debug(f"Issue #{issue_num} body preview: {body[:200]}")
@@ -514,7 +545,7 @@ def check_completed_agents():
                                 
                                 # Get project config
                                 project_root = None
-                                for key, cfg in PROJECT_CONFIG.items():
+                                for key, cfg in _iter_project_configs():
                                     workspace = cfg.get("workspace")
                                     if workspace:
                                         workspace_abs = os.path.join(BASE_DIR, workspace)
@@ -666,8 +697,7 @@ def check_completed_agents():
                                  "--json", "body"],
                                 text=True, capture_output=True, timeout=10
                             )
-                            data = json.loads(result.stdout)
-                            body = data.get("body", "")
+                            body = _extract_body_from_result(result.stdout)
                             
                             # Find task file
                             task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
@@ -675,7 +705,7 @@ def check_completed_agents():
                                 task_file = task_file_match.group(1)
                                 # Determine project from task file path
                                 project_root = None
-                                for key, cfg in PROJECT_CONFIG.items():
+                                for key, cfg in _iter_project_configs():
                                     workspace = cfg.get("workspace")
                                     if workspace:
                                         workspace_abs = os.path.join(BASE_DIR, workspace)
@@ -704,8 +734,7 @@ def check_completed_agents():
                              "--json", "body"],
                             text=True, capture_output=True, timeout=10
                         )
-                        data = json.loads(result.stdout)
-                        body = data.get("body", "")
+                        body = _extract_body_from_result(result.stdout)
                         
                         # Find task file (format: **Task File:** `/path/to/file`)
                         task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
@@ -720,7 +749,7 @@ def check_completed_agents():
                         
                         # Get project config
                         project_root = None
-                        for key, cfg in PROJECT_CONFIG.items():
+                        for key, cfg in _iter_project_configs():
                             workspace = cfg.get("workspace")
                             if workspace:
                                 workspace_abs = os.path.join(BASE_DIR, workspace)
@@ -880,8 +909,7 @@ def get_sop_tier(task_type, title=None, body=None):
     # Try intelligent routing if title and body provided
     if title or body:
         try:
-            router = WorkflowRouter()
-            suggested_label = router.suggest_tier_label(title or "", body or "")
+            suggested_label = WorkflowRouter.suggest_tier_label(title or "", body or "")
             if suggested_label:
                 logger.info(f"🤖 WorkflowRouter suggestion: {suggested_label}")
                 if "fast-track" in suggested_label:
@@ -944,16 +972,6 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
     except Exception as e:
         logger.error(f"Unexpected error creating issue: {e}")
         return None
-
-
-def get_sop_tier(task_type, title="",body=""):
-    """Intelligently determine the SOP tier (workflow strategy) for a task.
-    
-    Uses WorkflowRouter for advanced ML-style routing based on content analysis.
-    """
-    router = WorkflowRouter(task_type, title, body)
-    tier_name, sop_template, workflow_label = router.route()
-    return tier_name, sop_template, workflow_label
 
 
 def generate_issue_name(content, project_name):

@@ -47,7 +47,7 @@ Step through an interactive menu:
 - **casit** - Case Italia
 - **wlbl** - Wallible
 - **bm** - Biome
-- **inbox** - General Inbox (default)
+- **nexus** - Nexus Core
 
 ## Task Types
 

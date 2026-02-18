@@ -325,6 +325,64 @@ def _tier_to_workflow_type(tier_name: str) -> str:
     return tier_mapping.get(tier_name, "shortened")
 
 
+async def handle_approval_gate(
+    workflow_id: str,
+    issue_number: str,
+    step_num: int,
+    step_name: str,
+    agent_name: str,
+    approvers: List[str],
+    approval_timeout: int,
+    project: str = "nexus",
+) -> None:
+    """
+    Called after complete_step when the next step has approval_required=True.
+    Persists the pending approval and sends a Telegram notification.
+    
+    Args:
+        workflow_id: The workflow ID (for reference)
+        issue_number: GitHub issue number
+        step_num: Step number awaiting approval
+        step_name: Step name awaiting approval
+        agent_name: Agent that will run the step when approved
+        approvers: List of required approvers
+        approval_timeout: Timeout in seconds
+        project: Project name
+    """
+    StateManager.set_pending_approval(
+        issue_num=issue_number,
+        step_num=step_num,
+        step_name=step_name,
+        approvers=approvers,
+        approval_timeout=approval_timeout,
+    )
+    StateManager.audit_log(
+        int(issue_number),
+        "APPROVAL_REQUESTED",
+        f"step {step_num} ({step_name}), approvers={approvers}",
+    )
+
+    from notifications import notify_approval_required
+    notify_approval_required(
+        issue_number=issue_number,
+        step_num=step_num,
+        step_name=step_name,
+        agent=agent_name,
+        approvers=approvers,
+        project=project,
+    )
+
+    logger.info(
+        f"Approval gate triggered for issue #{issue_number} "
+        f"step {step_num} ({step_name}). Notified approvers: {approvers}"
+    )
+
+
+def handle_approval_gate_sync(*args, **kwargs) -> None:
+    """Synchronous wrapper for handle_approval_gate."""
+    asyncio.run(handle_approval_gate(*args, **kwargs))
+
+
 # Sync wrappers for use in non-async code
 def create_workflow_for_issue_sync(*args, **kwargs) -> Optional[str]:
     """Synchronous wrapper for create_workflow_for_issue."""
