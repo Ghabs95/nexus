@@ -46,3 +46,29 @@ steps:
 **Routing:** Tier 2 Lead (Atlas) for RCA + implementation.
 
 **Status:** Triaged — ready for next step.
+
+---
+
+## QA Verification — @QAGuard
+
+**Branch:** `feat/workflow-approval-gate`
+**PR:** https://github.com/Ghabs95/nexus/pull/1
+**Commit tested:** `a04a1cb`
+
+**Regression Suite Results:**
+- ✅ **136/136 tests passed** on the committed branch state
+- 21 new approval-gate tests in `tests/test_workflow_approval.py` — all pass
+- All pre-existing tests remain green (no regressions)
+
+**Code Review Notes:**
+- `src/nexus_core_helpers.py`: `handle_approval_gate()` correctly persists state + notifies; sync wrapper provided
+- `src/state_manager.py`: `set/get/clear_pending_approval()` use JSON persistence — consistent with existing patterns
+- `src/notifications.py`: `notify_approval_required()` sends inline Approve/Deny Telegram buttons — correct approach
+- `src/telegram_bot.py`: `wfapprove_` / `wfdeny_` callback handlers properly wire to engine
+- `src/inbox_processor.py`: approval gate check injected into step execution loop — minimal impact
+
+**⚠️ Advisory (non-blocking):** There are uncommitted local file modifications (not part of the PR commits). The `tests/conftest.py` change among them adds a `mock_audit_log` autouse fixture that would break 2 existing `TestAuditLog` tests if committed as-is. These changes should be reviewed before any follow-up commit.
+
+**Verdict:** ✅ APPROVED — branch is clean, all tests pass, implementation is sound.
+
+**Status:** QA complete — ready for deploy.
