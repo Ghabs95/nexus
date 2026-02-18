@@ -147,7 +147,15 @@ def check_stuck_agents():
     """Monitor agent processes and handle timeouts with auto-kill and retry."""
     try:
         # Find all copilot log files
-        log_pattern = os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", "copilot_*.log")
+        log_pattern = os.path.join(
+            BASE_DIR,
+            "**",
+            ".github",
+            "tasks",
+            "logs",
+            "**",
+            "copilot_*.log"
+        )
         log_files = glob.glob(log_pattern, recursive=True)
         
         for log_file in log_files:
@@ -510,7 +518,18 @@ def check_completed_agents():
                                     continue
                             
                             # Check 3: Recent log files (within last 2 minutes)
-                            recent_logs = glob.glob(os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", f"copilot_{issue_num}_*.log"), recursive=True)
+                            recent_logs = glob.glob(
+                                os.path.join(
+                                    BASE_DIR,
+                                    "**",
+                                    ".github",
+                                    "tasks",
+                                    "logs",
+                                    "**",
+                                    f"copilot_{issue_num}_*.log"
+                                ),
+                                recursive=True
+                            )
                             if recent_logs:
                                 recent_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
                                 latest_log_age = time.time() - os.path.getmtime(recent_logs[0])
@@ -587,7 +606,8 @@ def check_completed_agents():
                                     tier_name=tier_name,
                                     task_content=task_content,
                                     continuation=True,
-                                    continuation_prompt=continuation_prompt
+                                    continuation_prompt=continuation_prompt,
+                                    log_subdir=project_root
                                 )
                                 
                                 if pid:
@@ -632,7 +652,15 @@ def check_completed_agents():
             logger.debug(f"GitHub comment detection not available: {e}")
         
         # SECOND: Check log files for completions (existing logic)
-        log_pattern = os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", "copilot_*.log")
+        log_pattern = os.path.join(
+            BASE_DIR,
+            "**",
+            ".github",
+            "tasks",
+            "logs",
+            "**",
+            "copilot_*.log"
+        )
         log_files = glob.glob(log_pattern, recursive=True)
         
         for log_file in log_files:
@@ -822,7 +850,8 @@ def check_completed_agents():
                             tier_name=tier_name,
                             task_content=task_content,
                             continuation=True,
-                            continuation_prompt=continuation_prompt
+                            continuation_prompt=continuation_prompt,
+                            log_subdir=project_root
                         )
                         
                         if pid:
@@ -1135,7 +1164,8 @@ def process_file(filepath):
                 workspace_dir=workspace_abs,
                 issue_url=issue_url,
                 tier_name=tier_name,
-                task_content=content
+                task_content=content,
+                log_subdir=project_name
             )
 
             if pid:

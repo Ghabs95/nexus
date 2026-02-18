@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import List, Optional, Tuple
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -21,7 +22,11 @@ from config import (
 )
 from state_manager import StateManager
 from models import WorkflowState
-from commands.workflow import pause_handler, resume_handler, stop_handler
+from commands.workflow import (
+    pause_handler as workflow_pause_handler,
+    resume_handler as workflow_resume_handler,
+    stop_handler as workflow_stop_handler,
+)
 from agent_launcher import invoke_copilot_agent
 from inbox_processor import get_sop_tier
 from ai_orchestrator import get_orchestrator
@@ -118,50 +123,67 @@ def get_issue_details(issue_num, repo: str = None):
         return None
 
 
-def search_logs_for_issue(issue_num):
-    """Search bot and processor logs for mentions of issue."""
-    logs = []
+def find_task_logs(task_file):
+    """Find task log files for the task file's project."""
+    if not task_file:
+        return []
+
     try:
-        # Search in systemd journal
-        result = subprocess.run(
-            ["sudo", "journalctl", "-u", "nexus-bot", "-u", "nexus-processor",
-             "--grep", f"issue|#{issue_num}", "-n", "50", "--no-pager"],
-            text=True, capture_output=True, timeout=5
-        )
-        if result.stdout:
-            logs.extend(result.stdout.strip().split("\n")[-10:])  # Last 10 entries
+        if "/.github/" in task_file:
+            project_root = task_file.split("/.github/")[0]
+        else:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
+
+        logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
+        if not os.path.isdir(logs_dir):
+            return []
+
+        pattern = os.path.join(logs_dir, "**", "*.log")
+        return glob.glob(pattern, recursive=True)
     except Exception as e:
-        logger.warning(f"Failed to search logs for issue {issue_num}: {e}")
-    return logs
+        logger.warning(f"Failed to list task logs: {e}")
+        return []
 
 
-def read_log_matches(file_path, issue_num, issue_url, max_lines=5):
-    """Return last matching lines from a log file."""
-    if not os.path.exists(file_path):
+def read_log_matches(log_path, issue_num, issue_url=None, max_lines=20):
+    """Return lines from a log file that reference an issue."""
+    if not log_path or not os.path.exists(log_path):
         return []
 
     matches = []
+    needle = f"#{issue_num}"
     try:
-        with open(file_path, "r") as f:
+        with open(log_path, "r") as f:
             for line in f:
-                if issue_num in line or issue_url in line:
+                if needle in line or (issue_url and issue_url in line):
                     matches.append(line.rstrip())
-        if len(matches) > max_lines:
-            matches = matches[-max_lines:]
     except Exception as e:
-        logger.warning(f"Failed to read log file {file_path}: {e}")
-    return matches
+        logger.warning(f"Failed to read log file {log_path}: {e}")
+        return []
+
+    return matches[-max_lines:] if max_lines else matches
 
 
-def find_task_logs(task_file):
-    """Locate task logs folder based on task file path."""
-    if not task_file:
-        return []
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
-    logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
-    if not os.path.isdir(logs_dir):
-        return []
-    return [os.path.join(logs_dir, f) for f in os.listdir(logs_dir) if f.endswith(".log")]
+def search_logs_for_issue(issue_num):
+    """Search bot/processor logs for an issue number."""
+    log_paths = []
+    if TELEGRAM_BOT_LOG_FILE:
+        log_paths.append(TELEGRAM_BOT_LOG_FILE)
+    if LOGS_DIR and os.path.isdir(LOGS_DIR):
+        log_paths.extend(
+            os.path.join(LOGS_DIR, f)
+            for f in os.listdir(LOGS_DIR)
+            if f.endswith(".log")
+        )
+
+    seen = set()
+    results = []
+    for path in log_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        results.extend(read_log_matches(path, issue_num, max_lines=10))
+    return results
 
 
 def read_latest_log_tail(task_file, max_lines=20):
@@ -189,14 +211,22 @@ def find_issue_log_files(issue_num, task_file=None):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
         logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
         if os.path.isdir(logs_dir):
-            pattern = os.path.join(logs_dir, f"copilot_{issue_num}_*.log")
-            matches.extend(glob.glob(pattern))
+            pattern = os.path.join(logs_dir, "**", f"copilot_{issue_num}_*.log")
+            matches.extend(glob.glob(pattern, recursive=True))
 
     if matches:
         return matches
 
     # Fallback: scan all logs dirs
-    pattern = os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", f"copilot_{issue_num}_*.log")
+    pattern = os.path.join(
+        BASE_DIR,
+        "**",
+        ".github",
+        "tasks",
+        "logs",
+        "**",
+        f"copilot_{issue_num}_*.log"
+    )
     return glob.glob(pattern, recursive=True)
 
 
@@ -245,7 +275,6 @@ def resolve_project_config_from_task(task_file):
 
 def find_task_file_by_issue(issue_num):
     """Search for a task file that references the issue number."""
-    issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
     patterns = [
         os.path.join(BASE_DIR, "**", ".github", "tasks", "active", "*.md"),
         os.path.join(BASE_DIR, "**", ".github", "inbox", "*.md"),
@@ -255,7 +284,10 @@ def find_task_file_by_issue(issue_num):
             try:
                 with open(path, "r") as f:
                     content = f.read()
-                if issue_url in content or re.search(r"\*\*Issue:\*\*\s*https?://github.com/.+/issues/" + re.escape(issue_num), content):
+                if re.search(
+                    r"\*\*Issue:\*\*\s*https?://github.com/.+/issues/" + re.escape(issue_num),
+                    content,
+                ):
                     return path
             except Exception:
                 continue
@@ -279,6 +311,197 @@ TYPES = {
     "improvement": "🚀 Improvement (9-step workflow)",
     "improvement-simple": "🚀 Simple Improvement (4-step fast-track)"
 }
+
+PROJECT_ALIASES = {
+    "casit": "case_italia",
+    "wlbl": "wallible",
+    "bm": "biome",
+    "nexus": "nexus",
+}
+
+
+def _normalize_project_key(project: str) -> Optional[str]:
+    if not project:
+        return None
+    project_key = project.lower()
+    return PROJECT_ALIASES.get(project_key, project_key)
+
+
+def _iter_project_keys() -> List[str]:
+    keys = []
+    for key, cfg in PROJECT_CONFIG.items():
+        if isinstance(cfg, dict) and cfg.get("github_repo"):
+            keys.append(key)
+    return keys
+
+
+def _get_project_label(project_key: str) -> str:
+    return PROJECTS.get(project_key, project_key)
+
+
+def _get_project_root(project_key: str) -> Optional[str]:
+    cfg = PROJECT_CONFIG.get(project_key)
+    if not isinstance(cfg, dict):
+        return None
+    workspace = cfg.get("workspace")
+    if not workspace:
+        return None
+    return os.path.join(BASE_DIR, workspace)
+
+
+def _get_project_logs_dir(project_key: str) -> Optional[str]:
+    project_root = _get_project_root(project_key)
+    if not project_root:
+        return None
+    logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
+    return logs_dir if os.path.isdir(logs_dir) else None
+
+
+async def _prompt_project_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> None:
+    keyboard = [
+        [InlineKeyboardButton(_get_project_label(key), callback_data=f"pickcmd:{command}:{key}")]
+        for key in _iter_project_keys()
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
+    await update.effective_message.reply_text(
+        f"Select a project for /{command}:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["pending_command"] = command
+
+
+def _parse_project_issue_args(args: List[str]) -> Tuple[Optional[str], Optional[str], List[str]]:
+    if len(args) < 2:
+        return None, None, []
+    project_key = _normalize_project_key(args[0])
+    issue_num = args[1].lstrip("#")
+    rest = args[2:]
+    return project_key, issue_num, rest
+
+
+async def _ensure_project_issue(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+    project_key, issue_num, rest = _parse_project_issue_args(context.args)
+    if not project_key or not issue_num:
+        if len(context.args) == 1:
+            maybe_issue = context.args[0].lstrip("#")
+            if maybe_issue.isdigit():
+                context.user_data["pending_issue"] = maybe_issue
+        await _prompt_project_selection(update, context, command)
+        return None, None, []
+    if project_key not in _iter_project_keys():
+        await update.effective_message.reply_text(
+            f"❌ Unknown project '{project_key}'."
+        )
+        return None, None, []
+    if not issue_num.isdigit():
+        await update.effective_message.reply_text("❌ Invalid issue number.")
+        return None, None, []
+    return project_key, issue_num, rest
+
+
+async def _handle_pending_issue_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    pending_command = context.user_data.get("pending_command")
+    pending_project = context.user_data.get("pending_project")
+    pending_issue = context.user_data.get("pending_issue")
+    if not pending_command or not pending_project:
+        return False
+
+    text = (update.message.text or "").strip()
+    if pending_issue is None:
+        issue_num = text.lstrip("#")
+        if not issue_num.isdigit():
+            await update.effective_message.reply_text("Please enter a valid issue number (e.g., 1).")
+            return True
+        context.user_data["pending_issue"] = issue_num
+        if pending_command == "respond":
+            await update.effective_message.reply_text("Now send the response message for this issue.")
+            return True
+    else:
+        issue_num = pending_issue
+
+    project_key = pending_project
+    rest = []
+    if pending_command == "respond":
+        rest = [text]
+
+    context.user_data.pop("pending_command", None)
+    context.user_data.pop("pending_project", None)
+    context.user_data.pop("pending_issue", None)
+
+    await _dispatch_command(update, context, pending_command, project_key, issue_num, rest)
+    return True
+
+
+def _command_handler_map():
+    return {
+        "logs": logs_handler,
+        "logsfull": logsfull_handler,
+        "tail": tail_handler,
+        "audit": audit_handler,
+        "comments": comments_handler,
+        "reprocess": reprocess_handler,
+        "continue": continue_handler,
+        "respond": respond_handler,
+        "kill": kill_handler,
+        "assign": assign_handler,
+        "implement": implement_handler,
+        "prepare": prepare_handler,
+        "pause": pause_handler,
+        "resume": resume_handler,
+        "stop": stop_handler,
+        "track": track_handler,
+        "untrack": untrack_handler,
+    }
+
+
+async def _dispatch_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    command: str,
+    project_key: str,
+    issue_num: str,
+    rest: Optional[List[str]] = None,
+) -> None:
+    context.args = [project_key, issue_num] + (rest or [])
+    handler = _command_handler_map().get(command)
+    if handler:
+        await handler(update, context)
+    else:
+        await update.effective_message.reply_text("Unsupported command.")
+
+
+async def project_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data or not query.data.startswith("pickcmd:"):
+        return
+
+    _, command, project_key = query.data.split(":", 2)
+    context.user_data["pending_command"] = command
+    context.user_data["pending_project"] = project_key
+
+    pending_issue = context.user_data.get("pending_issue")
+    if pending_issue and command != "respond":
+        context.user_data.pop("pending_issue", None)
+        await _dispatch_command(update, context, command, project_key, pending_issue)
+        return
+
+    if pending_issue and command == "respond":
+        await query.edit_message_text(
+            f"Selected {_get_project_label(project_key)}. Now send the response message."
+        )
+        return
+
+    await query.edit_message_text(
+        f"Selected {_get_project_label(project_key)}. Send the issue number."
+    )
+
+
+async def close_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
 
 # --- STATES ---
 SELECT_PROJECT, SELECT_TYPE, INPUT_TASK = range(3)
@@ -311,31 +534,30 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 **Monitoring & Tracking:**\n"
         "/status - View pending tasks in inbox\n"
         "/active - View tasks currently being worked on\n"
-        "/track <issue#> - Subscribe to issue updates (global)\n"
-        "/track <project> <issue#> - Track issue per-project (casit/wlbl/bm)\n"
-        "/untrack <issue#> - Stop tracking globally\n"
+        "/track <project> <issue#> - Track issue per-project\n"
         "/untrack <project> <issue#> - Stop tracking per-project\n"
         "/myissues - View all your tracked issues\n"
-        "/logs [issue#] - View task logs (latest if no issue)\n"
-        "/logsfull <issue#> - Full log lines (no truncation)\n"
-        "/audit [issue#] - View workflow audit trail (latest if no issue)\n"
+        "/logs <project> <issue#> - View task logs\n"
+        "/logsfull <project> <issue#> - Full log lines (no truncation)\n"
+        "/tail <project> <issue#> [lines] - Tail recent log lines\n"
+        "/audit <project> <issue#> - View workflow audit trail\n"
         "/stats [days] - View system analytics (default: 30 days)\n"
-        "/comments <issue#> - View issue comments\n\n"
+        "/comments <project> <issue#> - View issue comments\n\n"
         "🔁 **Recovery & Control:**\n"
-        "/reprocess <issue#> - Re-run agent processing\n"
-        "/continue <issue#> - Check stuck agent status\n"
-        "/kill <issue#> - Stop running agent process\n"
-        "/pause <issue#> - Pause auto-chaining (agents work but no auto-launch)\n"
-        "/resume <issue#> - Resume auto-chaining\n"
-        "/stop <issue#> - Stop workflow completely (closes issue, kills agent)\n"
-        "/respond <issue#> <text> - Respond to agent questions\n\n"
+        "/reprocess <project> <issue#> - Re-run agent processing\n"
+        "/continue <project> <issue#> - Check stuck agent status\n"
+        "/kill <project> <issue#> - Stop running agent process\n"
+        "/pause <project> <issue#> - Pause auto-chaining (agents work but no auto-launch)\n"
+        "/resume <project> <issue#> - Resume auto-chaining\n"
+        "/stop <project> <issue#> - Stop workflow completely (closes issue, kills agent)\n"
+        "/respond <project> <issue#> <text> - Respond to agent questions\n\n"
         "🤝 **Agent Management:**\n"
         "/agents <project> - List all agents for a project\n"
         "/direct <project> <@agent> <message> - Send direct request to an agent\n\n"
         "🔧 **GitHub Management:**\n"
-        "/assign <issue#> - Assign GitHub issue to yourself\n"
-        "/implement <issue#> - Request Copilot agent implementation\n"
-        "/prepare <issue#> - Add Copilot-friendly instructions\n\n"
+        "/assign <project> <issue#> - Assign GitHub issue to yourself\n"
+        "/implement <project> <issue#> - Request Copilot agent implementation\n"
+        "/prepare <project> <issue#> - Add Copilot-friendly instructions\n\n"
         "ℹ️ /help - Show this list"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -415,23 +637,24 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             "- /status — View pending tasks in inbox\n"
             "- /active — View tasks currently being worked on\n"
             "- /myissues — View your tracked issues\n"
-            "- /logs [issue#] — View task logs (latest if no issue)\n"
-            "- /logsfull <issue#> — Full log lines (no truncation)\n"
-            "- /audit [issue#] — View workflow audit trail\n"
+            "- /logs <project> <issue#> — View task logs\n"
+            "- /logsfull <project> <issue#> — Full log lines (no truncation)\n"
+            "- /tail <project> <issue#> [lines] — Tail recent logs\n"
+            "- /audit <project> <issue#> — View workflow audit trail\n"
             "- /stats [days] — View system analytics (default: 30 days)\n"
-            "- /comments <issue#> — View issue comments\n"
-            "- /track <issue#> | /track <project> <issue#> — Subscribe to updates\n"
-            "- /untrack <issue#> | /untrack <project> <issue#> — Stop tracking"
+            "- /comments <project> <issue#> — View issue comments\n"
+            "- /track <project> <issue#> — Subscribe to updates\n"
+            "- /untrack <project> <issue#> — Stop tracking"
         ),
         "workflow": (
             "🔁 **Workflow Control**\n"
-            "- /reprocess <issue#> — Re-run agent processing\n"
-            "- /continue <issue#> — Resume a stuck agent\n"
-            "- /kill <issue#> — Stop a running agent\n"
-            "- /pause <issue#> — Pause auto-chaining\n"
-            "- /resume <issue#> — Resume auto-chaining\n"
-            "- /stop <issue#> — Stop workflow completely\n"
-            "- /respond <issue#> <text> — Respond to agent questions"
+            "- /reprocess <project> <issue#> — Re-run agent processing\n"
+            "- /continue <project> <issue#> — Resume a stuck agent\n"
+            "- /kill <project> <issue#> — Stop a running agent\n"
+            "- /pause <project> <issue#> — Pause auto-chaining\n"
+            "- /resume <project> <issue#> — Resume auto-chaining\n"
+            "- /stop <project> <issue#> — Stop workflow completely\n"
+            "- /respond <project> <issue#> <text> — Respond to agent questions"
         ),
         "agents": (
             "🤝 **Agents**\n"
@@ -440,9 +663,9 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ),
         "github": (
             "🔧 **GitHub**\n"
-            "- /assign <issue#> — Assign issue to yourself\n"
-            "- /implement <issue#> — Request Copilot implementation\n"
-            "- /prepare <issue#> — Add Copilot-friendly instructions"
+            "- /assign <project> <issue#> — Assign issue to yourself\n"
+            "- /implement <project> <issue#> — Request Copilot implementation\n"
+            "- /prepare <project> <issue#> — Add Copilot-friendly instructions"
         ),
         "help": "ℹ️ Use /help for the full command list."
     }
@@ -550,6 +773,9 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logger.info(f"Hands-free triggered by user: {update.effective_user.id}")
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if await _handle_pending_issue_input(update, context):
         return
 
     # Guard: Don't process commands as tasks
@@ -777,17 +1003,16 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_active = 0
 
     # Check project workspace active folders
-    project_dirs = {
-        "case_italia": "Case Italia",
-        "wallible": "Wallible",
-        "biome": "Biome",
-    }
-
-    for project_key, display_name in project_dirs.items():
-        active_dir = os.path.join(BASE_DIR, project_key, ".github", "tasks", "active")
+    for project_key in _iter_project_keys():
+        display_name = _get_project_label(project_key)
+        project_root = _get_project_root(project_key)
+        if not project_root:
+            continue
+        active_dir = os.path.join(project_root, ".github", "tasks", "active")
         if os.path.exists(active_dir):
             files = [f for f in os.listdir(active_dir) if f.endswith(".md")]
             if files:
+                repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
                 active_text += f"{display_name}: {len(files)} task(s)\n"
                 total_active += len(files)
                 for f in files[:3]:
@@ -796,7 +1021,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_path = os.path.join(active_dir, f)
                     issue_number = extract_issue_number_from_file(file_path)
                     if issue_number:
-                        issue_link = f"https://github.com/{GITHUB_REPO}/issues/{issue_number}"
+                        issue_link = f"https://github.com/{repo}/issues/{issue_number}"
                         issue_suffix = f" [#{issue_number}]({issue_link})"
                     else:
                         issue_suffix = " (issue ?)"
@@ -823,40 +1048,18 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Parse issue number from command
     # Format: /assign 0 or /assign #0 or /assign https://github.com/owner/repo/issues/0
     if not context.args:
-        await update.effective_message.reply_text(
-            "⚠️ Usage: `/assign <issue#> [assignee]`\n\n"
-            "Examples:\n"
-            "  `/assign 0` (assigns to you / @me)\n"
-            "  `/assign 0 copilot` (assigns to configured Copilot user)\n"
-            f"  `/assign https://github.com/{get_github_repo("nexus")}/issues/0 alice`",
-            parse_mode='Markdown'
-        )
+        await _prompt_project_selection(update, context, "assign")
         return
 
-    issue_input = context.args[0]
-    
-    # Extract issue number
-    issue_number = None
-    if issue_input.startswith("#"):
-        issue_number = issue_input[1:]
-    elif issue_input.startswith("http"):
-        # Extract from URL
-        match = re.search(r'/issues/(\d+)', issue_input)
-        if match:
-            issue_number = match.group(1)
-    else:
-        issue_number = issue_input
-
-    if not issue_number or not issue_number.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
+    project_key, issue_number, rest = await _ensure_project_issue(update, context, "assign")
+    if not project_key:
         return
 
-    # Get repo from env or use default
-    repo = get_github_repo("nexus")
+    repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
     # Optional assignee argument: `/assign 5 copilot` or `/assign 5 alice`
     assignee = "@me"
-    if len(context.args) > 1:
-        raw_assignee = context.args[1]
+    if rest:
+        raw_assignee = rest[0]
         if raw_assignee.lower() == "copilot":
             assignee = os.getenv("GITHUB_COPILOT_USER", "copilot")
         else:
@@ -909,29 +1112,14 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text(
-            "⚠️ Usage: `/implement <issue#>`\n\nExamples:\n  `/implement 0`\n  `/implement #0`\n"
-            f"  `/implement https://github.com/{get_github_repo("nexus")}/issues/0`",
-            parse_mode='Markdown'
-        )
+        await _prompt_project_selection(update, context, "implement")
         return
 
-    issue_input = context.args[0]
-    issue_number = None
-    if issue_input.startswith("#"):
-        issue_number = issue_input[1:]
-    elif issue_input.startswith("http"):
-        match = re.search(r'/issues/(\d+)', issue_input)
-        if match:
-            issue_number = match.group(1)
-    else:
-        issue_number = issue_input
-
-    if not issue_number or not issue_number.isdigit():
-        await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
+    project_key, issue_number, _ = await _ensure_project_issue(update, context, "implement")
+    if not project_key:
         return
 
-    repo = get_github_repo("nexus")
+    repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
 
     msg = await update.message.reply_text(f"🔔 Requesting Copilot implementation for issue #{issue_number}...")
 
@@ -979,29 +1167,14 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text(
-            "⚠️ Usage: `/prepare <issue#>`\n\nExamples:\n  `/prepare 0`\n  `/prepare #0`\n"
-            f"  `/prepare https://github.com/{get_github_repo("nexus")}/issues/0`",
-            parse_mode='Markdown'
-        )
+        await _prompt_project_selection(update, context, "prepare")
         return
 
-    issue_input = context.args[0]
-    issue_number = None
-    if issue_input.startswith("#"):
-        issue_number = issue_input[1:]
-    elif issue_input.startswith("http"):
-        match = re.search(r'/issues/(\d+)', issue_input)
-        if match:
-            issue_number = match.group(1)
-    else:
-        issue_number = issue_input
-
-    if not issue_number or not issue_number.isdigit():
-        await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
+    project_key, issue_number, _ = await _ensure_project_issue(update, context, "prepare")
+    if not project_key:
         return
 
-    repo = get_github_repo("nexus")
+    repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
 
     msg = await update.message.reply_text(f"🔧 Preparing issue #{issue_number} for Copilot...")
 
@@ -1171,48 +1344,27 @@ async def untrack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if not context.args:
-        await update.effective_message.reply_text(
-            "⚠️ Usage:\n"
-            "/untrack <issue#> - Stop global tracking\n"
-            "/untrack <project> <issue#> - Stop per-project tracking\n\n"
-            "Examples:\n"
-            "  /untrack 123\n"
-            "  /untrack casit 456"
-        )
+        await _prompt_project_selection(update, context, "untrack")
         return
 
-    # Parse arguments - support both /untrack <issue> and /untrack <project> <issue>
-    if len(context.args) >= 2:
-        # Per-project untracking
-        project = context.args[0].lower()
-        issue_num = context.args[1].lstrip("#")
-        
-        success = user_manager.untrack_issue(
-            telegram_id=user.id,
-            project=project,
-            issue_number=issue_num
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "untrack")
+    if not project_key:
+        return
+
+    success = user_manager.untrack_issue(
+        telegram_id=user.id,
+        project=project_key,
+        issue_number=issue_num
+    )
+    
+    if success:
+        await update.effective_message.reply_text(
+            f"✅ Stopped tracking {_get_project_label(project_key)} issue #{issue_num}"
         )
-        
-        if success:
-            await update.effective_message.reply_text(
-                f"✅ Stopped tracking {project.upper()} issue #{issue_num}"
-            )
-        else:
-            await update.effective_message.reply_text(
-                f"❌ You weren't tracking {project.upper()} issue #{issue_num}"
-            )
     else:
-        # Legacy global untracking
-        issue_num = context.args[0].lstrip("#")
-        if issue_num in tracked_issues:
-            del tracked_issues[issue_num]
-            save_tracked_issues(tracked_issues)
-            await update.effective_message.reply_text(
-                f"✅ Stopped tracking issue #{issue_num} (global)\n\n"
-                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
-            )
-        else:
-            await update.effective_message.reply_text(f"❌ Issue #{issue_num} is not being tracked globally.")
+        await update.effective_message.reply_text(
+            f"❌ You weren't tracking {_get_project_label(project_key)} issue #{issue_num}"
+        )
 
 
 async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1264,61 +1416,17 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        # Show recent task logs across projects
-        log_pattern = os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", "*.log")
-        log_files = glob.glob(log_pattern, recursive=True)
-        log_files.sort(key=os.path.getmtime, reverse=True)
-
-        if not log_files:
-            await update.effective_message.reply_text("⚠️ No task logs found yet.")
-            return
-
-        msg = await update.effective_message.reply_text("📋 Latest task logs (recent files)...")
-
-        timeline = "Latest task logs (recent files):\n\n"
-        for log_file in log_files[:3]:
-            timeline += f"**{os.path.basename(log_file)}**\n"
-            try:
-                with open(log_file, "r") as f:
-                    lines = f.readlines()[-40:]
-                for line in lines:
-                    timeline += f"{line.rstrip()}\n"
-            except Exception as e:
-                timeline += f"❌ Failed to read {os.path.basename(log_file)}: {e}\n"
-            timeline += "\n"
-
-        # Telegram message limit safety: send in chunks
-        max_len = 3500
-        if len(timeline) <= max_len:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
-                text=timeline
-            )
-        else:
-            chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
-                text=chunks[0]
-            )
-            for chunk in chunks[1:]:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=chunk
-                )
+        await _prompt_project_selection(update, context, "logs")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "logs")
+    if not project_key:
         return
 
     msg = await update.effective_message.reply_text(f"📋 Fetching logs for issue #{issue_num}...")
 
-    issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
-
     # Task log files only (.github/tasks/logs/*.log)
+    config = PROJECT_CONFIG[project_key]
     repo = config.get("github_repo", GITHUB_REPO)
     details = get_issue_details(issue_num, repo=repo)
     timeline = "Task Logs:\n"
@@ -1328,6 +1436,8 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         match = re.search(r"Task File:\s*`([^`]+)`", details.get("body", ""))
         if match:
             task_file = match.group(1)
+    if not task_file:
+        task_file = find_task_file_by_issue(issue_num)
 
     issue_logs = find_issue_log_files(issue_num, task_file=task_file)
     if issue_logs:
@@ -1346,6 +1456,27 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeline += f"\n❌ Failed to read {os.path.basename(latest)}: {e}\n"
     else:
         latest_tail = read_latest_log_tail(task_file, max_lines=50)
+        if not latest_tail:
+            logs_dir = _get_project_logs_dir(project_key)
+            if logs_dir:
+                log_files = [
+                    os.path.join(logs_dir, f)
+                    for f in os.listdir(logs_dir)
+                    if f.endswith(".log")
+                ]
+                if log_files:
+                    log_files.sort(key=os.path.getmtime, reverse=True)
+                    latest = log_files[0]
+                    try:
+                        with open(latest, "r") as f:
+                            lines = f.readlines()[-50:]
+                        latest_tail = [
+                            f"[{os.path.basename(latest)}] {line.rstrip()}"
+                            for line in lines
+                        ]
+                    except Exception as e:
+                        logger.error(f"Error reading log file: {e}", exc_info=True)
+
         if latest_tail:
             timeline += "\nLatest Task Logs:\n"
             for log in latest_tail:
@@ -1387,18 +1518,19 @@ async def logsfull_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /logsfull <issue#>")
+        await _prompt_project_selection(update, context, "logsfull")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "logsfull")
+    if not project_key:
         return
 
     msg = await update.effective_message.reply_text(f"📋 Fetching full logs for issue #{issue_num}...")
+    config = PROJECT_CONFIG[project_key]
+    repo = config.get("github_repo", GITHUB_REPO)
     issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
-    details = get_issue_details(issue_num)
+    details = get_issue_details(issue_num, repo=repo)
     timeline = "GitHub Activity:\n"
     if details:
         timeline += f"- Title: {details.get('title', 'N/A')}\n"
@@ -1454,6 +1586,81 @@ async def logsfull_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=part)
 
 
+@rate_limited("logs")
+async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a short tail of the latest task log for an issue."""
+    logger.info(f"Tail requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("⚠️ Usage: /tail <project> <issue#> [lines]")
+        return
+
+    project_key, issue_num, rest = await _ensure_project_issue(update, context, "tail")
+    if not project_key:
+        return
+
+    max_lines = 50
+    if rest:
+        try:
+            max_lines = max(5, min(200, int(rest[0])))
+        except ValueError:
+            await update.effective_message.reply_text("⚠️ Line count must be a number.")
+            return
+
+    config = PROJECT_CONFIG[project_key]
+    repo = config.get("github_repo", GITHUB_REPO)
+    details = get_issue_details(issue_num, repo=repo)
+
+    task_file = None
+    if details and details.get("body"):
+        match = re.search(r"Task File:\s*`([^`]+)`", details.get("body", ""))
+        if match:
+            task_file = match.group(1)
+    if not task_file:
+        task_file = find_task_file_by_issue(issue_num)
+
+    lines = read_latest_log_tail(task_file, max_lines=max_lines)
+    if not lines:
+        logs_dir = _get_project_logs_dir(project_key)
+        if logs_dir:
+            log_files = [
+                os.path.join(logs_dir, f)
+                for f in os.listdir(logs_dir)
+                if f.endswith(".log")
+            ]
+            if log_files:
+                log_files.sort(key=os.path.getmtime, reverse=True)
+                latest = log_files[0]
+                try:
+                    with open(latest, "r") as f:
+                        tail_lines = f.readlines()[-max_lines:]
+                    lines = [
+                        f"[{os.path.basename(latest)}] {line.rstrip()}"
+                        for line in tail_lines
+                    ]
+                except Exception as e:
+                    logger.error(f"Error reading log file: {e}", exc_info=True)
+
+    if not lines:
+        await update.effective_message.reply_text("⚠️ No task logs found yet.")
+        return
+
+    header = f"📋 Latest log tail (#{issue_num}, {max_lines} lines):\n"
+    text = header + "\n".join(lines)
+
+    max_len = 3500
+    if len(text) <= max_len:
+        await update.effective_message.reply_text(text)
+    else:
+        chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
+        await update.effective_message.reply_text(chunks[0])
+        for part in chunks[1:]:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=part)
+
+
 async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display workflow audit trail for an issue (timeline of state changes, agent launches, etc)."""
     logger.info(f"Audit trail requested by user: {update.effective_user.id}")
@@ -1462,54 +1669,11 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        # Show latest audit events across all issues
-        audit_log = os.path.join(LOGS_DIR, "audit.log")
-        if not os.path.exists(audit_log):
-            await update.effective_message.reply_text("⚠️ No audit log found yet.")
-            return
+        await _prompt_project_selection(update, context, "audit")
+        return
 
-        msg = await update.effective_message.reply_text("📊 Latest audit events...")
-        try:
-            with open(audit_log, "r") as f:
-                lines = f.readlines()[-50:]
-
-            timeline = "📊 **Latest Audit Events**\n" + ("=" * 40) + "\n\n"
-            for line in lines:
-                timeline += line.rstrip() + "\n"
-
-            # Telegram message limit safety
-            max_len = 3500
-            if len(timeline) <= max_len:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=msg.message_id,
-                    text=timeline
-                )
-            else:
-                chunks = [timeline[i:i+max_len] for i in range(0, len(timeline), max_len)]
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=msg.message_id,
-                    text=chunks[0]
-                )
-                for chunk in chunks[1:]:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=chunk
-                    )
-            return
-        except Exception as e:
-            logger.error(f"Error reading audit log: {e}")
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
-                text=f"❌ Failed to read audit log: {e}"
-            )
-            return
-
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "audit")
+    if not project_key:
         return
 
     try:
@@ -1669,28 +1833,25 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /reprocess <issue#>")
+        await _prompt_project_selection(update, context, "reprocess")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "reprocess")
+    if not project_key:
         return
 
-    details = get_issue_details(issue_num)
-    if not details:
-        await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
-        return
-
-    if details.get("state") == "closed":
-        await update.effective_message.reply_text(f"⚠️ Issue #{issue_num} is closed. Reprocess only applies to open issues.")
-        return
-
-    body = details.get("body", "")
-    match = re.search(r"Task File:\s*`([^`]+)`", body)
-    task_file = match.group(1) if match else None
+    task_file = find_task_file_by_issue(issue_num)
+    details = None
+    repo = None
     if not task_file:
-        task_file = find_task_file_by_issue(issue_num)
+        repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
+        details = get_issue_details(issue_num, repo=repo)
+        if not details:
+            await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
+            return
+        body = details.get("body", "")
+        match = re.search(r"Task File:\s*`([^`]+)`", body)
+        task_file = match.group(1) if match else None
 
     if not task_file:
         await update.effective_message.reply_text(f"❌ Task file not found for issue #{issue_num}.")
@@ -1705,6 +1866,19 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"❌ No agents config for project '{name}'.")
         return
 
+    repo = config.get("github_repo", GITHUB_REPO)
+    if not details:
+        details = get_issue_details(issue_num, repo=repo)
+        if not details:
+            await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
+            return
+
+    if details.get("state") == "closed":
+        await update.effective_message.reply_text(
+            f"⚠️ Issue #{issue_num} is closed. Reprocess only applies to open issues."
+        )
+        return
+
     with open(task_file, "r") as f:
         content = f.read()
 
@@ -1712,19 +1886,21 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
     tier_name, _, _ = get_sop_tier(task_type)
-    issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+    issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
     msg = await update.effective_message.reply_text(f"🔁 Reprocessing issue #{issue_num}...")
 
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
 
+    log_subdir = project_name or project_key
     pid, tool_used = invoke_copilot_agent(
         agents_dir=agents_abs,
         workspace_dir=workspace_abs,
         issue_url=issue_url,
         tier_name=tier_name,
-        task_content=content
+        task_content=content,
+        log_subdir=log_subdir
     )
 
     if pid:
@@ -1772,15 +1948,14 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /continue <issue#> [prompt]\n\nExample: /continue 0 Please proceed with implementation")
+        await _prompt_project_selection(update, context, "continue")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, rest = await _ensure_project_issue(update, context, "continue")
+    if not project_key:
         return
 
-    continuation_prompt = " ".join(context.args[1:]) if len(context.args) > 1 else "Please continue with the next step."
+    continuation_prompt = " ".join(rest) if rest else "Please continue with the next step."
 
     # Check if agent is already running
     pid = find_agent_pid_for_issue(issue_num)
@@ -1791,22 +1966,19 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Get issue details and task file
-    repo = config.get("github_repo", GITHUB_REPO)
-    details = get_issue_details(issue_num, repo=repo)
-    if not details:
-        await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
-        return
-
-    if details.get("state") == "closed":
-        await update.effective_message.reply_text(f"⚠️ Issue #{issue_num} is closed.")
-        return
-
-    body = details.get("body", "")
-    match = re.search(r"Task File:\s*`([^`]+)`", body)
-    task_file = match.group(1) if match else None
+    # Get task file and repo
+    task_file = find_task_file_by_issue(issue_num)
+    details = None
+    repo = None
     if not task_file:
-        task_file = find_task_file_by_issue(issue_num)
+        repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
+        details = get_issue_details(issue_num, repo=repo)
+        if not details:
+            await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
+            return
+        body = details.get("body", "")
+        match = re.search(r"Task File:\s*`([^`]+)`", body)
+        task_file = match.group(1) if match else None
 
     if not task_file or not os.path.exists(task_file):
         await update.effective_message.reply_text(f"❌ Task file not found for issue #{issue_num}.")
@@ -1816,6 +1988,17 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not config or not config.get("agents_dir"):
         name = project_name or "unknown"
         await update.effective_message.reply_text(f"❌ No agents config for project '{name}'.")
+        return
+
+    repo = config.get("github_repo", GITHUB_REPO)
+    if not details:
+        details = get_issue_details(issue_num, repo=repo)
+        if not details:
+            await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
+            return
+
+    if details.get("state") == "closed":
+        await update.effective_message.reply_text(f"⚠️ Issue #{issue_num} is closed.")
         return
 
     with open(task_file, "r") as f:
@@ -1833,6 +2016,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
 
     # Launch with continuation context
+    log_subdir = project_name or project_key
     pid, tool_used = invoke_copilot_agent(
         agents_dir=agents_abs,
         workspace_dir=workspace_abs,
@@ -1840,7 +2024,8 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tier_name=tier_name,
         task_content=content,
         continuation=True,
-        continuation_prompt=continuation_prompt
+        continuation_prompt=continuation_prompt,
+        log_subdir=log_subdir
     )
 
     if pid:
@@ -1872,12 +2057,11 @@ async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /kill <issue#>")
+        await _prompt_project_selection(update, context, "kill")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "kill")
+    if not project_key:
         return
 
     pid = find_agent_pid_for_issue(issue_num)
@@ -1921,12 +2105,49 @@ async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def pause_handler_REMOVED():
-    """This function has been moved to commands/workflow.py"""
-    pass
+async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pause auto-chaining with project picker support."""
+    if not context.args:
+        await _prompt_project_selection(update, context, "pause")
+        return
+
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "pause")
+    if not project_key:
+        return
+
+    context.args = [project_key, issue_num]
+    await workflow_pause_handler(update, context)
 
 
-# pause_handler, resume_handler, and stop_handler are now imported from commands.workflow
+async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume auto-chaining with project picker support."""
+    if not context.args:
+        await _prompt_project_selection(update, context, "resume")
+        return
+
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "resume")
+    if not project_key:
+        return
+
+    context.args = [project_key, issue_num]
+    await workflow_resume_handler(update, context)
+
+
+async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop workflow with project picker support."""
+    if not context.args:
+        await _prompt_project_selection(update, context, "stop")
+        return
+
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "stop")
+    if not project_key:
+        return
+
+    context.args = [project_key, issue_num]
+    await workflow_stop_handler(update, context)
+
+
+# pause_handler, resume_handler, and stop_handler now wrap commands.workflow handlers
 
 
 def get_agents_for_project(project_dir):
@@ -2122,20 +2343,22 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /comments <issue#>\n\nExample: /comments 0")
+        await _prompt_project_selection(update, context, "comments")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, _ = await _ensure_project_issue(update, context, "comments")
+    if not project_key:
         return
+
+    config = PROJECT_CONFIG[project_key]
+    repo = config.get("github_repo", GITHUB_REPO)
 
     msg = await update.effective_message.reply_text(f"💬 Fetching comments for issue #{issue_num}...")
 
     try:
         # Fetch issue comments
         result = subprocess.run(
-            ["gh", "issue", "view", issue_num, "--repo", GITHUB_REPO, 
+            ["gh", "issue", "view", issue_num, "--repo", repo, 
              "--json", "comments,title", "--jq", 
              '{title: .title, comments: [.comments[] | {author: .author.login, created: .createdAt, body: .body}]}'],
             check=True, text=True, capture_output=True, timeout=15
@@ -2152,7 +2375,7 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=(
                     f"💬 **Issue #{issue_num}: {title}**\n\n"
                     f"No comments yet.\n\n"
-                    f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
                 ),
                 parse_mode='Markdown'
             )
@@ -2184,7 +2407,7 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(comments) > 5:
             comments_text += f"_...and {len(comments) - 5} more comments_\n\n"
 
-        comments_text += f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+        comments_text += f"🔗 https://github.com/{repo}/issues/{issue_num}"
 
         # Handle long messages
         max_len = 3500
@@ -2241,26 +2464,51 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
-    if not context.args or len(context.args) < 2:
-        await update.effective_message.reply_text(
-            "⚠️ Usage: /respond <issue#> <your response>\n\n"
-            "Example: /respond 0 The surveyor feature should allow users to view property boundaries and measurements"
-        )
+    if not context.args:
+        await _prompt_project_selection(update, context, "respond")
         return
 
-    issue_num = context.args[0].lstrip("#")
-    if not issue_num.isdigit():
-        await update.effective_message.reply_text("❌ Invalid issue number.")
+    project_key, issue_num, rest = await _ensure_project_issue(update, context, "respond")
+    if not project_key:
+        return
+    if not rest:
+        await update.effective_message.reply_text("⚠️ Please include a response message.")
         return
 
-    response_text = " ".join(context.args[1:])
+    response_text = " ".join(rest)
 
     msg = await update.effective_message.reply_text(f"📝 Posting response to issue #{issue_num}...")
 
     try:
         # Post comment to GitHub issue
+        task_file = find_task_file_by_issue(issue_num)
+        details = None
+        repo = None
+        if not task_file:
+            repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
+            details = get_issue_details(issue_num, repo=repo)
+            if details:
+                body = details.get("body", "")
+                match = re.search(r"Task File:\s*`([^`]+)`", body)
+                task_file = match.group(1) if match else None
+
+        if not task_file or not os.path.exists(task_file):
+            await update.effective_message.reply_text(
+                f"⚠️ Posted comment but couldn't find task file to continue agent."
+            )
+            return
+
+        project_name, config = resolve_project_config_from_task(task_file)
+        if not config or not config.get("agents_dir"):
+            await update.effective_message.reply_text(
+                f"⚠️ Posted comment but no agents config for project."
+            )
+            return
+
+        repo = config.get("github_repo", GITHUB_REPO)
+
         result = subprocess.run(
-            ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO, 
+            ["gh", "issue", "comment", issue_num, "--repo", repo, 
              "--body", response_text],
             check=True, text=True, capture_output=True, timeout=15
         )
@@ -2272,25 +2520,13 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # Now automatically continue the agent with the user's input
-        details = get_issue_details(issue_num)
         if not details:
-            await update.effective_message.reply_text(f"⚠️ Posted comment but couldn't fetch issue details to continue agent.")
-            return
-
-        body = details.get("body", "")
-        match = re.search(r"Task File:\s*`([^`]+)`", body)
-        task_file = match.group(1) if match else None
-        if not task_file:
-            task_file = find_task_file_by_issue(issue_num)
-
-        if not task_file or not os.path.exists(task_file):
-            await update.effective_message.reply_text(f"⚠️ Posted comment but couldn't find task file to continue agent.")
-            return
-
-        project_name, config = resolve_project_config_from_task(task_file)
-        if not config or not config.get("agents_dir"):
-            await update.effective_message.reply_text(f"⚠️ Posted comment but no agents config for project.")
-            return
+            details = get_issue_details(issue_num, repo=repo)
+            if not details:
+                await update.effective_message.reply_text(
+                    f"⚠️ Posted comment but couldn't fetch issue details to continue agent."
+                )
+                return
 
         with open(task_file, "r") as f:
             content = f.read()
@@ -2299,7 +2535,7 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
         tier_name, _, _ = get_sop_tier(task_type)
-        issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+        issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
         agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
         workspace_abs = os.path.join(BASE_DIR, config["workspace"])
@@ -2310,6 +2546,7 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Please proceed with the next step of the workflow."
         )
 
+        log_subdir = project_name
         pid, tool_used = invoke_copilot_agent(
             agents_dir=agents_abs,
             workspace_dir=workspace_abs,
@@ -2317,20 +2554,21 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tier_name=tier_name,
             task_content=content,
             continuation=True,
-            continuation_prompt=continuation_prompt
+            continuation_prompt=continuation_prompt,
+            log_subdir=log_subdir
         )
 
         if pid:
             await update.effective_message.reply_text(
                 f"✅ Agent resumed for issue #{issue_num} (PID: {pid}, Tool: {tool_used})\n\n"
                 f"Check /logs {issue_num} to monitor progress.\n\n"
-                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+                f"🔗 https://github.com/{repo}/issues/{issue_num}"
             )
         else:
             await update.effective_message.reply_text(
                 f"⚠️ Response posted but failed to continue agent.\n"
                 f"Use /continue {issue_num} to resume manually.\n\n"
-                f"🔗 https://github.com/{GITHUB_REPO}/issues/{issue_num}"
+                f"🔗 https://github.com/{repo}/issues/{issue_num}"
             )
 
     except subprocess.TimeoutExpired:
@@ -2386,12 +2624,9 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
     
     # For actions that need issue number in context.args
     if action in action_handlers:
-        # Create a fake update with the command
-        context.args = [issue_num]
-        
-        # Call the appropriate handler
-        handler = action_handlers[action]
-        await handler(update, context)
+        context.user_data["pending_command"] = action
+        context.user_data["pending_issue"] = issue_num
+        await _prompt_project_selection(update, context, action)
     elif action == 'respond':
         # For respond, just show instructions
         await query.edit_message_text(
@@ -2565,6 +2800,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("myissues", myissues_handler))
     app.add_handler(CommandHandler("logs", logs_handler))
     app.add_handler(CommandHandler("logsfull", logsfull_handler))
+    app.add_handler(CommandHandler("tail", tail_handler))
     app.add_handler(CommandHandler("audit", audit_handler))
     app.add_handler(CommandHandler("stats", stats_handler))
     app.add_handler(CommandHandler("comments", comments_handler))
@@ -2582,6 +2818,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("prepare", prepare_handler))
     # Menu navigation callbacks
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r'^menu:'))
+    app.add_handler(CallbackQueryHandler(project_picker_handler, pattern=r'^pickcmd:'))
+    app.add_handler(CallbackQueryHandler(close_flow_handler, pattern=r'^flow:close$'))
     # Inline keyboard callback handler (must be before ConversationHandler callbacks)
     app.add_handler(CallbackQueryHandler(inline_keyboard_handler, pattern=r'^(logs|logsfull|status|pause|resume|stop|audit|reprocess|respond|approve|reject)_'))
     # Exclude commands from the auto-router catch-all

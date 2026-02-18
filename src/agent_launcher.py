@@ -98,7 +98,15 @@ def is_recent_launch(issue_number):
     
     # Check 3: Recent log files (within last 2 minutes)
     recent_logs = glob.glob(
-        os.path.join(BASE_DIR, "**", ".github", "tasks", "logs", f"copilot_{issue_number}_*.log"),
+        os.path.join(
+            BASE_DIR,
+            "**",
+            ".github",
+            "tasks",
+            "logs",
+            "**",
+            f"copilot_{issue_number}_*.log"
+        ),
         recursive=True
     )
     if recent_logs:
@@ -111,8 +119,17 @@ def is_recent_launch(issue_number):
     return False
 
 
-def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_content, 
-                         continuation=False, continuation_prompt=None, use_gemini=False):
+def invoke_copilot_agent(
+    agents_dir,
+    workspace_dir,
+    issue_url,
+    tier_name,
+    task_content,
+    continuation=False,
+    continuation_prompt=None,
+    use_gemini=False,
+    log_subdir=None
+):
     """Invokes an AI agent on the agents directory to process the task.
 
     Uses orchestrator to determine best tool (Copilot or Gemini CLI) with fallback support.
@@ -222,7 +239,8 @@ def invoke_copilot_agent(agents_dir, workspace_dir, issue_url, tier_name, task_c
             base_dir=BASE_DIR,
             issue_url=issue_url,
             agent_name="ProjectLead",  # This is always ProjectLead for workflow routing
-            use_gemini=use_gemini
+            use_gemini=use_gemini,
+            log_subdir=log_subdir
         )
         
         logger.info(f"🚀 Agent launched with {tool_used.value} (PID: {pid})")
@@ -378,7 +396,8 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         tier_name=tier_name,
         task_content=task_content,
         continuation=True,
-        continuation_prompt=continuation_prompt
+        continuation_prompt=continuation_prompt,
+        log_subdir=project_root
     )
     
     if pid:

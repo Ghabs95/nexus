@@ -34,7 +34,7 @@ biome:
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
-  workspace: ghabs/nexus
+  workspace: ghabs/nexus-core
   github_repo: Ghabs95/nexus-core
   # Uncomment to use a different workflow definition for this project
   workflow_definition_path: /home/ubuntu/git/ghabs/nexus-core/examples/workflows/development_workflow.yaml

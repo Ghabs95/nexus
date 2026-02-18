@@ -5,12 +5,30 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
 from models import WorkflowState
-from config import ALLOWED_USER_ID, USE_NEXUS_CORE
+from config import ALLOWED_USER_ID, USE_NEXUS_CORE, PROJECT_CONFIG
 from nexus_core_helpers import (
     pause_workflow_sync, resume_workflow_sync, get_workflow_status_sync
 )
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ALIASES = {
+    "casit": "case_italia",
+    "wlbl": "wallible",
+    "bm": "biome",
+    "nexus": "nexus",
+}
+
+
+def _normalize_project_key(project: str) -> str:
+    return PROJECT_ALIASES.get(project.lower(), project.lower())
+
+
+def _get_project_repo(project_key: str) -> str:
+    cfg = PROJECT_CONFIG.get(project_key, {})
+    if isinstance(cfg, dict) and cfg.get("github_repo"):
+        return cfg["github_repo"]
+    raise ValueError(f"Unknown project '{project_key}'")
 
 
 async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18,13 +36,18 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
 
-    if not context.args:
+    if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
-            "⚠️ Usage: /pause <issue#>\n\nExample: /pause 0"
+            "⚠️ Usage: /pause <project> <issue#>"
         )
         return
 
-    issue_num = context.args[0].lstrip("#")
+    project_key = _normalize_project_key(context.args[0])
+    if project_key not in PROJECT_CONFIG:
+        await update.effective_message.reply_text("❌ Invalid project.")
+        return
+
+    issue_num = context.args[1].lstrip("#")
     if not issue_num.isdigit():
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
@@ -47,7 +70,7 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(
                 f"⏸️ **Workflow paused for issue #{issue_num}**{status_text}\n\n"
                 f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
-                f"Use /resume {issue_num} to re-enable auto-chaining."
+                f"Use /resume {project_key} {issue_num} to re-enable auto-chaining."
             )
             return
     
@@ -58,7 +81,7 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         f"⏸️ **Workflow paused for issue #{issue_num}**\n\n"
         f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
-        f"Use /resume {issue_num} to re-enable auto-chaining."
+        f"Use /resume {project_key} {issue_num} to re-enable auto-chaining."
     )
 
 
@@ -67,13 +90,18 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
 
-    if not context.args:
+    if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
-            "⚠️ Usage: /resume <issue#>\n\nExample: /resume 0"
+            "⚠️ Usage: /resume <project> <issue#>"
         )
         return
 
-    issue_num = context.args[0].lstrip("#")
+    project_key = _normalize_project_key(context.args[0])
+    if project_key not in PROJECT_CONFIG:
+        await update.effective_message.reply_text("❌ Invalid project.")
+        return
+
+    issue_num = context.args[1].lstrip("#")
     if not issue_num.isdigit():
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
@@ -116,13 +144,18 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
 
-    if not context.args:
+    if not context.args or len(context.args) < 2:
         await update.effective_message.reply_text(
-            "⚠️ Usage: /stop <issue#>\n\nExample: /stop 0"
+            "⚠️ Usage: /stop <project> <issue#>"
         )
         return
 
-    issue_num = context.args[0].lstrip("#")
+    project_key = _normalize_project_key(context.args[0])
+    if project_key not in PROJECT_CONFIG:
+        await update.effective_message.reply_text("❌ Invalid project.")
+        return
+
+    issue_num = context.args[1].lstrip("#")
     if not issue_num.isdigit():
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
@@ -143,8 +176,9 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Close the GitHub issue
     try:
+        repo = _get_project_repo(project_key)
         subprocess.run(
-            ["gh", "issue", "close", issue_num, "--repo", "Ghabs95/agents"],
+            ["gh", "issue", "close", issue_num, "--repo", repo],
             check=True, timeout=10
         )
         logger.info(f"Closed issue #{issue_num}")

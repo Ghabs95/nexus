@@ -101,6 +101,9 @@ Step through an interactive menu:
    ALLOWED_USER=your_user_id
    ```
 
+   In config/project_config.yaml, make sure the nexus project points to the
+   nexus-core workspace so agent PRs land in the correct repo.
+
    For manual testing, you can also export them:
    ```bash
    source vars.secret
