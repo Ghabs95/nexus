@@ -13,20 +13,138 @@ import os
 import re
 import subprocess
 import time
+import yaml
 
 from config import (
     BASE_DIR,
     get_github_repo,
     PROJECT_CONFIG,
     WORKFLOW_CHAIN,
-    ORCHESTRATOR_CONFIG
+    ORCHESTRATOR_CONFIG,
+    get_nexus_dir_name
 )
 from state_manager import StateManager
 from error_handling import run_command_with_retry
-from notifications import notify_agent_completed, notify_workflow_started
+from notifications import notify_agent_completed, notify_workflow_started, send_telegram_alert
 from ai_orchestrator import get_orchestrator, ToolUnavailableError
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_agent_key(agent_name: str) -> str:
+    """Normalize agent name for matching YAML metadata.name values."""
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", agent_name)
+    name = name.replace("_", "-").replace(" ", "-")
+    name = re.sub(r"-+", "-", name)
+    return name.lower()
+
+
+def _find_agent_yaml(agents_dir: str, agent_type: str) -> str:
+    """Find an agent YAML definition by spec.agent_type.
+    
+    Searches for an agent where spec.agent_type matches the requested type.
+    This enables routing by abstract agent types (triage, design, debug, etc.)
+    rather than specific agent names.
+    """
+    normalized = _normalize_agent_key(agent_type)
+    patterns = [
+        os.path.join(agents_dir, "**", "*.yaml"),
+        os.path.join(agents_dir, "**", "*.yml"),
+    ]
+    for pattern in patterns:
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = yaml.safe_load(handle)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("kind") != "Agent":
+                continue
+            
+            # Look for spec.agent_type field
+            spec = data.get("spec", {})
+            spec_agent_type = spec.get("agent_type", "")
+            if not spec_agent_type:
+                continue
+            
+            normalized_type = _normalize_agent_key(spec_agent_type)
+            if normalized == normalized_type:
+                return path
+    return ""
+
+
+def _get_copilot_translator_path() -> str:
+    """Resolve the to_copilot.py translator path."""
+    env_path = os.getenv("COPILOT_TRANSLATOR_PATH")
+    if env_path:
+        return env_path
+    return os.path.join(
+        BASE_DIR,
+        "ghabs",
+        "nexus-core",
+        "examples",
+        "translator",
+        "to_copilot.py",
+    )
+
+
+def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
+    """Ensure an agent definition exists by generating it from YAML if needed."""
+    yaml_path = _find_agent_yaml(agents_dir, agent_type)
+    if not yaml_path:
+        logger.error(f"Missing agent YAML for agent_type '{agent_type}' in {agents_dir}")
+        send_telegram_alert(
+            f"Missing agent YAML for agent_type '{agent_type}' in {agents_dir}."
+        )
+        return False
+
+    agent_md_path = os.path.splitext(yaml_path)[0] + ".agent.md"
+    if os.path.exists(agent_md_path):
+        if os.path.getmtime(agent_md_path) >= os.path.getmtime(yaml_path):
+            return True
+
+    translator_path = _get_copilot_translator_path()
+    if not os.path.exists(translator_path):
+        logger.error(f"Missing translator script: {translator_path}")
+        send_telegram_alert(
+            f"Missing translator script: {translator_path}."
+        )
+        return False
+
+    try:
+        result = subprocess.run(
+            ["python3", translator_path, yaml_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "Translator failed: %s",
+                result.stderr.strip() or result.stdout.strip(),
+            )
+            send_telegram_alert(
+                f"Translator failed for agent_type '{agent_type}'."
+            )
+            return False
+        if not result.stdout.strip():
+            logger.error(f"Translator produced empty output for {yaml_path}")
+            send_telegram_alert(
+                f"Translator produced empty output for agent_type '{agent_type}'."
+            )
+            return False
+        with open(agent_md_path, "w", encoding="utf-8") as handle:
+            handle.write(result.stdout)
+        logger.info(f"✅ Generated agent instructions: {agent_md_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Translator error for {yaml_path}: {e}")
+        send_telegram_alert(
+            f"Translator error for agent_type '{agent_type}': {str(e)}"
+        )
+        return False
 
 
 def get_sop_tier_from_issue(issue_number, project="nexus"):
@@ -100,11 +218,12 @@ def is_recent_launch(issue_number):
             return True
     
     # Check 3: Recent log files (within last 2 minutes)
+    nexus_dir_name = get_nexus_dir_name()
     recent_logs = glob.glob(
         os.path.join(
             BASE_DIR,
             "**",
-            ".github",
+            nexus_dir_name,
             "tasks",
             "logs",
             "**",
@@ -131,7 +250,8 @@ def invoke_copilot_agent(
     continuation=False,
     continuation_prompt=None,
     use_gemini=False,
-    log_subdir=None
+    log_subdir=None,
+    agent_type="triage"
 ):
     """Invokes an AI agent on the agents directory to process the task.
 
@@ -147,6 +267,7 @@ def invoke_copilot_agent(
         continuation: If True, this is a continuation of previous work
         continuation_prompt: Custom prompt for continuation
         use_gemini: If True, prefer Gemini CLI; if False, prefer Copilot (default: False)
+        agent_type: Agent type to route to (triage, design, debug, etc.)
         
     Returns:
         Tuple of (PID of launched process or None if failed, tool_used: str)
@@ -193,7 +314,7 @@ def invoke_copilot_agent(
             # Manual continuation - should not be used by webhook, but kept for compatibility
             base_prompt = continuation_prompt or "Please continue with the next step."
             prompt = (
-                f"You are @ProjectLead. You previously started working on this task:\n\n"
+                f"You are a {agent_type} agent. You previously started working on this task:\n\n"
                 f"Issue: {issue_url}\n"
                 f"Tier: {tier_name}\n"
                 f"Workflow: /{workflow_name}\n\n"
@@ -202,9 +323,9 @@ def invoke_copilot_agent(
                 f"Task content:\n{task_content}"
             )
     else:
-        # Fresh start prompt for @ProjectLead
+        # Fresh start prompt for initial agent (typically triage)
         prompt = (
-            f"You are @ProjectLead. A new task has arrived and a GitHub issue has been created.\n\n"
+            f"You are a {agent_type} agent. A new task has arrived and a GitHub issue has been created.\n\n"
             f"Issue: {issue_url}\n"
             f"Tier: {tier_name}\n"
             f"Workflow: /{workflow_name}\n\n"
@@ -227,9 +348,12 @@ def invoke_copilot_agent(
         )
 
     mode = "continuation" if continuation else "initial"
-    logger.info(f"🤖 Launching AI agent in {agents_dir} (mode: {mode})")
+    logger.info(f"🤖 Launching {agent_type} agent in {agents_dir} (mode: {mode})")
     logger.info(f"   Workspace: {workspace_dir}")
     logger.info(f"   Workflow: /{workflow_name} (tier: {tier_name})")
+
+    if not _ensure_agent_definition(agents_dir, agent_type):
+        return None, None
 
     # Use orchestrator to launch agent
     orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
@@ -241,7 +365,7 @@ def invoke_copilot_agent(
             agents_dir=agents_dir,
             base_dir=BASE_DIR,
             issue_url=issue_url,
-            agent_name="ProjectLead",  # This is always ProjectLead for workflow routing
+            agent_name=agent_type,
             use_gemini=use_gemini,
             log_subdir=log_subdir
         )
@@ -260,7 +384,8 @@ def invoke_copilot_agent(
                 'pid': pid,
                 'tier': tier_name,
                 'mode': mode,
-                'tool': tool_used.value
+                'tool': tool_used.value,
+                'agent_type': agent_type
             }
             StateManager.save_launched_agents(launched_agents)
             
@@ -300,7 +425,6 @@ def invoke_copilot_agent(
             )
         
         return None, None
-
 
 def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
     """
@@ -384,7 +508,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
     
     # Create continuation prompt
     continuation_prompt = (
-        f"You are @{next_agent}. The previous workflow step is complete.\n\n"
+        f"You are a {next_agent} agent. The previous workflow step is complete.\n\n"
         f"Your task: Begin your step in the workflow.\n"
         f"Read recent GitHub comments to understand what's been completed.\n"
         f"Then perform your assigned work and post a status update.\n"
@@ -400,7 +524,8 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         task_content=task_content,
         continuation=True,
         continuation_prompt=continuation_prompt,
-        log_subdir=project_root
+        log_subdir=project_root,
+        agent_type=next_agent
     )
     
     if pid:

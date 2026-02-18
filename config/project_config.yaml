@@ -1,6 +1,10 @@
 # Global workflow definition path (YAML workflow file - single source of truth)
 workflow_definition_path: ghabs/agents/workflows/ghabs_org_workflow.yaml
 
+# VCS-agnostic inbox/tasks directory (can be .nexus, .gitlab, .gitea, etc.)
+# Relative to project workspace root
+nexus_dir: .nexus
+
 # PR Merge Policy (project-level enforcement)
 # Controls whether @OpsCommander can auto-merge PRs or must wait for human approval
 # Options:
@@ -9,21 +13,58 @@ workflow_definition_path: ghabs/agents/workflows/ghabs_org_workflow.yaml
 #   - never: Auto-merge allowed (NOT recommended for production)
 require_human_merge_approval: always  # Enforce human review for all projects
 
-# Global AI tool preferences (which AI tool each agent uses)
+# GitHub Issue Triage Configuration
+# Maps incoming GitHub issues to agent types (not specific agents)
+# 
+# Agent types are abstract roles that workflows implement:
+#   - triage: Initial issue analysis and classification
+#   - escalation: High-priority/urgent issues (escalate to senior agent)
+#   - debug: Bug analysis and root cause
+#
+# Each project's workflow defines which actual agent implements each type.
+# Example:
+#   - nexus uses development_workflow.yaml: triage → @triage, escalation → @triage (with priority flag)
+#   - ghabs org uses ghabs_org_workflow.yaml: triage → @ProjectLead, escalation → @Atlas
+github_issue_triage:
+  # Default agent type when no specific mapping applies
+  # Routes to whatever agent is configured for this type in the current workflow
+  default_agent_type: "triage"
+  
+  # Per-repository agent type override (if different from default)
+  per_repo:
+    "Ghabs95/nexus-core": "triage"      # Nexus core issues use triage workflow
+    "Ghabs95/agents": "triage"  # Agent workflow issues use triage
+  
+  # Label-based routing to agent types
+  label_based:
+    "docs": "triage"              # Documentation issues → triage agent
+    "good first issue": "triage"  # Beginner issues → triage agent
+    "bug": "debug"                # Bugs → debug agent (root cause analysis)
+    "urgent": "escalation"        # Urgent → escalation agent (senior review)
+    "critical": "escalation"      # Critical → escalation agent
+
+# Global AI tool preferences (which AI tool each AGENT TYPE uses)
+# Maps AGENT TYPES (not individual agents) to AI providers
+#
+# Architecture:
+# 1. Agent YAML files define: spec.agent_type (e.g., "triage", "debug", "escalation")
+# 2. Tasks are routed to agent types (not specific agent names)
+# 3. The first available agent with that type handles the task
+# 4. This config maps type → AI tool, so all agents of that type use the same tool
+#
+# Example agent YAML:
+#   spec:
+#     agent_type: "triage"       # This agent handles type: triage
+#     provider_preference: null  # Will use value from ai_tool_preferences
 ai_tool_preferences:
-  ProjectLead: copilot
-  Atlas: copilot
-  Architect: copilot
-  Tier2Lead: copilot
-  ProductDesigner: gemini
-  QAGuard: gemini
-  Scribe: gemini
-  OpsCommander: gemini
-  Privacy: gemini
-  FrontendLead: copilot
-  BackendLead: copilot
-  MobileLead: copilot
-  Developer: copilot  # Generic developer agent for quick implementations
+  # System agent types (used by github_issue_triage, workflows, etc.)
+  triage: copilot          # Initial issue analysis
+  debug: copilot           # Bug root cause analysis
+  escalation: copilot      # Urgent issues (escalate to senior agent)
+  design: copilot          # Architecture and design proposals
+  code_reviewer: copilot   # PR reviews
+  docs: gemini             # Documentation updates (faster)
+  summarizer: gemini       # Workflow summaries (faster)
 
 # Project configurations
 case_italia:

@@ -207,7 +207,7 @@ class AlertingSystem:
             cutoff_time = datetime.now() - timedelta(hours=self.stuck_workflow_hours)
             
             # Get all tracked issues
-            tracked_issues = self.state_manager.get_all_tracked_issues()
+            tracked_issues = self.state_manager.load_tracked_issues()
             
             for issue_key, issue_data in tracked_issues.items():
                 status = issue_data.get('status', 'unknown')

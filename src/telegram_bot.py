@@ -18,7 +18,8 @@ from telegram.ext import (
 from config import (
     TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
     DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, PROJECT_CONFIG, ensure_data_dir,
-    TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR
+    TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
+    get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
 from models import WorkflowState
@@ -129,12 +130,12 @@ def find_task_logs(task_file):
         return []
 
     try:
-        if "/.github/" in task_file:
-            project_root = task_file.split("/.github/")[0]
+        if "/.nexus/" in task_file:
+            project_root = task_file.split("/.nexus/")[0]
         else:
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
 
-        logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
+        logs_dir = get_tasks_logs_dir(project_root)
         if not os.path.isdir(logs_dir):
             return []
 
@@ -209,7 +210,7 @@ def find_issue_log_files(issue_num, task_file=None):
     # If task file is known, search its project logs dir first
     if task_file:
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
-        logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
+        logs_dir = get_tasks_logs_dir(project_root)
         if os.path.isdir(logs_dir):
             pattern = os.path.join(logs_dir, "**", f"copilot_{issue_num}_*.log")
             matches.extend(glob.glob(pattern, recursive=True))
@@ -218,10 +219,11 @@ def find_issue_log_files(issue_num, task_file=None):
         return matches
 
     # Fallback: scan all logs dirs
+    nexus_dir_name = get_nexus_dir_name()
     pattern = os.path.join(
         BASE_DIR,
         "**",
-        ".github",
+        nexus_dir_name,
         "tasks",
         "logs",
         "**",
@@ -253,16 +255,26 @@ def resolve_project_config_from_task(task_file):
 
     task_path = os.path.abspath(task_file)
 
-    # If task is inside a workspace repo (.github/...), derive project root
-    if "/.github/" in task_path:
-        project_root = task_path.split("/.github/")[0]
-        project_name = os.path.basename(project_root)
-        config = PROJECT_CONFIG.get(project_name)
-        if config:
-            return project_name, config
+    # If task is inside a workspace repo (.nexus/...), derive project root
+    if "/.nexus/" in task_path:
+        project_root = task_path.split("/.nexus/")[0]
+        # Match by configured workspace path instead of basename
+        for key, cfg in PROJECT_CONFIG.items():
+            if not isinstance(cfg, dict):
+                continue
+            workspace = cfg.get("workspace")
+            if not workspace:
+                continue
+            workspace_abs = os.path.abspath(os.path.join(BASE_DIR, workspace))
+            if project_root == workspace_abs or project_root.startswith(workspace_abs + os.sep):
+                return key, cfg
 
     # If task is inside an agents repo, map by agents_dir
     for key, cfg in PROJECT_CONFIG.items():
+        # Skip non-project config entries (global settings)
+        if not isinstance(cfg, dict):
+            continue
+        
         agents_dir = cfg.get("agents_dir")
         if not agents_dir:
             continue
@@ -275,9 +287,10 @@ def resolve_project_config_from_task(task_file):
 
 def find_task_file_by_issue(issue_num):
     """Search for a task file that references the issue number."""
+    nexus_dir_name = get_nexus_dir_name()
     patterns = [
-        os.path.join(BASE_DIR, "**", ".github", "tasks", "active", "*.md"),
-        os.path.join(BASE_DIR, "**", ".github", "inbox", "*.md"),
+        os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "active", "*.md"),
+        os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*.md"),
     ]
     for pattern in patterns:
         for path in glob.glob(pattern, recursive=True):
@@ -353,7 +366,7 @@ def _get_project_logs_dir(project_key: str) -> Optional[str]:
     project_root = _get_project_root(project_key)
     if not project_root:
         return None
-    logs_dir = os.path.join(project_root, ".github", "tasks", "logs")
+    logs_dir = get_tasks_logs_dir(project_root)
     return logs_dir if os.path.isdir(logs_dir) else None
 
 
@@ -770,82 +783,130 @@ async def process_audio_with_gemini(voice_file_id, context):
 
 # --- 1. HANDS-FREE MODE (Auto-Router) ---
 async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Hands-free triggered by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
-        return
+    try:
+        logger.info(
+            "Hands-free task received: user=%s message_id=%s has_voice=%s has_text=%s",
+            update.effective_user.id,
+            update.message.message_id if update.message else None,
+            bool(update.message and update.message.voice),
+            bool(update.message and update.message.text),
+        )
+        if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+            logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+            return
 
-    if await _handle_pending_issue_input(update, context):
-        return
+        if await _handle_pending_issue_input(update, context):
+            return
 
-    # Guard: Don't process commands as tasks
-    if update.message.text and update.message.text.startswith('/'):
-        logger.info(f"Ignoring command in hands_free_handler: {update.message.text}")
-        return
+        # Guard: Don't process commands as tasks
+        if update.message.text and update.message.text.startswith('/'):
+            logger.info(f"Ignoring command in hands_free_handler: {update.message.text}")
+            return
 
-    text = ""
-    status_msg = await update.message.reply_text("⚡ AI Listening...")
+        text = ""
+        status_msg = await update.message.reply_text("⚡ AI Listening...")
 
-    # A. Handle Audio
-    if update.message.voice:
-        text = await process_audio_with_gemini(update.message.voice.file_id, context)
-        if not text:
+        # A. Handle Audio
+        if update.message.voice:
+            logger.info("Processing voice message...")
+            text = await process_audio_with_gemini(update.message.voice.file_id, context)
+            if not text:
+                logger.warning("Voice transcription returned empty text")
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=status_msg.message_id,
+                    text="⚠️ Transcription failed"
+                )
+                return
+
+            logger.info("Running analysis on transcribed text...")
+            result = orchestrator.run_text_to_speech_analysis(
+                text=text,
+                task="classify",
+                projects=list(PROJECTS.keys()),
+                types=list(TYPES.keys())
+            )
+
+        # B. Handle Text
+        else:
+            logger.info(f"Processing text for auto-routing... text={update.message.text[:50]}")
+            text = update.message.text
+            result = orchestrator.run_text_to_speech_analysis(
+                text=text,
+                task="classify",
+                projects=list(PROJECTS.keys()),
+                types=list(TYPES.keys())
+            )
+
+        logger.info(f"Analysis result: {result}")
+
+        # Parse Result
+        try:
+            if isinstance(result, dict) and result.get("parse_error") and result.get("text"):
+                result = json.loads(result["text"].replace("```json", "").replace("```", ""))
+
+            project = result.get("project")
+            if not project or project not in PROJECTS:
+                error_msg = f"❌ Could not classify project. Received: '{project}'\n\nPlease use /new command to manually select project."
+                logger.error(f"Project classification failed: project={project}, valid={list(PROJECTS.keys())}")
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=status_msg.message_id,
+                    text=error_msg
+                )
+                return
+            
+            task_type = result.get("type", "feature")
+            if task_type not in TYPES:
+                logger.warning(f"Type '{task_type}' not in TYPES, defaulting to 'feature'")
+                task_type = "feature"
+            
+            content = result.get("text", text or "")
+            issue_name = result.get("issue_name", "")
+            logger.info(f"Parsed: project={project}, type={task_type}, issue_name={issue_name}")
+        except Exception as e:
+            logger.error(f"JSON parsing error: {e}", exc_info=True)
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=status_msg.message_id,
-                text="⚠️ Transcription failed"
+                text="⚠️ JSON Error"
             )
             return
 
-        result = orchestrator.run_text_to_speech_analysis(
-            text=text,
-            task="classify",
-            projects=list(PROJECTS.keys()),
-            types=list(TYPES.keys())
-        )
+        # Save to File
+        logger.info(f"Getting inbox dir for project: {project}")
+        
+        # Map project name to workspace (e.g., "nexus" → "ghabs")
+        workspace = project
+        if project in PROJECT_CONFIG:
+            workspace = PROJECT_CONFIG[project].get("workspace", project)
+            logger.info(f"Mapped project '{project}' → workspace '{workspace}'")
+        else:
+            logger.warning(f"Project '{project}' not in PROJECT_CONFIG, using as-is for workspace")
+        
+        target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace))
+        logger.info(f"Target inbox dir: {target_dir}")
+        os.makedirs(target_dir, exist_ok=True)
+        filename = f"voice_task_{update.message.message_id}.md"
+        filepath = os.path.join(target_dir, filename)
 
-    # B. Handle Text
-    else:
-        logger.info("Processing text for auto-routing...")
-        text = update.message.text
-        result = orchestrator.run_text_to_speech_analysis(
-            text=text,
-            task="classify",
-            projects=list(PROJECTS.keys()),
-            types=list(TYPES.keys())
-        )
+        logger.info(f"Writing to file: {filepath}")
+        with open(filepath, "w") as f:
+            f.write(
+                f"# {TYPES.get(task_type, 'Task')}\n**Project:** {PROJECTS.get(project, project)}\n**Type:** {task_type}\n**Issue Name:** {issue_name}\n**Status:** Pending\n\n{content}")
 
-    # Parse Result
-    try:
-        if isinstance(result, dict) and result.get("parse_error") and result.get("text"):
-            result = json.loads(result["text"].replace("```json", "").replace("```", ""))
-
-        project = result.get("project", "inbox")
-        task_type = result.get("type", "feature")
-        content = result.get("text", text or "")
-        issue_name = result.get("issue_name", "")
-    except Exception:
+        logger.info(f"✅ File saved: {filepath}")
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=status_msg.message_id,
-            text="⚠️ JSON Error"
+            text=f"✅ Routed to `{project}`\n📝 *{content}*"
         )
-        return
-
-    # Save to File
-    target_dir = os.path.join(BASE_DIR, project, ".github", "inbox")
-    os.makedirs(target_dir, exist_ok=True)
-    filename = f"voice_task_{update.message.message_id}.md"
-
-    with open(os.path.join(target_dir, filename), "w") as f:
-        f.write(
-            f"# {TYPES.get(task_type, 'Task')}\n**Project:** {PROJECTS.get(project, project)}\n**Type:** {task_type}\n**Issue Name:** {issue_name}\n**Status:** Pending\n\n{content}")
-
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=status_msg.message_id,
-        text=f"✅ Routed to `{project}`\n📝 *{content}*"
-    )
+    except Exception as e:
+        logger.error(f"Unexpected error in hands_free_handler: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        except Exception:
+            pass
 
 
 # --- 2. SELECTION MODE (Menu) ---
@@ -884,6 +945,15 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     project = context.user_data['project']
     task_type = context.user_data['type']
 
+    logger.info(
+        "Selection task received: user=%s message_id=%s project=%s type=%s has_voice=%s",
+        update.effective_user.id,
+        update.message.message_id if update.message else None,
+        project,
+        task_type,
+        bool(update.message and update.message.voice),
+    )
+
     text = ""
     if update.message.voice:
         msg = await update.message.reply_text("🎧 Transcribing (CLI)...")
@@ -897,11 +967,27 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Transcription failed. Please try again.")
         return ConversationHandler.END
 
+    # Refine description using orchestrator (Gemini CLI preferred)
+    refined_text = text
+    try:
+        logger.info("Refining description with orchestrator (len=%s)", len(text))
+        refine_result = orchestrator.run_text_to_speech_analysis(
+            text=text,
+            task="refine_description",
+            project_name=PROJECTS.get(project)
+        )
+        candidate = refine_result.get("text", "").strip()
+        if candidate:
+            refined_text = candidate
+    except Exception as e:
+        logger.warning(f"Failed to refine description: {e}")
+
     # Generate issue name using orchestrator (CLI only)
     issue_name = ""
     try:
+        logger.info("Generating issue name with orchestrator (len=%s)", len(refined_text))
         name_result = orchestrator.run_text_to_speech_analysis(
-            text=text[:300],
+            text=refined_text[:300],
             task="generate_name",
             project_name=PROJECTS.get(project)
         )
@@ -911,14 +997,24 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         issue_name = ""
 
     # Write File
-    target_dir = os.path.join(BASE_DIR, project, ".github", "inbox")
+    # Map project name to workspace (e.g., "nexus" → "ghabs")
+    workspace = project
+    if project in PROJECT_CONFIG:
+        workspace = PROJECT_CONFIG[project].get("workspace", project)
+    
+    target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace))
     os.makedirs(target_dir, exist_ok=True)
     filename = f"{task_type}_{update.message.message_id}.md"
 
     with open(os.path.join(target_dir, filename), "w") as f:
         issue_name_line = f"**Issue Name:** {issue_name}\n" if issue_name else ""
         f.write(
-            f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Type:** {task_type}\n{issue_name_line}**Status:** Pending\n\n{text}")
+            f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Type:** {task_type}\n"
+            f"{issue_name_line}**Status:** Pending\n\n"
+            f"{refined_text}\n\n"
+            f"---\n"
+            f"**Raw Input:**\n{text}"
+        )
 
     await update.message.reply_text(f"✅ Saved to `{project}`.")
     return ConversationHandler.END
@@ -962,7 +1058,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_tasks = 0
 
     for project_key, project_name in PROJECTS.items():
-        inbox_dir = os.path.join(BASE_DIR, project_key, ".github", "inbox")
+        inbox_dir = get_inbox_dir(os.path.join(BASE_DIR, project_key))
         if os.path.exists(inbox_dir):
             files = [f for f in os.listdir(inbox_dir) if f.endswith(".md")]
             if files:
@@ -1008,7 +1104,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project_root = _get_project_root(project_key)
         if not project_root:
             continue
-        active_dir = os.path.join(project_root, ".github", "tasks", "active")
+        active_dir = get_tasks_active_dir(project_root)
         if os.path.exists(active_dir):
             files = [f for f in os.listdir(active_dir) if f.endswith(".md")]
             if files:
@@ -1425,7 +1521,7 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.effective_message.reply_text(f"📋 Fetching logs for issue #{issue_num}...")
 
-    # Task log files only (.github/tasks/logs/*.log)
+    # Task log files only (.nexus/tasks/logs/*.log)
     config = PROJECT_CONFIG[project_key]
     repo = config.get("github_repo", GITHUB_REPO)
     details = get_issue_details(issue_num, repo=repo)
@@ -2007,6 +2103,10 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     type_match = re.search(r"\*\*Type:\*\*\s*(.+)", content)
     task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
+    # Extract agent_type from task file (defaults to triage if not found)
+    agent_type_match = re.search(r"\*\*Agent Type:\*\*\s*(.+)", content)
+    agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
+
     tier_name, _, _ = get_sop_tier(task_type)
     issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
@@ -2025,7 +2125,8 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_content=content,
         continuation=True,
         continuation_prompt=continuation_prompt,
-        log_subdir=log_subdir
+        log_subdir=log_subdir,
+        agent_type=agent_type
     )
 
     if pid:
@@ -2151,21 +2252,22 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def get_agents_for_project(project_dir):
-    """Parse agents from .github/agents/*.agent.md files.
+    """Parse agents from .nexus/agents/*.agent.md files.
     
     Returns a dictionary: {agent_display_name: agent_filename}
     Example: {'Architect': 'architect.agent.md', 'BackendLead': 'backend.agent.md'}
     """
-    agents_github_dir = os.path.join(project_dir, ".github", "agents")
+    nexus_dir_name = get_nexus_dir_name()
+    agents_nexus_dir = os.path.join(project_dir, nexus_dir_name, "agents")
     agents_map = {}
     
-    if not os.path.exists(agents_github_dir):
+    if not os.path.exists(agents_nexus_dir):
         return agents_map
     
     try:
-        for filename in sorted(os.listdir(agents_github_dir)):
+        for filename in sorted(os.listdir(agents_nexus_dir)):
             if filename.endswith(".agent.md"):
-                filepath = os.path.join(agents_github_dir, filename)
+                filepath = os.path.join(agents_nexus_dir, filename)
                 # Parse the name from the YAML frontmatter
                 try:
                     with open(filepath, 'r') as f:

@@ -8,13 +8,14 @@ import shutil
 import subprocess
 import time
 import requests
+import yaml
 
 # Import centralized configuration
 from config import (
     BASE_DIR, get_github_repo, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
     WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
-    USE_NEXUS_CORE
+    USE_NEXUS_CORE, get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
 from models import WorkflowState
@@ -99,6 +100,51 @@ def get_workflow_state(issue_num):
 launched_agents_tracker = StateManager.load_launched_agents()
 # PROJECT_CONFIG is now imported from config.py
 
+# Failed task file lookup tracking (stop checking after 3 failures)
+FAILED_LOOKUPS_FILE = os.path.join(DATA_DIR, "failed_task_lookups.json")
+COMPLETION_COMMENTS_FILE = os.path.join(DATA_DIR, "completion_comments.json")
+
+def load_failed_lookups():
+    """Load failed task file lookup counters."""
+    try:
+        if os.path.exists(FAILED_LOOKUPS_FILE):
+            with open(FAILED_LOOKUPS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading failed lookups: {e}")
+    return {}
+
+def save_failed_lookups(lookups):
+    """Save failed task file lookup counters."""
+    try:
+        with open(FAILED_LOOKUPS_FILE, 'w') as f:
+            json.dump(lookups, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving failed lookups: {e}")
+
+
+def load_completion_comments():
+    """Load completion comment tracking data."""
+    try:
+        if os.path.exists(COMPLETION_COMMENTS_FILE):
+            with open(COMPLETION_COMMENTS_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to read completion comments file: {e}")
+    return {}
+
+
+def save_completion_comments(comments):
+    """Save completion comment tracking data."""
+    try:
+        with open(COMPLETION_COMMENTS_FILE, "w") as f:
+            json.dump(comments, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save completion comments file: {e}")
+
+failed_task_lookups = load_failed_lookups()
+completion_comments = load_completion_comments()
+
 # Logging
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -140,23 +186,225 @@ def _iter_project_configs():
             yield project_name, cfg
 
 
+def _resolve_repo_for_issue(issue_num: str) -> str:
+    """Resolve repo for issue by reading task file location from issue body."""
+    try:
+        result = run_command_with_retry(
+            ["gh", "issue", "view", str(issue_num), "--repo", get_issue_repo(),
+             "--json", "body"],
+            max_attempts=2, timeout=10
+        )
+        body = _extract_body_from_result(result.stdout)
+        task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
+        if not task_file_match:
+            return get_issue_repo()
+
+        task_file = task_file_match.group(1)
+        for key, cfg in _iter_project_configs():
+            workspace = cfg.get("workspace")
+            if not workspace:
+                continue
+            workspace_abs = os.path.join(BASE_DIR, workspace)
+            if task_file.startswith(workspace_abs):
+                return get_github_repo(key)
+    except Exception as e:
+        logger.warning(f"Failed to resolve repo for issue #{issue_num}: {e}")
+
+    return get_issue_repo()
+
+
+def _build_completion_comment(completion_data: dict) -> str:
+    """Build a GitHub comment body from agent completion summary data.
+    
+    Args:
+        completion_data: Dict with keys like 'summary', 'key_findings', 'next_agent', etc.
+    """
+    lines = []
+    lines.append("### ✅ Agent Completed")
+    
+    if "summary" in completion_data:
+        lines.append(f"\n**Summary:** {completion_data['summary']}")
+    
+    if "status" in completion_data and completion_data["status"] != "complete":
+        lines.append(f"\n**Status:** {completion_data['status']}")
+    
+    if "key_findings" in completion_data and completion_data["key_findings"]:
+        lines.append("\n**Key Findings:**")
+        for finding in completion_data["key_findings"]:
+            lines.append(f"- {finding}")
+    
+    if "effort_breakdown" in completion_data:
+        breakdown = completion_data["effort_breakdown"]
+        if isinstance(breakdown, dict) and breakdown:
+            lines.append("\n**Effort Breakdown:**")
+            for task, effort in breakdown.items():
+                lines.append(f"- {task}: {effort}")
+    
+    if "verdict" in completion_data:
+        lines.append(f"\n**Verdict:** {completion_data['verdict']}")
+    
+    if "next_agent" in completion_data:
+        agent_name = completion_data["next_agent"]
+        lines.append(f"\n**Next:** Ready for `@{agent_name}`")
+    
+    lines.append("\n\n_Automated comment from Nexus._")
+    return "".join(lines)
+
+
+def _post_completion_comments_from_logs() -> None:
+    """Post GitHub comments when agent logs show completion.
+    
+    Looks for completion_summary.json in log directory. Falls back to pattern
+    matching on log content if JSON not found.
+    """
+    global completion_comments
+    nexus_dir_name = get_nexus_dir_name()
+    log_files = glob.glob(
+        os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
+        recursive=True
+    )
+
+    completion_patterns = [
+        r"Step \d+ Complete",
+        r"✅.*(?:ready|complete|done)",
+        r"(?:Technical|[A-Z].*?) (?:assessment|work|review) (?:complete|done)",
+        r"Testing complete",
+        r"Task Complete",
+        r"Ready for @\w+",
+    ]
+
+    for log_file in log_files:
+        match = re.search(r"copilot_(\d+)_", os.path.basename(log_file))
+        if not match:
+            continue
+        issue_num = match.group(1)
+        comment_key = f"{issue_num}:{os.path.basename(log_file)}"
+        if comment_key in completion_comments:
+            continue
+
+        try:
+            # Skip if process still running
+            check_running = subprocess.run(
+                ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
+                text=True, capture_output=True, timeout=5
+            )
+            if check_running.stdout:
+                continue
+
+            with open(log_file, "r") as f:
+                log_content = f.read()
+
+            # Check for completion summary JSON in same directory
+            log_dir = os.path.dirname(log_file)
+            summary_json_path = os.path.join(log_dir, f"completion_summary_{issue_num}.json")
+            completion_data = None
+            
+            if os.path.exists(summary_json_path):
+                try:
+                    with open(summary_json_path, "r") as f:
+                        completion_data = json.load(f)
+                        logger.info(f"📋 Loaded completion summary for issue #{issue_num}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse completion_summary.json for #{issue_num}: {e}")
+            
+            # Fallback: check for completion pattern in log
+            if not completion_data:
+                completed = any(
+                    re.search(pattern, log_content, re.IGNORECASE)
+                    for pattern in completion_patterns
+                )
+                if not completed:
+                    continue
+                # Create minimal data from log content
+                completion_data = {"summary": "Agent work completed"}
+
+            repo = _resolve_repo_for_issue(issue_num)
+            comment_body = _build_completion_comment(completion_data)
+            result = subprocess.run(
+                ["gh", "issue", "comment", str(issue_num), "--repo", repo, "--body", comment_body],
+                text=True, capture_output=True, timeout=15
+            )
+            if result.returncode != 0:
+                logger.error(
+                    f"Failed to post completion comment for issue #{issue_num}: "
+                    f"{result.stderr or result.stdout}"
+                )
+                continue
+
+            completion_comments[comment_key] = time.time()
+            save_completion_comments(completion_comments)
+            logger.info(f"📝 Posted completion comment for issue #{issue_num}")
+        except Exception as e:
+            logger.error(f"Error posting completion comment for issue #{issue_num}: {e}")
+
+
+def _get_workflow_definition_path(project_name: str) -> str:
+    """Return absolute workflow definition path for a project, if configured."""
+    project_cfg = PROJECT_CONFIG.get(project_name, {})
+    if isinstance(project_cfg, dict) and project_cfg.get("workflow_definition_path"):
+        path = project_cfg["workflow_definition_path"]
+        # Resolve relative paths to absolute
+        if not os.path.isabs(path):
+            path = os.path.join(BASE_DIR, path)
+        return path
+    # Fall back to global workflow_definition_path
+    global_path = PROJECT_CONFIG.get("workflow_definition_path", "")
+    if global_path and not os.path.isabs(global_path):
+        global_path = os.path.join(BASE_DIR, global_path)
+    return global_path
+
+
+def _get_initial_agent_from_workflow(project_name: str) -> str:
+    """Get the first agent/agent_type from a workflow YAML definition.
+
+    Returns empty string if workflow definition is missing or invalid.
+    """
+    path = _get_workflow_definition_path(project_name)
+    if not path:
+        logger.error(f"Missing workflow_definition_path for project '{project_name}'")
+        send_telegram_alert(
+            f"Missing workflow_definition_path for project '{project_name}'."
+        )
+        return ""
+    if not os.path.exists(path):
+        logger.error(f"Workflow definition not found: {path}")
+        send_telegram_alert(f"Workflow definition not found: {path}")
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except Exception as e:
+        logger.error(f"Failed to read workflow definition {path}: {e}")
+        send_telegram_alert(f"Failed to read workflow definition {path}: {e}")
+        return ""
+
+    steps = data.get("steps") or []
+    if not steps:
+        logger.error(f"Workflow definition has no steps: {path}")
+        send_telegram_alert(f"Workflow definition has no steps: {path}")
+        return ""
+
+    first = steps[0]
+    if not isinstance(first, dict):
+        logger.error(f"Invalid first step in workflow definition: {path}")
+        send_telegram_alert(f"Invalid first step in workflow definition: {path}")
+        return ""
+
+    return first.get("agent_type") or first.get("agent") or ""
+
+
 # send_telegram_alert is now imported from notifications module
 
 
 def check_stuck_agents():
     """Monitor agent processes and handle timeouts with auto-kill and retry."""
     try:
-        # Find all copilot log files
-        log_pattern = os.path.join(
-            BASE_DIR,
-            "**",
-            ".github",
-            "tasks",
-            "logs",
-            "**",
-            "copilot_*.log"
+        # Find all copilot log files using configured nexus_dir
+        nexus_dir_name = get_nexus_dir_name()
+        log_files = glob.glob(
+            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
+            recursive=True
         )
-        log_files = glob.glob(log_pattern, recursive=True)
         
         for log_file in log_files:
             # Extract issue number from filename: copilot_4_20260215_112450.log
@@ -183,18 +431,14 @@ def check_stuck_agents():
                 killed = AgentMonitor.kill_agent(pid, issue_num)
                 
                 if killed:
-                    # Try to extract agent name from the log for retry logic
-                    try:
-                        with open(log_file, 'r') as f:
-                            log_content = f.read()
-                            agent_match = re.search(r"Agent: (\w+)|@(\w+)", log_content)
-                            agent_name = agent_match.group(1 or 2) if agent_match else "Unknown"
-                    except:
-                        agent_name = "Unknown"
+                    # Get agent type from launched agents tracker
+                    launched_agents = load_launched_agents()
+                    agent_data = launched_agents.get(str(issue_num), {})
+                    agent_type = agent_data.get('agent_type', 'unknown')
                     
                     # Check if we should retry
-                    will_retry = AgentMonitor.should_retry(issue_num, agent_name)
-                    notify_agent_timeout(issue_num, agent_name, will_retry, project="nexus")
+                    will_retry = AgentMonitor.should_retry(issue_num, agent_type)
+                    notify_agent_timeout(issue_num, agent_type, will_retry, project="nexus")
             
     except Exception as e:
         logger.error(f"Error in check_stuck_agents: {e}")
@@ -374,9 +618,13 @@ def check_completed_agents():
     """Monitor for completed agent steps and auto-chain to next agent.
     
     Checks both:
-    1. Log files in .github/tasks/logs/
+    1. Log files in .nexus/tasks/logs/
     2. GitHub issue comments for completion markers
     """
+    if USE_NEXUS_CORE:
+        logger.debug("Auto-chain disabled (USE_NEXUS_CORE=true, workflows handle progression)")
+        _post_completion_comments_from_logs()
+        return
     try:
         # FIRST: Check GitHub comments for recent completions
         try:
@@ -518,11 +766,12 @@ def check_completed_agents():
                                     continue
                             
                             # Check 3: Recent log files (within last 2 minutes)
+                            nexus_dir_name = get_nexus_dir_name()
                             recent_logs = glob.glob(
                                 os.path.join(
                                     BASE_DIR,
                                     "**",
-                                    ".github",
+                                    nexus_dir_name,
                                     "tasks",
                                     "logs",
                                     "**",
@@ -592,7 +841,7 @@ def check_completed_agents():
                                 
                                 # Create continuation prompt
                                 continuation_prompt = (
-                                    f"You are @{next_agent}. The previous workflow step is complete.\n\n"
+                                    f"You are a {next_agent} agent. The previous workflow step is complete.\n\n"
                                     f"Your task: Begin your step in the workflow.\n"
                                     f"Read recent GitHub comments to understand what's been completed.\n"
                                     f"Then perform your assigned work and post a status update.\n"
@@ -607,7 +856,8 @@ def check_completed_agents():
                                     task_content=task_content,
                                     continuation=True,
                                     continuation_prompt=continuation_prompt,
-                                    log_subdir=project_root
+                                    log_subdir=project_root,
+                                    agent_type=next_agent
                                 )
                                 
                                 if pid:
@@ -652,16 +902,18 @@ def check_completed_agents():
             logger.debug(f"GitHub comment detection not available: {e}")
         
         # SECOND: Check log files for completions (existing logic)
-        log_pattern = os.path.join(
-            BASE_DIR,
-            "**",
-            ".github",
-            "tasks",
-            "logs",
-            "**",
-            "copilot_*.log"
+        # NOTE: Auto-chaining is disabled when USE_NEXUS_CORE is enabled
+        # because nexus-core workflows handle step progression internally
+        if USE_NEXUS_CORE:
+            logger.debug("Auto-chain disabled (USE_NEXUS_CORE=true, workflows handle progression)")
+            return
+        
+        # Search in all project workspaces' configured nexus_dir
+        nexus_dir_name = get_nexus_dir_name()
+        log_files = glob.glob(
+            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
+            recursive=True
         )
-        log_files = glob.glob(log_pattern, recursive=True)
         
         for log_file in log_files:
             # Extract issue number from filename
@@ -755,6 +1007,10 @@ def check_completed_agents():
                     # Use the last mentioned agent (most likely the next one)
                     next_agent = next_agent_matches[-1]
                     
+                    # Skip if we've failed to find task file 3+ times
+                    if failed_task_lookups.get(issue_num, 0) >= 3:
+                        continue
+                    
                     # Get issue details to find task file
                     try:
                         result = subprocess.run(
@@ -767,7 +1023,13 @@ def check_completed_agents():
                         # Find task file (format: **Task File:** `/path/to/file`)
                         task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
                         if not task_file_match:
-                            logger.warning(f"No task file found for issue #{issue_num}")
+                            failed_task_lookups[issue_num] = failed_task_lookups.get(issue_num, 0) + 1
+                            if failed_task_lookups[issue_num] >= 3:
+                                logger.warning(f"⏭️ Issue #{issue_num}: No task file found {failed_task_lookups[issue_num]} times, stopping checks")
+                                save_failed_lookups(failed_task_lookups)
+                            else:
+                                logger.warning(f"No task file found for issue #{issue_num} ({failed_task_lookups[issue_num]}/3)")
+                                save_failed_lookups(failed_task_lookups)
                             continue
                         
                         task_file = task_file_match.group(1)
@@ -826,7 +1088,7 @@ def check_completed_agents():
                         
                         # Launch next agent with clear instructions
                         continuation_prompt = (
-                            f"You are @{next_agent}. The previous step has been completed by another agent.\n\n"
+                            f"You are a {next_agent} agent. The previous step has been completed by another agent.\n\n"
                             f"Your task: Complete the next step in the workflow.\n"
                             f"1. Review previous agent's work in GitHub comments and the task file\n"
                             f"2. Perform your assigned work for this step\n"
@@ -851,7 +1113,8 @@ def check_completed_agents():
                             task_content=task_content,
                             continuation=True,
                             continuation_prompt=continuation_prompt,
-                            log_subdir=project_root
+                            log_subdir=project_root,
+                            agent_type=next_agent
                         )
                         
                         if pid:
@@ -897,29 +1160,29 @@ def check_completed_agents():
 
 # SOP Checklist Templates
 SOP_FULL = """## SOP Checklist — New Feature
-- [ ] 1. **Vision & Scope** — `Ghabs`: Founder's Check
-- [ ] 2. **Technical Feasibility** — `Atlas`: HOW and WHEN
-- [ ] 3. **Architecture Design** — `Architect`: ADR + breakdown
-- [ ] 4. **UX Design** — `ProductDesigner`: Wireframes
-- [ ] 5. **Implementation** — Tier 2 Lead: Code + tests
-- [ ] 6. **Quality Gate** — `QAGuard`: Coverage check
-- [ ] 7. **Compliance Gate** — `Privacy`: PIA (if user data)
-- [ ] 8. **Deployment** — `OpsCommander`: Production
-- [ ] 9. **Documentation** — `Scribe`: Changelog + docs"""
+- [ ] 1. **Vision & Scope** — Define requirements
+- [ ] 2. **Technical Feasibility** — Assess approach and timeline
+- [ ] 3. **Architecture Design** — Create ADR + breakdown
+- [ ] 4. **UX Design** — Design wireframes
+- [ ] 5. **Implementation** — Write code + tests
+- [ ] 6. **Quality Gate** — Verify coverage
+- [ ] 7. **Compliance Gate** — PIA (if user data)
+- [ ] 8. **Deployment** — Deploy to production
+- [ ] 9. **Documentation** — Update changelog + docs"""
 
 SOP_SHORTENED = """## SOP Checklist — Bug Fix
-- [ ] 1. **Triage** — `ProjectLead`: Severity + routing
-- [ ] 2. **Root Cause Analysis** — Tier 2 Lead
-- [ ] 3. **Fix** — Tier 2 Lead: Code + regression test
-- [ ] 4. **Verify** — `QAGuard`: Regression suite
-- [ ] 5. **Deploy** — `OpsCommander`
-- [ ] 6. **Document** — `Scribe`: Changelog"""
+- [ ] 1. **Triage** — Severity + routing
+- [ ] 2. **Root Cause Analysis** — Investigate issue
+- [ ] 3. **Fix** — Code + regression test
+- [ ] 4. **Verify** — Regression suite
+- [ ] 5. **Deploy** — Deploy to production
+- [ ] 6. **Document** — Update changelog"""
 
 SOP_FAST_TRACK = """## SOP Checklist — Fast-Track
-- [ ] 1. **Triage** — `ProjectLead`: Route to repo
-- [ ] 2. **Implementation** — Copilot: Code + tests
-- [ ] 3. **Verify** — `QAGuard`: Quick check
-- [ ] 4. **Deploy** — `OpsCommander`"""
+- [ ] 1. **Triage** — Route to repo
+- [ ] 2. **Implementation** — Code + tests
+- [ ] 3. **Verify** — Quick check
+- [ ] 4. **Deploy** — Deploy changes"""
 
 
 def get_sop_tier(task_type, title=None, body=None):
@@ -1047,18 +1310,95 @@ def process_file(filepath):
         task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
         # Determine project from filepath
-        # filepath is .../project/.github/inbox/file.md
-        # project_root is .../project
+        # filepath is .../workspace/.nexus/inbox/file.md
+        # Find which project config has a workspace that matches this path
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(filepath)))
-        project_name = os.path.basename(project_root)
-
-        config = PROJECT_CONFIG.get(project_name)
+        
+        # Look up project by matching workspace path
+        project_name = None
+        config = None
+        for key, cfg in _iter_project_configs():
+            workspace = cfg.get("workspace")
+            if workspace:
+                workspace_abs = os.path.join(BASE_DIR, workspace)
+                if project_root == workspace_abs or project_root.startswith(workspace_abs + os.sep):
+                    project_name = key
+                    config = cfg
+                    break
+        
         if not config:
-            logger.warning(f"⚠️ No project config for '{project_name}', skipping.")
+            logger.warning(f"⚠️ No project config for workspace '{project_root}', skipping.")
             return
 
         logger.info(f"Project: {project_name}")
 
+        # Check if this task came from webhook (already has GitHub issue)
+        source_match = re.search(r'\*\*Source:\*\*\s*(.+)', content)
+        source = source_match.group(1).strip().lower() if source_match else None
+        
+        # Extract issue number and URL if from webhook
+        issue_num_match = re.search(r'\*\*Issue Number:\*\*\s*(.+)', content)
+        issue_url_match = re.search(r'\*\*URL:\*\*\s*(.+)', content)
+        agent_type_match = re.search(r'\*\*Agent Type:\*\*\s*(.+)', content)
+        
+        if source == "webhook":
+            # This task is from a webhook - issue already exists, skip creation
+            issue_number = issue_num_match.group(1).strip() if issue_num_match else None
+            issue_url = issue_url_match.group(1).strip() if issue_url_match else None
+            agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
+            
+            if not issue_url or not issue_number:
+                logger.error(f"⚠️ Webhook task missing issue URL or number, skipping: {filepath}")
+                return
+            
+            logger.info(f"📌 Webhook task for existing issue #{issue_number}, launching agent directly")
+            
+            # Move file to project workspace active folder
+            active_dir = get_tasks_active_dir(project_root)
+            os.makedirs(active_dir, exist_ok=True)
+            new_filepath = os.path.join(active_dir, os.path.basename(filepath))
+            logger.info(f"Moving task to active: {new_filepath}")
+            shutil.move(filepath, new_filepath)
+            
+            # Launch agent directly for existing GitHub issue
+            agents_dir_val = config.get("agents_dir")
+            if agents_dir_val and issue_url:
+                agents_abs = os.path.join(BASE_DIR, agents_dir_val)
+                workspace_abs = os.path.join(BASE_DIR, config["workspace"])
+                
+                # Use specified agent type or get from workflow
+                if not agent_type or agent_type == "triage":
+                    agent_type = _get_initial_agent_from_workflow(project_name)
+                    if not agent_type:
+                        logger.error(f"Stopping launch: missing workflow definition for {project_name}")
+                        send_telegram_alert(f"Stopping launch: missing workflow for {project_name}")
+                        return
+                
+                pid, tool_used = invoke_copilot_agent(
+                    agents_dir=agents_abs,
+                    workspace_dir=workspace_abs,
+                    issue_url=issue_url,
+                    tier_name="fast-track",  # Default tier for webhook tasks
+                    task_content=content,
+                    log_subdir=project_name,
+                    agent_type=agent_type
+                )
+                
+                if pid:
+                    try:
+                        with open(new_filepath, 'a') as f:
+                            f.write(f"\n**Agent PID:** {pid}\n")
+                            f.write(f"**Agent Tool:** {tool_used}\n")
+                    except Exception as e:
+                        logger.error(f"Failed to append PID: {e}")
+                
+                logger.info(f"✅ Launched {agent_type} agent for webhook issue #{issue_number}")
+            else:
+                logger.info(f"ℹ️ No agents directory for {project_name}, skipping agent launch.")
+            
+            return  # Done processing webhook task
+        
+        # Standard task processing (create new GitHub issue)
         # Check if issue name was already generated (in telegram_bot)
         issue_name_match = re.search(r'\*\*Issue Name:\*\*\s*(.+)', content)
         if issue_name_match:
@@ -1077,7 +1417,7 @@ def process_file(filepath):
         sop_checklist = sop_template
 
         # Move file to project workspace active folder
-        active_dir = os.path.join(project_root, ".github", "tasks", "active")
+        active_dir = get_tasks_active_dir(project_root)
         os.makedirs(active_dir, exist_ok=True)
         new_filepath = os.path.join(active_dir, os.path.basename(filepath))
         logger.info(f"Moving task to active: {new_filepath}")
@@ -1158,6 +1498,15 @@ def process_file(filepath):
         if agents_dir_val is not None and issue_url:
             agents_abs = os.path.join(BASE_DIR, agents_dir_val)
             workspace_abs = os.path.join(BASE_DIR, config["workspace"])
+            initial_agent = _get_initial_agent_from_workflow(project_name)
+            if not initial_agent:
+                logger.error(
+                    f"Stopping launch: missing workflow definition for {project_name}"
+                )
+                send_telegram_alert(
+                    f"Stopping launch: missing workflow definition for {project_name}"
+                )
+                return
 
             pid, tool_used = invoke_copilot_agent(
                 agents_dir=agents_abs,
@@ -1165,7 +1514,8 @@ def process_file(filepath):
                 issue_url=issue_url,
                 tier_name=tier_name,
                 task_content=content,
-                log_subdir=project_name
+                log_subdir=project_name,
+                agent_type=initial_agent
             )
 
             if pid:
@@ -1193,8 +1543,9 @@ def main():
     check_interval = 60  # Check for stuck agents and comments every 60 seconds
     
     while True:
-        # Scan for md files in project/.github/inbox/*.md
-        pattern = os.path.join(BASE_DIR, "**", ".github", "inbox", "*.md")
+        # Scan for md files in project/{nexus_dir}/inbox/*.md
+        nexus_dir_name = get_nexus_dir_name()
+        pattern = os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*.md")
         files = glob.glob(pattern, recursive=True)
 
         for filepath in files:

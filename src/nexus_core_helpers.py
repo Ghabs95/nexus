@@ -16,6 +16,7 @@ from config import (
     USE_NEXUS_CORE,
     WORKFLOW_CHAIN,
     FINAL_AGENTS,
+    BASE_DIR,
 )
 from state_manager import StateManager
 from nexus.adapters.storage.file import FileStorage
@@ -49,7 +50,7 @@ def get_workflow_definition_path(project_name: str) -> Optional[str]:
         project_name: Project name (e.g., 'nexus', 'casit-agents')
         
     Returns:
-        Path to workflow YAML file, or None if not configured
+        Absolute path to workflow YAML file, or None if not configured
     """
     config = _get_project_config()
     
@@ -57,11 +58,19 @@ def get_workflow_definition_path(project_name: str) -> Optional[str]:
     if project_name in config:
         project_config = config[project_name]
         if isinstance(project_config, dict) and "workflow_definition_path" in project_config:
-            return project_config["workflow_definition_path"]
+            path = project_config["workflow_definition_path"]
+            # Resolve relative paths to absolute
+            if path and not os.path.isabs(path):
+                path = os.path.join(BASE_DIR, path)
+            return path
     
     # Check global workflow_definition_path
     if "workflow_definition_path" in config:
-        return config["workflow_definition_path"]
+        path = config["workflow_definition_path"]
+        # Resolve relative paths to absolute  
+        if path and not os.path.isabs(path):
+            path = os.path.join(BASE_DIR, path)
+        return path
     
     # No workflow definition found
     return None

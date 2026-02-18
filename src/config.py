@@ -66,11 +66,13 @@ def _validate_config_with_project_config(config: dict) -> None:
     
     # Global config keys that aren't projects
     global_keys = {
+        'nexus_dir',  # VCS-agnostic inbox/tasks directory name
         'workflow_definition_path',
         'ai_tool_preferences',
         'workflow_chains',
         'final_agents',
-        'require_human_merge_approval'  # PR merge approval policy (deprecated - use nexus-core approval gates)
+        'require_human_merge_approval',  # PR merge approval policy (deprecated - use nexus-core approval gates)
+        'github_issue_triage'  # GitHub issue → triage agent routing configuration
     }
     
     for project, proj_config in config.items():
@@ -405,6 +407,76 @@ def get_github_repo(project: str) -> str:
             f"Project '{project}' is missing 'github_repo' in PROJECT_CONFIG"
         )
     return repo
+
+
+def get_nexus_dir_name() -> str:
+    """Get the nexus directory name for globbing patterns.
+    
+    Returns:
+        Directory name (e.g., ".nexus") from config
+    """
+    config = _get_project_config()
+    return config.get("nexus_dir", ".nexus")
+
+
+def get_nexus_dir(workspace: str = None) -> str:
+    """Get Nexus directory path (VCS-agnostic inbox/tasks storage).
+    
+    Default: workspace_root/.nexus (can be configured via config)
+    
+    Args:
+        workspace: Workspace directory (uses current if not specified)
+        
+    Returns:
+        Path to nexus directory (e.g., /path/to/workspace/.nexus)
+    """
+    if workspace is None:
+        workspace = os.getcwd()
+    
+    # Get nexus_dir from config (defaults to .nexus)
+    config = _get_project_config()
+    nexus_dir_name = config.get("nexus_dir", ".nexus")
+    
+    return os.path.join(workspace, nexus_dir_name)
+
+
+def get_inbox_dir(workspace: str = None) -> str:
+    """Get inbox directory path for workflow tasks.
+    
+    Returns:
+        Path to {nexus_dir}/inbox directory
+    """
+    nexus_dir = get_nexus_dir(workspace)
+    return os.path.join(nexus_dir, "inbox")
+
+
+def get_tasks_active_dir(workspace: str = None) -> str:
+    """Get active tasks directory path for in-progress work.
+    
+    Returns:
+        Path to {nexus_dir}/tasks/active directory
+    """
+    nexus_dir = get_nexus_dir(workspace)
+    return os.path.join(nexus_dir, "tasks", "active")
+
+
+def get_tasks_logs_dir(workspace: str = None, project: str = None) -> str:
+    """Get task logs directory path for agent execution logs.
+    
+    Args:
+        workspace: Workspace directory
+        project: Optional project subdirectory within logs
+        
+    Returns:
+        Path to {nexus_dir}/tasks/logs or {nexus_dir}/tasks/logs/{project}
+    """
+    nexus_dir = get_nexus_dir(workspace)
+    logs_dir = os.path.join(nexus_dir, "tasks", "logs")
+    
+    if project:
+        logs_dir = os.path.join(logs_dir, project)
+    
+    return logs_dir
 
 
 
