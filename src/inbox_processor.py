@@ -270,6 +270,161 @@ def _build_completion_comment(completion_data: dict) -> str:
     return "".join(lines)
 
 
+def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name: str) -> None:
+    """Handle workflow completion: close issue, create PR if needed, send Telegram.
+
+    Called when the last agent finishes (next_agent is 'none' or empty).
+    """
+    pr_url = None
+
+    # --- Create branch + PR if there are uncommitted changes ---
+    if project_name:
+        proj_cfg = PROJECT_CONFIG.get(project_name, {})
+        workspace = proj_cfg.get("workspace", "")
+        github_repo = proj_cfg.get("github_repo", "")
+        if workspace:
+            workspace_abs = os.path.join(BASE_DIR, workspace)
+
+            # Resolve the actual git repo directory:
+            # 1. Try workspace itself (e.g. /home/ubuntu/git/case_italia)
+            # 2. Try workspace/repo_name (e.g. /home/ubuntu/git/ghabs/nexus-core)
+            git_dir = None
+            if os.path.isdir(os.path.join(workspace_abs, ".git")):
+                git_dir = workspace_abs
+            elif github_repo and "/" in github_repo:
+                repo_name = github_repo.split("/")[-1]
+                candidate = os.path.join(workspace_abs, repo_name)
+                if os.path.isdir(os.path.join(candidate, ".git")):
+                    git_dir = candidate
+
+            if not git_dir:
+                logger.info(f"No git repo found for {project_name} — skipping PR creation")
+            else:
+                try:
+                    # Check for git changes
+                    diff_result = subprocess.run(
+                        ["git", "diff", "--stat", "HEAD"],
+                        cwd=git_dir, text=True, capture_output=True, timeout=10,
+                    )
+                    staged_result = subprocess.run(
+                        ["git", "diff", "--cached", "--stat"],
+                        cwd=git_dir, text=True, capture_output=True, timeout=10,
+                    )
+                    untracked = subprocess.run(
+                        ["git", "ls-files", "--others", "--exclude-standard"],
+                        cwd=git_dir, text=True, capture_output=True, timeout=10,
+                    )
+                    has_changes = bool(
+                        (diff_result.stdout and diff_result.stdout.strip())
+                        or (staged_result.stdout and staged_result.stdout.strip())
+                        or (untracked.stdout and untracked.stdout.strip())
+                    )
+
+                    if has_changes:
+                        branch_name = f"nexus/issue-{issue_num}"
+                        base_branch = subprocess.run(
+                            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            cwd=git_dir, text=True, capture_output=True, timeout=5,
+                        ).stdout.strip() or "main"
+
+                        # Create and switch to branch
+                        subprocess.run(
+                            ["git", "checkout", "-b", branch_name],
+                            cwd=git_dir, text=True, capture_output=True, timeout=10,
+                        )
+                        # Stage all changes
+                        subprocess.run(
+                            ["git", "add", "-A"],
+                            cwd=git_dir, text=True, capture_output=True, timeout=10,
+                        )
+                        # Commit
+                        commit_msg = f"feat: resolve issue #{issue_num} (automated by Nexus)"
+                        subprocess.run(
+                            ["git", "commit", "-m", commit_msg],
+                            cwd=git_dir, text=True, capture_output=True, timeout=30,
+                        )
+                        # Push
+                        push_result = subprocess.run(
+                            ["git", "push", "-u", "origin", branch_name],
+                            cwd=git_dir, text=True, capture_output=True, timeout=30,
+                        )
+                        if push_result.returncode == 0:
+                            # Create PR
+                            pr_body = (
+                                f"Automated PR for issue #{issue_num}.\n\n"
+                                f"Workflow completed by Nexus agent chain.\n"
+                                f"Last agent: `{last_agent}`\n\n"
+                                f"Closes #{issue_num}"
+                            )
+                            pr_result = subprocess.run(
+                                ["gh", "pr", "create",
+                                 "--repo", repo,
+                                 "--base", base_branch,
+                                 "--head", branch_name,
+                                 "--title", f"fix: resolve #{issue_num}",
+                                 "--body", pr_body],
+                                cwd=git_dir, text=True, capture_output=True, timeout=30,
+                            )
+                            if pr_result.returncode == 0:
+                                pr_url = pr_result.stdout.strip()
+                                logger.info(f"🔀 Created PR for issue #{issue_num}: {pr_url}")
+                            else:
+                                logger.warning(
+                                    f"Could not create PR for issue #{issue_num}: "
+                                    f"{pr_result.stderr or pr_result.stdout}"
+                                )
+                        else:
+                            logger.warning(
+                                f"Could not push branch {branch_name}: "
+                                f"{push_result.stderr or push_result.stdout}"
+                            )
+
+                        # Switch back to base branch
+                        subprocess.run(
+                            ["git", "checkout", base_branch],
+                            cwd=git_dir, text=True, capture_output=True, timeout=10,
+                        )
+                    else:
+                        logger.info(f"No code changes for issue #{issue_num} — skipping PR creation")
+                except Exception as e:
+                    logger.warning(f"Error creating PR for issue #{issue_num}: {e}")
+
+    # --- Close the issue ---
+    try:
+        close_comment = (
+            f"✅ Workflow completed. All agent steps finished successfully.\n"
+            f"Last agent: `{last_agent}`"
+        )
+        if pr_url:
+            close_comment += f"\nPR: {pr_url}"
+
+        close_result = subprocess.run(
+            ["gh", "issue", "close", str(issue_num),
+             "--repo", repo, "--comment", close_comment],
+            text=True, capture_output=True, timeout=15,
+        )
+        if close_result.returncode == 0:
+            logger.info(f"🔒 Closed issue #{issue_num}")
+        else:
+            logger.warning(
+                f"Could not close issue #{issue_num}: "
+                f"{close_result.stderr or close_result.stdout}"
+            )
+    except Exception as e:
+        logger.warning(f"Error closing issue #{issue_num}: {e}")
+
+    # --- Telegram notification ---
+    parts = [
+        f"✅ **Workflow Complete**\n\n"
+        f"Issue: #{issue_num}\n"
+        f"Last agent: `{last_agent}`\n"
+    ]
+    if pr_url:
+        parts.append(f"PR: {pr_url}\n")
+    parts.append(f"\n🔗 https://github.com/{repo}/issues/{issue_num}")
+    send_telegram_alert("".join(parts))
+
+
 def _post_completion_comments_from_logs() -> None:
     """Post GitHub comments when agents write completion_summary JSON files.
     
@@ -338,14 +493,14 @@ def _post_completion_comments_from_logs() -> None:
 
             # --- Auto-chain to next agent ---
             next_agent = completion_data.get("next_agent", "").strip()
-            if not next_agent:
-                logger.info(f"✅ No next_agent in completion — workflow done for issue #{issue_num}")
-                send_telegram_alert(
-                    f"✅ **Workflow Complete**\n\n"
-                    f"Issue: #{issue_num}\n"
-                    f"Last agent: `{completed_agent}`\n\n"
-                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
-                )
+            workflow_done = (
+                not next_agent
+                or next_agent.lower() in ("none", "n/a", "null", "no", "end", "done", "finish")
+            )
+
+            if workflow_done:
+                logger.info(f"✅ Workflow complete for issue #{issue_num} (last agent: {completed_agent})")
+                _finalize_workflow(issue_num, repo, completed_agent, project_name)
                 continue
 
             if is_recent_launch(issue_num):
@@ -366,6 +521,15 @@ def _post_completion_comments_from_logs() -> None:
             agents_abs = os.path.join(BASE_DIR, agents_dir)
             workspace_abs = os.path.join(BASE_DIR, workspace)
             issue_url = f"https://github.com/{repo}/issues/{issue_num}"
+
+            # Send transition notification
+            send_telegram_alert(
+                f"🔗 **Agent Transition**\n\n"
+                f"Issue: #{issue_num}\n"
+                f"Completed: `{completed_agent}`\n"
+                f"Launching: `{next_agent}`\n\n"
+                f"🔗 https://github.com/{repo}/issues/{issue_num}"
+            )
 
             continuation_prompt = (
                 f"You are a {next_agent} agent. The previous step ({completed_agent}) is complete.\n\n"
@@ -391,13 +555,6 @@ def _post_completion_comments_from_logs() -> None:
                 logger.info(
                     f"🔗 Auto-chained {completed_agent} → {next_agent} "
                     f"for issue #{issue_num} (PID: {pid}, tool: {tool_used})"
-                )
-                send_telegram_alert(
-                    f"🔗 **Agent Transition**\n\n"
-                    f"Issue: #{issue_num}\n"
-                    f"Completed: `{completed_agent}`\n"
-                    f"Launched: `{next_agent}` (PID: {pid})\n\n"
-                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
                 )
             else:
                 logger.error(f"❌ Failed to auto-chain to {next_agent} for issue #{issue_num}")

@@ -7,6 +7,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/git/ghabs/nexus
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/vars.secret
+Environment="PYTHONUNBUFFERED=1"
 # Include system paths so system binaries (e.g. /usr/bin/gh) are available
 Environment="PATH=/home/ubuntu/git/ghabs/nexus/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python src/telegram_bot.py
