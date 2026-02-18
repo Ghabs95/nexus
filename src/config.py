@@ -65,7 +65,13 @@ def _validate_config_with_project_config(config: dict) -> None:
         return
     
     # Global config keys that aren't projects
-    global_keys = {'workflow_definition_path', 'ai_tool_preferences', 'workflow_chains', 'final_agents'}
+    global_keys = {
+        'workflow_definition_path',
+        'ai_tool_preferences',
+        'workflow_chains',
+        'final_agents',
+        'require_human_merge_approval'  # PR merge approval policy (deprecated - use nexus-core approval gates)
+    }
     
     for project, proj_config in config.items():
         # Skip global settings
