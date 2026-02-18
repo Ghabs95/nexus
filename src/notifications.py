@@ -5,7 +5,7 @@ Provides rich Telegram notifications with interactive buttons for quick actions.
 import logging
 import requests
 from typing import Dict, List, Optional
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GITHUB_AGENTS_REPO
+from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, get_github_repo
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ def send_notification(
         return False
 
 
-def notify_agent_needs_input(issue_number: str, agent: str, preview: str) -> bool:
+def notify_agent_needs_input(issue_number: str, agent: str, preview: str, project: str = "nexus") -> bool:
     """
     Send notification that an agent needs input.
     
@@ -105,6 +105,7 @@ def notify_agent_needs_input(issue_number: str, agent: str, preview: str) -> boo
         issue_number: GitHub issue number
         agent: Agent name
         preview: Preview of the agent's question
+        project: Project name (default: nexus)
     
     Returns:
         True if sent successfully
@@ -119,7 +120,7 @@ def notify_agent_needs_input(issue_number: str, agent: str, preview: str) -> boo
     keyboard = (
         InlineKeyboard()
         .add_button("📝 View Full", callback_data=f"logs_{issue_number}")
-        .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+        .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
         .new_row()
         .add_button("✍️ Respond", callback_data=f"respond_{issue_number}")
     )
@@ -159,14 +160,14 @@ def notify_workflow_started(issue_number: str, project: str, tier: str, task_typ
         .add_button("👀 Logs", callback_data=f"logs_{issue_number}")
         .add_button("📊 Status", callback_data=f"status_{issue_number}")
         .new_row()
-        .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+        .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
         .add_button("⏸️ Pause", callback_data=f"pause_{issue_number}")
     )
     
     return send_notification(message, keyboard=keyboard)
 
 
-def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: str) -> bool:
+def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: str, project: str = "nexus") -> bool:
     """
     Send notification that an agent completed and next one started.
     
@@ -174,6 +175,7 @@ def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: 
         issue_number: GitHub issue number
         completed_agent: Agent that just completed
         next_agent: Agent that's starting next
+        project: Project name (default: nexus)
     
     Returns:
         True if sent successfully
@@ -188,7 +190,7 @@ def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: 
     keyboard = (
         InlineKeyboard()
         .add_button("📝 View Logs", callback_data=f"logs_{issue_number}")
-        .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+        .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
         .new_row()
         .add_button("⏸️ Pause Chain", callback_data=f"pause_{issue_number}")
         .add_button("🛑 Stop", callback_data=f"stop_{issue_number}")
@@ -197,7 +199,7 @@ def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: 
     return send_notification(message, keyboard=keyboard)
 
 
-def notify_agent_timeout(issue_number: str, agent: str, will_retry: bool) -> bool:
+def notify_agent_timeout(issue_number: str, agent: str, will_retry: bool, project: str = "nexus") -> bool:
     """
     Send notification about agent timeout.
     
@@ -205,6 +207,7 @@ def notify_agent_timeout(issue_number: str, agent: str, will_retry: bool) -> boo
         issue_number: GitHub issue number
         agent: Agent name
         will_retry: Whether the agent will be retried
+        project: Project name (default: nexus)
     
     Returns:
         True if sent successfully
@@ -220,7 +223,7 @@ def notify_agent_timeout(issue_number: str, agent: str, will_retry: bool) -> boo
         keyboard = (
             InlineKeyboard()
             .add_button("📝 View Logs", callback_data=f"logs_{issue_number}")
-            .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+            .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
             .new_row()
             .add_button("🔄 Reprocess Now", callback_data=f"reprocess_{issue_number}")
             .add_button("🛑 Stop", callback_data=f"stop_{issue_number}")
@@ -236,7 +239,7 @@ def notify_agent_timeout(issue_number: str, agent: str, will_retry: bool) -> boo
         keyboard = (
             InlineKeyboard()
             .add_button("📝 View Logs", callback_data=f"logs_{issue_number}")
-            .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+            .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
             .new_row()
             .add_button("🔄 Reprocess", callback_data=f"reprocess_{issue_number}")
             .add_button("🛑 Stop Workflow", callback_data=f"stop_{issue_number}")
@@ -265,14 +268,14 @@ def notify_workflow_completed(issue_number: str, project: str, pr_number: str = 
             f"Project: {project}\n"
             f"PR: #{pr_number}\n\n"
             f"All workflow steps completed. **Ready for review!**\n\n"
-            f"🔗 Issue: https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}\n"
+            f"🔗 Issue: https://github.com/{get_github_repo(project)}/issues/{issue_number}\n"
             f"🔗 PR: {pr_url}"
         )
         
         keyboard = (
             InlineKeyboard()
             .add_button("🔗 View PR", url=pr_url)
-            .add_button("🔗 View Issue", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+            .add_button("🔗 View Issue", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
             .new_row()
             .add_button("✅ Approve", callback_data=f"approve_{issue_number}")
             .add_button("📝 Request Changes", callback_data=f"reject_{issue_number}")
@@ -292,7 +295,7 @@ def notify_workflow_completed(issue_number: str, project: str, pr_number: str = 
         keyboard = (
             InlineKeyboard()
             .add_button("📝 View Full Logs", callback_data=f"logsfull_{issue_number}")
-            .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+            .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
             .new_row()
             .add_button("📊 View Audit Trail", callback_data=f"audit_{issue_number}")
         )
@@ -300,13 +303,14 @@ def notify_workflow_completed(issue_number: str, project: str, pr_number: str = 
     return send_notification(message, keyboard=keyboard)
 
 
-def notify_implementation_requested(issue_number: str, requester: str) -> bool:
+def notify_implementation_requested(issue_number: str, requester: str, project: str = "nexus") -> bool:
     """
     Send notification that implementation was requested.
     
     Args:
         issue_number: GitHub issue number
         requester: Who requested the implementation
+        project: Project name (default: nexus)
     
     Returns:
         True if sent successfully
@@ -324,7 +328,7 @@ def notify_implementation_requested(issue_number: str, requester: str) -> bool:
         .add_button("❌ Reject", callback_data=f"reject_{issue_number}")
         .new_row()
         .add_button("📝 View Details", callback_data=f"logs_{issue_number}")
-        .add_button("🔗 GitHub", url=f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}")
+        .add_button("🔗 GitHub", url=f"https://github.com/{get_github_repo(project)}/issues/{issue_number}")
     )
     
     return send_notification(message, keyboard=keyboard)

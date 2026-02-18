@@ -6,16 +6,21 @@ and the nexus-core workflow framework.
 """
 import asyncio
 import logging
+import os
 from typing import Optional, Dict, List
 
 from config import (
-    NEXUS_CORE_STORAGE_DIR, GITHUB_AGENTS_REPO,
-    USE_NEXUS_CORE, WORKFLOW_CHAIN, FINAL_AGENTS
+    get_github_repo,
+    _get_project_config,
+    NEXUS_CORE_STORAGE_DIR,
+    USE_NEXUS_CORE,
+    WORKFLOW_CHAIN,
+    FINAL_AGENTS,
 )
 from state_manager import StateManager
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
-from nexus.core.workflow import WorkflowEngine
+from nexus.core.workflow import WorkflowDefinition, WorkflowEngine
 from nexus.core.models import Workflow, WorkflowStep, Agent, WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -29,7 +34,37 @@ def get_workflow_engine() -> WorkflowEngine:
 
 def get_git_platform(repo: str = None) -> GitHubPlatform:
     """Get initialized GitHub platform adapter."""
-    return GitHubPlatform(repo=repo or GITHUB_AGENTS_REPO)
+    return GitHubPlatform(repo=repo or get_github_repo("nexus"))
+
+
+def get_workflow_definition_path(project_name: str) -> Optional[str]:
+    """Get workflow definition path for a project with fallback logic.
+    
+    Priority:
+    1. Project-specific override in PROJECT_CONFIG
+    2. Global workflow_definition_path in PROJECT_CONFIG
+    3. None (use WORKFLOW_CHAIN fallback)
+    
+    Args:
+        project_name: Project name (e.g., 'nexus', 'casit-agents')
+        
+    Returns:
+        Path to workflow YAML file, or None if not configured
+    """
+    config = _get_project_config()
+    
+    # Check project-specific override
+    if project_name in config:
+        project_config = config[project_name]
+        if isinstance(project_config, dict) and "workflow_definition_path" in project_config:
+            return project_config["workflow_definition_path"]
+    
+    # Check global workflow_definition_path
+    if "workflow_definition_path" in config:
+        return config["workflow_definition_path"]
+    
+    # No workflow definition found
+    return None
 
 
 async def create_workflow_for_issue(
@@ -63,44 +98,68 @@ async def create_workflow_for_issue(
         
         # Map tier to workflow chain
         workflow_type = _tier_to_workflow_type(tier_name)
-        chain = WORKFLOW_CHAIN.get(workflow_type, WORKFLOW_CHAIN["shortened"])
-        
-        # Create workflow steps from chain
-        steps = []
-        for step_num, (agent_name, step_name) in enumerate(chain, start=1):
-            agent = Agent(
-                name=f"{agent_name}Agent",
-                display_name=agent_name,
-                description=f"Step {step_num}: {step_name}",
-                timeout=3600,
-                max_retries=2
-            )
-            
-            step = WorkflowStep(
-                step_num=step_num,
-                name=step_name.lower().replace(" ", "_"),
-                agent=agent,
-                prompt_template=f"{step_name}: {{description}}"
-            )
-            steps.append(step)
-        
-        # Create workflow object
         workflow_id = f"{project_name}-{issue_number}-{tier_name}"
-        workflow = Workflow(
-            id=workflow_id,
-            name=f"{project_name}/{issue_title}",
-            version="1.0",
-            description=description or f"Workflow for issue #{issue_number}",
-            steps=steps,
-            metadata={
-                "issue_number": issue_number,
-                "project": project_name,
-                "tier": tier_name,
-                "task_type": task_type,
-                "github_issue_url": f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}",
-                "workflow_type": workflow_type
-            }
-        )
+        workflow_name = f"{project_name}/{issue_title}"
+        workflow_description = description or f"Workflow for issue #{issue_number}"
+        
+        # Get workflow definition path (with fallback logic)
+        workflow_definition_path = get_workflow_definition_path(project_name)
+
+        metadata = {
+            "issue_number": issue_number,
+            "project": project_name,
+            "tier": tier_name,
+            "task_type": task_type,
+            "github_issue_url": f"https://github.com/{get_github_repo('nexus')}/issues/{issue_number}",
+            "workflow_type": workflow_type,
+            "workflow_definition_path": workflow_definition_path,
+        }
+
+        if workflow_definition_path and os.path.exists(workflow_definition_path):
+            workflow = WorkflowDefinition.from_yaml(
+                workflow_definition_path,
+                workflow_id=workflow_id,
+                name_override=workflow_name,
+                description_override=workflow_description,
+                metadata=metadata,
+            )
+        else:
+            if workflow_definition_path:
+                logger.warning(
+                    f"Workflow path not found: {workflow_definition_path}. "
+                    "Falling back to WORKFLOW_CHAIN."
+                )
+
+            chain = WORKFLOW_CHAIN.get(workflow_type, WORKFLOW_CHAIN["shortened"])
+
+            # Create workflow steps from chain
+            steps = []
+            for step_num, (agent_name, step_name) in enumerate(chain, start=1):
+                agent = Agent(
+                    name=f"{agent_name}Agent",
+                    display_name=agent_name,
+                    description=f"Step {step_num}: {step_name}",
+                    timeout=3600,
+                    max_retries=2,
+                )
+
+                step = WorkflowStep(
+                    step_num=step_num,
+                    name=step_name.lower().replace(" ", "_"),
+                    agent=agent,
+                    prompt_template=f"{step_name}: {{description}}",
+                )
+                steps.append(step)
+
+            # Create workflow object
+            workflow = Workflow(
+                id=workflow_id,
+                name=workflow_name,
+                version="1.0",
+                description=workflow_description,
+                steps=steps,
+                metadata=metadata,
+            )
         
         # Persist workflow
         await engine.create_workflow(workflow)

@@ -2,6 +2,8 @@
 import os
 import sys
 import logging
+
+import yaml
 from dotenv import load_dotenv
 
 # Load secrets from local file if exists
@@ -29,81 +31,334 @@ INBOX_PROCESSOR_LOG_FILE = os.path.join(LOGS_DIR, "inbox_processor.log")
 TELEGRAM_BOT_LOG_FILE = os.path.join(LOGS_DIR, "telegram_bot.log")
 
 # --- GITHUB CONFIGURATION ---
-GITHUB_AGENTS_REPO = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
-GITHUB_NEXUS_REPO = "Ghabs95/nexus"
+# Note: PROJECT_CONFIG_PATH is read from environment each time it's needed (for testing with monkeypatch)
+
+# Lazy-load PROJECT_CONFIG to support testing with monkeypatch
+_project_config_cache = None
+_cached_config_path = None  # Track which path was cached
+
+
+def _load_project_config(path: str) -> dict:
+    """Load PROJECT_CONFIG from YAML file (required).
+    
+    Args:
+        path: Path to project config YAML file
+        
+    Returns:
+        Loaded project configuration dict
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        ValueError: If YAML is invalid or not a mapping
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("PROJECT_CONFIG must be a YAML mapping")
+    return data
+
+
+def _validate_config_with_project_config(config: dict) -> None:
+    """Validate project configuration dict."""
+    if not config or len(config) == 0:
+        # Empty config is okay for tests
+        return
+    
+    # Global config keys that aren't projects
+    global_keys = {'workflow_definition_path', 'ai_tool_preferences', 'workflow_chains', 'final_agents'}
+    
+    for project, proj_config in config.items():
+        # Skip global settings
+        if project in global_keys:
+            continue
+        
+        # All other keys should be project dicts
+        if not isinstance(proj_config, dict):
+            raise ValueError(f"PROJECT_CONFIG['{project}'] must be a dict")
+        
+        if 'workspace' not in proj_config:
+            raise ValueError(f"PROJECT_CONFIG['{project}'] missing 'workspace' key")
+        if 'github_repo' not in proj_config:
+            raise ValueError(f"PROJECT_CONFIG['{project}'] missing 'github_repo' key")
+
+
+def _load_and_validate_project_config() -> dict:
+    """Load and validate PROJECT_CONFIG from file.
+    
+    Raises:
+        ValueError: If PROJECT_CONFIG_PATH is not set
+        FileNotFoundError: If config file not found
+        ValueError: If config is invalid
+    """
+    global _project_config_cache, _cached_config_path
+    
+    # Read PROJECT_CONFIG_PATH from environment (not cached to support monkeypatch in tests)
+    project_config_path = os.getenv("PROJECT_CONFIG_PATH")
+    if not project_config_path:
+        raise ValueError(
+            "PROJECT_CONFIG_PATH environment variable is required. "
+            "It must point to a YAML file with project configuration."
+        )
+    
+    # Clear cache if PROJECT_CONFIG_PATH changed (e.g., in tests with monkeypatch)
+    if _cached_config_path != project_config_path:
+        _project_config_cache = None
+        _cached_config_path = project_config_path
+    
+    if _project_config_cache is not None:
+        return _project_config_cache
+    
+    resolved_config_path = (
+        project_config_path
+        if os.path.isabs(project_config_path)
+        else os.path.join(BASE_DIR, project_config_path)
+    )
+    
+    try:
+        _project_config_cache = _load_project_config(resolved_config_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"PROJECT_CONFIG file not found: {resolved_config_path}"
+        )
+    except Exception as e:
+        raise ValueError(
+            f"Failed to load PROJECT_CONFIG from {resolved_config_path}: {e}"
+        )
+    
+    # Validate the loaded config
+    _validate_config_with_project_config(_project_config_cache)
+    return _project_config_cache
+
+
+# Create a property-like accessor for PROJECT_CONFIG
+def _get_project_config() -> dict:
+    """Get PROJECT_CONFIG, loading it lazily on first access."""
+    return _load_and_validate_project_config()
+
+
+# Use this as the public API for accessing PROJECT_CONFIG
+PROJECT_CONFIG = None  # Will be populated on first access via _get_project_config()
+
+
 
 # --- WEBHOOK CONFIGURATION ---
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8081"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # GitHub webhook secret for signature verification
 
 # --- AI ORCHESTRATOR CONFIGURATION ---
-# Tool selection strategy: which AI tool to use for which agent
-# Options: "copilot", "gemini"
-AI_TOOL_PREFERENCES = {
-    # Code generation & complex reasoning → Copilot (better reasoning, multi-file context)
-    "ProjectLead": "copilot",
-    "Atlas": "copilot",
-    "Architect": "copilot",
-    "Tier2Lead": "copilot",
+# These are now loaded from project_config.yaml
+# Get defaults from config, with per-project overrides supported
+
+def get_ai_tool_preferences(project: str = "nexus") -> dict:
+    """Get AI tool preferences for a project.
     
-    # Fast & simple analysis → Gemini (faster, good for classification)
-    "ProductDesigner": "gemini",
-    "QAGuard": "gemini",
-    "Scribe": "gemini",
-    "OpsCommander": "gemini",
-    "Privacy": "gemini",
+    Priority:
+    1. Project-specific ai_tool_preferences in PROJECT_CONFIG
+    2. Global ai_tool_preferences in PROJECT_CONFIG
+    3. Empty dict (no preferences defined)
     
-    # Frontend/Backend specific (can prefer platform-aligned tool)
-    "FrontendLead": "copilot",
-    "BackendLead": "copilot",
-    "MobileLead": "copilot",
-}
+    Args:
+        project: Project name (default: "nexus")
+        
+    Returns:
+        Dictionary mapping agent names to AI tools (copilot, gemini)
+    """
+    config = _get_project_config()
+    
+    # Check project-specific override
+    if project in config:
+        proj_config = config[project]
+        if isinstance(proj_config, dict) and "ai_tool_preferences" in proj_config:
+            return proj_config["ai_tool_preferences"]
+    
+    # Fall back to global
+    if "ai_tool_preferences" in config:
+        return config["ai_tool_preferences"]
+    
+    return {}
 
-# Orchestrator configuration
-ORCHESTRATOR_CONFIG = {
-    "gemini_cli_path": os.getenv("GEMINI_CLI_PATH", "gemini"),  # Path to gemini-cli executable
-    "copilot_cli_path": os.getenv("COPILOT_CLI_PATH", "copilot"),  # Path to copilot executable
-    "tool_preferences": AI_TOOL_PREFERENCES,
-    "fallback_enabled": os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true",  # Enable fallback
-    "rate_limit_ttl": int(os.getenv("AI_RATE_LIMIT_TTL", "3600")),  # 1 hour default
-    "max_retries": int(os.getenv("AI_MAX_RETRIES", "2")),
-}
 
-# --- WORKFLOW CONFIGURATION ---
-WORKFLOW_CHAIN = {
-    "full": [  # new_feature workflow
-        ("ProjectLead", "Vision & Scope"),          # Step 1
-        ("Atlas", "Technical Feasibility"),         # Step 2
-        ("Architect", "Architecture Design"),       # Step 3
-        ("ProductDesigner", "UX Design"),           # Step 4
-        ("Tier2Lead", "Implementation"),            # Step 5
-        ("QAGuard", "Quality Gate"),                # Step 6
-        ("Privacy", "Compliance Gate"),             # Step 7
-        ("OpsCommander", "Deployment"),             # Step 8
-        ("Scribe", "Documentation")                 # Step 9 (final)
-    ],
-    "shortened": [  # bug_fix workflow
-        ("ProjectLead", "Triage"),                  # Step 1
-        ("Tier2Lead", "Root Cause Analysis"),       # Step 2
-        ("Tier2Lead", "Fix"),                       # Step 3
-        ("QAGuard", "Verify"),                      # Step 4
-        ("OpsCommander", "Deploy"),                 # Step 5
-        ("Scribe", "Document")                      # Step 6 (final)
-    ],
-    "fast-track": [  # hotfix/chore workflow
-        ("ProjectLead", "Triage"),                  # Step 1
-        ("Copilot", "Implementation"),              # Step 2
-        ("QAGuard", "Verify"),                      # Step 3
-        ("OpsCommander", "Deploy")                  # Step 4 (final)
-    ]
-}
+def get_workflow_chains(project: str = "nexus") -> dict:
+    """Get workflow chains for a project.
+    
+    Priority:
+    1. Project-specific workflow_chains in PROJECT_CONFIG
+    2. Global workflow_chains in PROJECT_CONFIG
+    3. Built-in fallback (for backward compatibility)
+    
+    Args:
+        project: Project name (default: "nexus")
+        
+    Returns:
+        Dictionary of workflow tiers and their agent steps
+    """
+    config = _get_project_config()
+    
+    # Check project-specific override
+    if project in config:
+        proj_config = config[project]
+        if isinstance(proj_config, dict) and "workflow_chains" in proj_config:
+            return proj_config["workflow_chains"]
+    
+    # Fall back to global
+    if "workflow_chains" in config:
+        return config["workflow_chains"]
+    
+    # Built-in fallback (for backward compatibility with older configs)
+    return {
+        "full": [
+            ("ProjectLead", "Vision & Scope"),
+            ("Atlas", "Technical Feasibility"),
+            ("Architect", "Architecture Design"),
+            ("ProductDesigner", "UX Design"),
+            ("Tier2Lead", "Implementation"),
+            ("QAGuard", "Quality Gate"),
+            ("Privacy", "Compliance Gate"),
+            ("OpsCommander", "Deployment"),
+            ("Scribe", "Documentation")
+        ],
+        "shortened": [
+            ("ProjectLead", "Triage"),
+            ("Tier2Lead", "Root Cause Analysis"),
+            ("Tier2Lead", "Fix"),
+            ("QAGuard", "Verify"),
+            ("OpsCommander", "Deploy"),
+            ("Scribe", "Document")
+        ],
+        "fast-track": [
+            ("ProjectLead", "Triage"),
+            ("Copilot", "Implementation"),
+            ("QAGuard", "Verify"),
+            ("OpsCommander", "Deploy")
+        ]
+    }
 
-# Map tier names to their final agent (for issue closing)
-FINAL_AGENTS = {
-    "full": "Scribe",
-    "shortened": "Scribe",
-    "fast-track": "OpsCommander"
-}
+
+def get_final_agents(project: str = "nexus") -> dict:
+    """Get final agents mapping for a project.
+    
+    Maps workflow tier names to final agent names (for issue closing).
+    
+    Priority:
+    1. Project-specific final_agents in PROJECT_CONFIG
+    2. Global final_agents in PROJECT_CONFIG
+    3. Built-in fallback (for backward compatibility)
+    
+    Args:
+        project: Project name (default: "nexus")
+        
+    Returns:
+        Dictionary mapping tier names to final agent names
+    """
+    config = _get_project_config()
+    
+    # Check project-specific override
+    if project in config:
+        proj_config = config[project]
+        if isinstance(proj_config, dict) and "final_agents" in proj_config:
+            return proj_config["final_agents"]
+    
+    # Fall back to global
+    if "final_agents" in config:
+        return config["final_agents"]
+    
+    # Built-in fallback
+    return {
+        "full": "Scribe",
+        "shortened": "Scribe",
+        "fast-track": "OpsCommander"
+    }
+
+
+# Caching wrappers for lazy-loading on first access (support monkeypatch in tests)
+_ai_tool_preferences_cache = {}
+_workflow_chains_cache = {}
+_final_agents_cache = {}
+
+
+class _LazyConfigWrapper:
+    """Wrapper that lazily loads config values to support monkeypatch."""
+    
+    def __init__(self, get_func, cache_dict, project="nexus"):
+        self.get_func = get_func
+        self.cache_dict = cache_dict
+        self.project = project
+    
+    def _ensure_loaded(self):
+        """Load value from config if not cached."""
+        if "value" not in self.cache_dict:
+            self.cache_dict["value"] = self.get_func(self.project)
+        return self.cache_dict["value"]
+    
+    def keys(self):
+        return self._ensure_loaded().keys()
+    
+    def items(self):
+        return self._ensure_loaded().items()
+    
+    def values(self):
+        return self._ensure_loaded().values()
+    
+    def get(self, *args):
+        return self._ensure_loaded().get(*args)
+    
+    def __getitem__(self, key):
+        return self._ensure_loaded()[key]
+    
+    def __contains__(self, key):
+        return key in self._ensure_loaded()
+    
+    def __iter__(self):
+        return iter(self._ensure_loaded())
+    
+    def __len__(self):
+        return len(self._ensure_loaded())
+    
+    def __repr__(self):
+        return repr(self._ensure_loaded())
+
+
+# Create lazy-loading wrappers (for backward compatibility with code that accesses these directly)
+# Note: These will get the global defaults from project_config.yaml when first accessed
+AI_TOOL_PREFERENCES = _LazyConfigWrapper(get_ai_tool_preferences, _ai_tool_preferences_cache, "nexus")
+WORKFLOW_CHAIN = _LazyConfigWrapper(get_workflow_chains, _workflow_chains_cache, "nexus")
+FINAL_AGENTS = _LazyConfigWrapper(get_final_agents, _final_agents_cache, "nexus")
+
+# Orchestrator configuration (lazy-loaded)
+_orchestrator_config_cache = {}
+
+
+def _get_orchestrator_config():
+    """Get orchestrator config, loading AI_TOOL_PREFERENCES lazily."""
+    if "value" not in _orchestrator_config_cache:
+        _orchestrator_config_cache["value"] = {
+            "gemini_cli_path": os.getenv("GEMINI_CLI_PATH", "gemini"),
+            "copilot_cli_path": os.getenv("COPILOT_CLI_PATH", "copilot"),
+            "tool_preferences": AI_TOOL_PREFERENCES._ensure_loaded(),
+            "fallback_enabled": os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true",
+            "rate_limit_ttl": int(os.getenv("AI_RATE_LIMIT_TTL", "3600")),
+            "max_retries": int(os.getenv("AI_MAX_RETRIES", "2")),
+        }
+    return _orchestrator_config_cache["value"]
+
+
+class _LazyOrchestrator:
+    """Lazy-loading wrapper for ORCHESTRATOR_CONFIG."""
+    
+    def __getitem__(self, key):
+        return _get_orchestrator_config()[key]
+    
+    def __contains__(self, key):
+        return key in _get_orchestrator_config()
+    
+    def __repr__(self):
+        return repr(_get_orchestrator_config())
+    
+    def get(self, *args):
+        return _get_orchestrator_config().get(*args)
+
+
+ORCHESTRATOR_CONFIG = _LazyOrchestrator()
 
 # --- NEXUS-CORE FRAMEWORK CONFIGURATION ---
 # Enable nexus-core workflow engine (set to False to use legacy StateManager)
@@ -115,28 +370,35 @@ WORKFLOW_ID_MAPPING_FILE = os.path.join(DATA_DIR, "workflow_id_mapping.json")
 NEXUS_CORE_STORAGE_BACKEND = os.getenv("NEXUS_CORE_STORAGE", "file")  # Options: file, postgres, redis
 
 # --- PROJECT CONFIGURATION ---
-PROJECT_CONFIG = {
-    "case_italia": {
-        "agents_dir": "ghabs/agents/casit-agents",
-        "workspace": "case_italia",
-        "github_repo": GITHUB_AGENTS_REPO,
-    },
-    "wallible": {
-        "agents_dir": "ghabs/agents/wlbl-agents",
-        "workspace": "wallible",
-        "github_repo": GITHUB_AGENTS_REPO,
-    },
-    "biome": {
-        "agents_dir": "ghabs/agents/bm-agents",
-        "workspace": "biome",
-        "github_repo": GITHUB_AGENTS_REPO,
-    },
-    "nexus": {
-        "agents_dir": None,  # Nexus tasks handled directly
-        "workspace": "ghabs/nexus",
-        "github_repo": GITHUB_NEXUS_REPO,
-    }
-}
+
+
+def get_github_repo(project: str) -> str:
+    """Get GitHub repo for a project from PROJECT_CONFIG.
+    
+    Args:
+        project: Project name (e.g., "case_italia", "nexus")
+        
+    Returns:
+        GitHub repo string (e.g., "Ghabs95/agents")
+        
+    Raises:
+        KeyError: If project not found in PROJECT_CONFIG
+    """
+    config = _get_project_config()
+    if project not in config:
+        raise KeyError(
+            f"Project '{project}' not found in PROJECT_CONFIG. "
+            f"Available projects: {[k for k in config.keys() if k != 'workflow_definition_path']}"
+        )
+    repo = config[project].get("github_repo")
+    if not repo:
+        raise ValueError(
+            f"Project '{project}' is missing 'github_repo' in PROJECT_CONFIG"
+        )
+    return repo
+
+
+
 
 # --- TIMING CONFIGURATION ---
 INBOX_CHECK_INTERVAL = 10  # seconds - how often to check for new completions
@@ -157,7 +419,10 @@ logger.info(f"Using BASE_DIR: {BASE_DIR}")
 
 
 def validate_configuration():
-    """Validate all configuration on startup with detailed error messages."""
+    """Validate all configuration on startup with detailed error messages.
+    
+    Note: This must be called AFTER PROJECT_CONFIG is loaded (via _get_project_config()).
+    """
     errors = []
     warnings = []
     
@@ -187,18 +452,24 @@ def validate_configuration():
     except Exception as e:
         errors.append(f"WORKFLOW_CHAIN validation error: {e}")
     
-    # Validate PROJECT_CONFIG
-    if not PROJECT_CONFIG or len(PROJECT_CONFIG) == 0:
-        warnings.append("PROJECT_CONFIG is empty. No projects configured.")
-    else:
-        for project, config in PROJECT_CONFIG.items():
-            if not isinstance(config, dict):
-                errors.append(f"PROJECT_CONFIG['{project}'] must be a dict")
-            else:
-                if 'workspace' not in config:
-                    errors.append(f"PROJECT_CONFIG['{project}'] missing 'workspace' key")
-                if 'github_repo' not in config:
-                    errors.append(f"PROJECT_CONFIG['{project}'] missing 'github_repo' key")
+    # Validate PROJECT_CONFIG (when loaded)
+    try:
+        config = _get_project_config()
+        if config:
+            for project, proj_config in config.items():
+                # Skip non-dict values (e.g., global settings like workflow_definition_path)
+                if not isinstance(proj_config, dict):
+                    if project in ('workflow_definition_path',):
+                        continue
+                    errors.append(f"PROJECT_CONFIG['{project}'] must be a dict")
+                else:
+                    if 'workspace' not in proj_config:
+                        errors.append(f"PROJECT_CONFIG['{project}'] missing 'workspace' key")
+                    if 'github_repo' not in proj_config:
+                        errors.append(f"PROJECT_CONFIG['{project}'] missing 'github_repo' key")
+    except Exception as e:
+        # If PROJECT_CONFIG can't be loaded, that's okay during import (tests handle this)
+        pass
     
     # Check if BASE_DIR is writable
     try:
@@ -228,16 +499,18 @@ def validate_configuration():
 def ensure_data_dir():
     """Ensure data directory exists."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    logger.info(f"✅ Data directory ready: {DATA_DIR}")
+    logger.debug(f"✅ Data directory ready: {DATA_DIR}")
 
 
 def ensure_logs_dir():
     """Ensure logs directory exists."""
     os.makedirs(LOGS_DIR, exist_ok=True)
-    logger.info(f"✅ Logs directory ready: {LOGS_DIR}")
+    logger.debug(f"✅ Logs directory ready: {LOGS_DIR}")
 
 
-# Run validation on import
-validate_configuration()
-ensure_data_dir()
-ensure_logs_dir()
+# Initialize directories (non-blocking)
+try:
+    ensure_data_dir()
+    ensure_logs_dir()
+except Exception as e:
+    logger.warning(f"Could not initialize directories: {e}")

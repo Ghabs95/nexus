@@ -143,6 +143,72 @@ USE_NEXUS_CORE=true
 USE_NEXUS_CORE=false
 ```
 
+### Project Config (YAML) - Required
+
+You must provide a project configuration YAML file. This file defines per-project settings like GitHub repo, agents directory, and optional workflow paths.
+
+**Environment variable:**
+```bash
+PROJECT_CONFIG_PATH=config/project_config.yaml  # Path to your project config YAML
+```
+
+If `PROJECT_CONFIG_PATH` is not set, the system will fail to start with a clear error message.
+
+**Example `project_config.yaml`:**
+```yaml
+# Global workflow definition path (single source of truth for agent orchestration)
+workflow_definition_path: /home/ubuntu/git/ghabs/agents/.github/workflows/ghabs_org_workflow.yaml
+
+# Global AI tool preferences (which AI tool each agent uses)
+ai_tool_preferences:
+  ProjectLead: copilot
+  Atlas: copilot
+  Architect: copilot
+  Tier2Lead: copilot
+  ProductDesigner: gemini
+  QAGuard: gemini
+  Scribe: gemini
+  OpsCommander: gemini
+  Privacy: gemini
+
+# Per-project configuration
+case_italia:
+  agents_dir: ghabs/agents/casit-agents
+  workspace: case_italia
+  github_repo: Ghabs95/agents
+
+wallible:
+  agents_dir: ghabs/agents/wlbl-agents
+  workspace: wallible
+  github_repo: Ghabs95/agents
+
+biome:
+  agents_dir: ghabs/agents/bm-agents
+  workspace: biome
+  github_repo: Ghabs95/agents
+
+nexus:
+  agents_dir: ghabs/nexus-core/examples/agents
+  workspace: ghabs/nexus
+  github_repo: Ghabs95/nexus-core
+  # Project-specific AI tool preferences
+  ai_tool_preferences:
+    Copilot: copilot
+    Architect: copilot
+    QAGuard: copilot
+    OpsCommander: gemini
+```
+
+**Configuration details:**
+- `workflow_definition_path` (global) - YAML workflow definition file (required) - defines all workflow steps, routing logic, and agent orchestration
+- `ai_tool_preferences` (global) - Which AI tool (copilot/gemini) each agent uses
+- `{project_name}` - Section for each project
+  - `agents_dir` - Path to project's agents directory
+  - `workspace` - Workspace identifier for the project
+  - `github_repo` - GitHub repo in format `owner/repo`
+  - `workflow_definition_path` (optional) - Project-specific override of global workflow path
+  - `ai_tool_preferences` (optional) - Project-specific override of global AI tool preferences
+
 ### Storage Backend
 
 ```bash

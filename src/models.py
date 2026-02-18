@@ -106,8 +106,9 @@ class Issue:
     @property
     def url(self) -> str:
         """Get GitHub issue URL."""
-        from config import GITHUB_AGENTS_REPO
-        return f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{self.number}"
+        from config import get_github_repo
+        repo = get_github_repo(self.project)
+        return f"https://github.com/{repo}/issues/{self.number}"
 
     def is_workflow_issue(self) -> bool:
         """Check if this issue has a workflow label."""

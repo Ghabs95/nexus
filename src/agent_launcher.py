@@ -16,7 +16,7 @@ import time
 
 from config import (
     BASE_DIR,
-    GITHUB_AGENTS_REPO,
+    get_github_repo,
     PROJECT_CONFIG,
     WORKFLOW_CHAIN,
     ORCHESTRATOR_CONFIG
@@ -29,14 +29,19 @@ from ai_orchestrator import get_orchestrator, ToolUnavailableError
 logger = logging.getLogger(__name__)
 
 
-def get_sop_tier_from_issue(issue_number):
+def get_sop_tier_from_issue(issue_number, project="nexus"):
     """Get workflow tier from issue labels.
+    
+    Args:
+        issue_number: GitHub issue number
+        project: Project name to determine repo
     
     Returns: tier_name (full/shortened/fast-track) or None
     """
     try:
+        repo = get_github_repo(project)
         result = run_command_with_retry(
-            ["gh", "issue", "view", str(issue_number), "--repo", GITHUB_AGENTS_REPO,
+            ["gh", "issue", "view", str(issue_number), "--repo", repo,
              "--json", "labels"],
             max_attempts=2,
             timeout=10
@@ -54,7 +59,7 @@ def get_sop_tier_from_issue(issue_number):
         
         return None
     except Exception as e:
-        logger.error(f"Failed to get tier from issue #{issue_number}: {e}")
+        logger.error(f"Failed to get tier from issue #{issue_number} in {project}: {e}")
         return None
 
 
@@ -301,7 +306,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
     # Get issue details
     try:
         result = run_command_with_retry(
-            ["gh", "issue", "view", str(issue_number), "--repo", GITHUB_AGENTS_REPO,
+            ["gh", "issue", "view", str(issue_number), "--repo", get_github_repo("nexus"),
              "--json", "body"],
             max_attempts=2,
             timeout=10
@@ -347,12 +352,12 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         return False
     
     # Get workflow tier
-    tier_name = get_sop_tier_from_issue(issue_number)
+    tier_name = get_sop_tier_from_issue(issue_number, project_root)
     if not tier_name:
         logger.warning(f"Could not determine workflow tier for issue #{issue_number}")
         tier_name = "full"  # Default to full workflow
     
-    issue_url = f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_number}"
+    issue_url = f"https://github.com/{get_github_repo(project_root)}/issues/{issue_number}"
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
     

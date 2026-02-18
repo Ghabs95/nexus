@@ -10,7 +10,7 @@ import requests
 
 # Import centralized configuration
 from config import (
-    BASE_DIR, GITHUB_AGENTS_REPO, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
+    BASE_DIR, get_github_repo, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
     WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
     USE_NEXUS_CORE
@@ -34,6 +34,21 @@ from notifications import (
     notify_workflow_completed,
     send_telegram_alert
 )
+
+# Helper to get issue repo (currently defaults to nexus, should be extended for multi-project)
+def get_issue_repo(project: str = "nexus") -> str:
+    """Get the GitHub repo for issue operations.
+    
+    Args:
+        project: Project name (currently unused, defaults to nexus)
+        
+    Returns:
+        GitHub repo string
+        
+    Note: This should be extended to support per-project repos when multi-project
+          issue tracking is implemented.
+    """
+    return get_github_repo("nexus")
 
 # Alias for backward compatibility
 LAUNCHED_AGENTS_FILE = StateManager.__dict__.get("LAUNCHED_AGENTS_FILE")
@@ -149,35 +164,44 @@ def check_stuck_agents():
                     
                     # Check if we should retry
                     will_retry = AgentMonitor.should_retry(issue_num, agent_name)
-                    notify_agent_timeout(issue_num, agent_name, will_retry)
+                    notify_agent_timeout(issue_num, agent_name, will_retry, project="nexus")
             
     except Exception as e:
         logger.error(f"Error in check_stuck_agents: {e}")
 
 
 def check_agent_comments():
-    """Monitor GitHub issues for agent comments requesting input."""
+    """Monitor GitHub issues for agent comments requesting input across all projects."""
     try:
-        # Get all open issues with workflow labels
-        result = subprocess.run(
-            ["gh", "issue", "list", "--repo", GITHUB_AGENTS_REPO,
-             "--label", "workflow:full,workflow:shortened,workflow:fast-track",
-             "--state", "open", "--json", "number", "--jq", ".[].number"],
-            text=True, capture_output=True, timeout=10
-        )
+        # Query issues from all project repos
+        all_issue_nums = []
+        for project_name in PROJECT_CONFIG.keys():
+            repo = get_github_repo(project_name)
+            try:
+                result = subprocess.run(
+                    ["gh", "issue", "list", "--repo", repo,
+                     "--label", "workflow:full,workflow:shortened,workflow:fast-track",
+                     "--state", "open", "--json", "number", "--jq", ".[].number"],
+                    text=True, capture_output=True, timeout=10
+                )
+                
+                if result.stdout:
+                    issue_numbers = result.stdout.strip().split("\n")
+                    all_issue_nums.extend([(num, project_name, repo) for num in issue_numbers if num])
+            except subprocess.TimeoutExpired:
+                logger.warning(f"GitHub issue list timed out for project {project_name}")
+                continue
         
-        if not result.stdout:
+        if not all_issue_nums:
             return
         
-        issue_numbers = result.stdout.strip().split("\n")
-        
-        for issue_num in issue_numbers:
+        for issue_num, project_name, repo in all_issue_nums:
             if not issue_num:
                 continue
                 
             # Get issue comments
             result = subprocess.run(
-                ["gh", "issue", "view", issue_num, "--repo", GITHUB_AGENTS_REPO,
+                ["gh", "issue", "view", issue_num, "--repo", repo,
                  "--json", "comments", "--jq", ".comments[] | select(.author.login == \"Ghabs95\") | {id: .id, body: .body, createdAt: .createdAt}"],
                 text=True, capture_output=True, timeout=10
             )
@@ -217,7 +241,7 @@ def check_agent_comments():
                         # Extract preview (first 200 chars)
                         preview = body[:200] + "..." if len(body) > 200 else body
                         
-                        if notify_agent_needs_input(issue_num, "ProjectLead", preview):
+                        if notify_agent_needs_input(issue_num, "ProjectLead", preview, project="nexus"):
                             logger.info(f"📨 Sent input request alert for issue #{issue_num}")
                             notified_comments.add(comment_id)
                         else:
@@ -275,8 +299,9 @@ def check_and_notify_pr(issue_num, project):
     """
     try:
         # Search for PRs that mention this issue
+        repo = get_github_repo(project)
         result = run_command_with_retry(
-            ["gh", "pr", "list", "--repo", GITHUB_AGENTS_REPO,
+            ["gh", "pr", "list", "--repo", repo,
              "--search", f"{issue_num} in:body", 
              "--json", "number,url,title,state",
              "--limit", "1"],
@@ -321,7 +346,7 @@ def check_completed_agents():
             for label in workflow_labels:
                 try:
                     result = run_command_with_retry(
-                        ["gh", "issue", "list", "--repo", GITHUB_AGENTS_REPO,
+                        ["gh", "issue", "list", "--repo", get_issue_repo(),
                          "--label", label,
                          "--state", "open", "--json", "number", "--jq", ".[].number"],
                         max_attempts=2, timeout=10
@@ -352,7 +377,7 @@ def check_completed_agents():
                     # Get recent comments
                     try:
                         result = run_command_with_retry(
-                            ["gh", "issue", "view", issue_num, "--repo", GITHUB_AGENTS_REPO,
+                            ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
                              "--json", "comments", "--jq", ".comments[-1].body"],
                             max_attempts=2, timeout=10
                         )
@@ -402,7 +427,7 @@ def check_completed_agents():
                                 # Determine project from issue body
                                 try:
                                     result = run_command_with_retry(
-                                        ["gh", "issue", "view", issue_num, "--repo", GITHUB_AGENTS_REPO,
+                                        ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
                                          "--json", "body"],
                                         max_attempts=2, timeout=10
                                     )
@@ -465,7 +490,7 @@ def check_completed_agents():
                             # Launch the agent
                             try:
                                 result = run_command_with_retry(
-                                    ["gh", "issue", "view", issue_num, "--repo", GITHUB_AGENTS_REPO,
+                                    ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
                                      "--json", "body"],
                                     max_attempts=2, timeout=10
                                 )
@@ -511,7 +536,7 @@ def check_completed_agents():
                                 task_type = type_match.group(1).strip().lower() if type_match else "feature"
                                 tier_name, _, _ = get_sop_tier(task_type)
                                 
-                                issue_url = f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_num}"
+                                issue_url = f"https://github.com/{get_issue_repo()}/issues/{issue_num}"
                                 agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
                                 workspace_abs = os.path.join(BASE_DIR, config["workspace"])
                                 
@@ -561,7 +586,7 @@ def check_completed_agents():
                                         f"Issue: #{issue_num}\n"
                                         f"Next agent: @{next_agent}\n"
                                         f"PID: {pid}\n\n"
-                                        f"🔗 https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_num}"
+                                        f"🔗 https://github.com/{get_issue_repo()}/issues/{issue_num}"
                                     )
                                     send_telegram_alert(message)
                             except Exception as e:
@@ -637,7 +662,7 @@ def check_completed_agents():
                         # Try to determine project from task file
                         try:
                             result = subprocess.run(
-                                ["gh", "issue", "view", issue_num, "--repo", GITHUB_AGENTS_REPO,
+                                ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
                                  "--json", "body"],
                                 text=True, capture_output=True, timeout=10
                             )
@@ -675,7 +700,7 @@ def check_completed_agents():
                     # Get issue details to find task file
                     try:
                         result = subprocess.run(
-                            ["gh", "issue", "view", issue_num, "--repo", GITHUB_AGENTS_REPO,
+                            ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
                              "--json", "body"],
                             text=True, capture_output=True, timeout=10
                         )
@@ -717,7 +742,7 @@ def check_completed_agents():
                         task_type = type_match.group(1).strip().lower() if type_match else "feature"
                         tier_name, _, _ = get_sop_tier(task_type)
                         
-                        issue_url = f"https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_num}"
+                        issue_url = f"https://github.com/{get_issue_repo()}/issues/{issue_num}"
                         agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
                         workspace_abs = os.path.join(BASE_DIR, config["workspace"])
                         
@@ -792,7 +817,7 @@ def check_completed_agents():
                                 f"Next agent: @{next_agent}\n"
                                 f"PID: {pid}\n"
                                 f"Tool: {tool_used}\n\n"
-                                f"🔗 https://github.com/{GITHUB_AGENTS_REPO}/issues/{issue_num}"
+                                f"🔗 https://github.com/{get_issue_repo()}/issues/{issue_num}"
                             )
                             send_telegram_alert(message)
                         else:

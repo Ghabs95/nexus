@@ -4,7 +4,7 @@ Tests audit log parsing and metrics calculation.
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from analytics import (
     AuditLogParser,
     WorkflowMetrics,
@@ -12,6 +12,11 @@ from analytics import (
     SystemMetrics,
     get_stats_report
 )
+
+
+def get_recent_date(hours_ago=0):
+    """Helper to generate recent timestamps for testing."""
+    return (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 class TestAuditLogParser:
@@ -43,7 +48,7 @@ class TestAuditLogParser:
         """Test parsing WORKFLOW_STARTED event."""
         log_file = tmp_path / "audit.log"
         log_file.write_text(
-            "2026-02-16T10:00:00 | Issue #10 | WORKFLOW_STARTED | Started workflow tier: full\n"
+            f"{get_recent_date(1)} | Issue #10 | WORKFLOW_STARTED | Started workflow tier: full\n"
         )
         
         parser = AuditLogParser(str(log_file))
@@ -58,7 +63,7 @@ class TestAuditLogParser:
         """Test parsing AGENT_LAUNCHED event."""
         log_file = tmp_path / "audit.log"
         log_file.write_text(
-            "2026-02-16T10:00:00 | Issue #10 | AGENT_LAUNCHED | @Copilot agent launched\n"
+            f"{get_recent_date(1)} | Issue #10 | AGENT_LAUNCHED | @Copilot agent launched\n"
         )
         
         parser = AuditLogParser(str(log_file))
@@ -72,11 +77,11 @@ class TestAuditLogParser:
     def test_parse_multiple_events(self, tmp_path):
         """Test parsing multiple events for same issue."""
         log_file = tmp_path / "audit.log"
-        log_content = """2026-02-16T10:00:00 | Issue #10 | WORKFLOW_STARTED | Started full tier workflow
-2026-02-16T10:01:00 | Issue #10 | AGENT_LAUNCHED | Launched @ProjectLead agent
-2026-02-16T10:05:00 | Issue #10 | AGENT_TIMEOUT_KILL | @ProjectLead timed out
-2026-02-16T10:06:00 | Issue #10 | AGENT_RETRY | Retrying @ProjectLead
-2026-02-16T10:10:00 | Issue #10 | WORKFLOW_COMPLETED | Workflow finished
+        log_content = f"""{get_recent_date(10)} | Issue #10 | WORKFLOW_STARTED | Started full tier workflow
+{get_recent_date(9)} | Issue #10 | AGENT_LAUNCHED | Launched @ProjectLead agent
+{get_recent_date(5)} | Issue #10 | AGENT_TIMEOUT_KILL | @ProjectLead timed out
+{get_recent_date(4)} | Issue #10 | AGENT_RETRY | Retrying @ProjectLead
+{get_recent_date(1)} | Issue #10 | WORKFLOW_COMPLETED | Workflow finished
 """
         log_file.write_text(log_content)
         
@@ -97,11 +102,11 @@ class TestSystemMetrics:
     def test_completion_rate_calculation(self, tmp_path):
         """Test completion rate calculation."""
         log_file = tmp_path / "audit.log"
-        log_content = """2026-02-16T10:00:00 | Issue #1 | WORKFLOW_STARTED | Started
-2026-02-16T10:10:00 | Issue #1 | WORKFLOW_COMPLETED | Finished
-2026-02-16T11:00:00 | Issue #2 | WORKFLOW_STARTED | Started
-2026-02-16T11:10:00 | Issue #2 | WORKFLOW_COMPLETED | Finished
-2026-02-16T12:00:00 | Issue #3 | WORKFLOW_STARTED | Started
+        log_content = f"""{get_recent_date(10)} | Issue #1 | WORKFLOW_STARTED | Started
+{get_recent_date(9)} | Issue #1 | WORKFLOW_COMPLETED | Finished
+{get_recent_date(8)} | Issue #2 | WORKFLOW_STARTED | Started
+{get_recent_date(7)} | Issue #2 | WORKFLOW_COMPLETED | Finished
+{get_recent_date(6)} | Issue #3 | WORKFLOW_STARTED | Started
 """
         log_file.write_text(log_content)
         
@@ -116,9 +121,9 @@ class TestSystemMetrics:
     def test_tier_distribution(self, tmp_path):
         """Test issues per tier counting."""
         log_file = tmp_path / "audit.log"
-        log_content = """2026-02-16T10:00:00 | Issue #1 | WORKFLOW_STARTED | tier: full
-2026-02-16T11:00:00 | Issue #2 | WORKFLOW_STARTED | tier: shortened
-2026-02-16T12:00:00 | Issue #3 | WORKFLOW_STARTED | tier: full
+        log_content = f"""{get_recent_date(10)} | Issue #1 | WORKFLOW_STARTED | tier: full
+{get_recent_date(8)} | Issue #2 | WORKFLOW_STARTED | tier: shortened
+{get_recent_date(6)} | Issue #3 | WORKFLOW_STARTED | tier: full
 """
         log_file.write_text(log_content)
         
@@ -136,10 +141,10 @@ class TestAgentLeaderboard:
     def test_agent_ranking_by_activity(self, tmp_path):
         """Test agents are ranked by launch count."""
         log_file = tmp_path / "audit.log"
-        log_content = """2026-02-16T10:00:00 | Issue #1 | AGENT_LAUNCHED | @Copilot
-2026-02-16T10:00:00 | Issue #2 | AGENT_LAUNCHED | @Copilot
-2026-02-16T10:00:00 | Issue #3 | AGENT_LAUNCHED | @Copilot
-2026-02-16T10:00:00 | Issue #4 | AGENT_LAUNCHED | @ProjectLead
+        log_content = f"""{get_recent_date(10)} | Issue #1 | AGENT_LAUNCHED | @Copilot
+{get_recent_date(9)} | Issue #2 | AGENT_LAUNCHED | @Copilot
+{get_recent_date(8)} | Issue #3 | AGENT_LAUNCHED | @Copilot
+{get_recent_date(7)} | Issue #4 | AGENT_LAUNCHED | @ProjectLead
 """
         log_file.write_text(log_content)
         
@@ -160,9 +165,9 @@ class TestStatsReport:
     def test_stats_report_format(self, tmp_path):
         """Test that stats report is properly formatted."""
         log_file = tmp_path / "audit.log"
-        log_content = """2026-02-16T10:00:00 | Issue #1 | WORKFLOW_STARTED | tier: full
-2026-02-16T10:01:00 | Issue #1 | AGENT_LAUNCHED | @ProjectLead
-2026-02-16T10:10:00 | Issue #1 | WORKFLOW_COMPLETED | Finished
+        log_content = f"""{get_recent_date(10)} | Issue #1 | WORKFLOW_STARTED | tier: full
+{get_recent_date(9)} | Issue #1 | AGENT_LAUNCHED | @ProjectLead
+{get_recent_date(1)} | Issue #1 | WORKFLOW_COMPLETED | Finished
 """
         log_file.write_text(log_content)
         

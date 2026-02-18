@@ -1,0 +1,45 @@
+# Global workflow definition path (YAML workflow file - single source of truth)
+workflow_definition_path: /home/ubuntu/git/ghabs/agents/.github/workflows/ghabs_org_workflow.yaml
+
+# Global AI tool preferences (which AI tool each agent uses)
+ai_tool_preferences:
+  ProjectLead: copilot
+  Atlas: copilot
+  Architect: copilot
+  Tier2Lead: copilot
+  ProductDesigner: gemini
+  QAGuard: gemini
+  Scribe: gemini
+  OpsCommander: gemini
+  Privacy: gemini
+  FrontendLead: copilot
+  BackendLead: copilot
+  MobileLead: copilot
+
+# Project configurations
+case_italia:
+  agents_dir: ghabs/agents/casit-agents
+  workspace: case_italia
+  github_repo: Ghabs95/agents
+
+wallible:
+  agents_dir: ghabs/agents/wlbl-agents
+  workspace: wallible
+  github_repo: Ghabs95/agents
+
+biome:
+  agents_dir: ghabs/agents/bm-agents
+  workspace: biome
+  github_repo: Ghabs95/agents
+
+nexus:
+  agents_dir: ghabs/nexus-core/examples/agents
+  workspace: ghabs/nexus
+  github_repo: Ghabs95/nexus-core
+  # Uncomment to use a different workflow definition for this project
+  workflow_definition_path: /home/ubuntu/git/ghabs/nexus-core/examples/workflows/development_workflow.yaml
+  ai_tool_preferences: # Override global AI tool preferences
+    Copilot: copilot
+    Architect: copilot
+    QAGuard: copilot
+    OpsCommander: gemini

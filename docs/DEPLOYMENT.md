@@ -77,7 +77,7 @@ AI_API_KEY=your_google_gemini_api_key
 AI_MODEL=gemini-2.0-flash
 
 # GitHub Configuration
-GITHUB_AGENTS_REPO=YourOrg/agents
+PROJECT_CONFIG_PATH=path/to/your_project_config.yaml  # Per-project github_repo settings
 
 # Optional: Feature Flags
 ENABLE_SCHEDULED_REPORTS=true

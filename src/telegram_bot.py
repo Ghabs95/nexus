@@ -16,7 +16,7 @@ from telegram.ext import (
 # Import configuration from centralized config module
 from config import (
     TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
-    DATA_DIR, TRACKED_ISSUES_FILE, GITHUB_AGENTS_REPO, PROJECT_CONFIG, ensure_data_dir,
+    DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR
 )
 from state_manager import StateManager
@@ -53,7 +53,7 @@ rate_limiter = get_rate_limiter()
 user_manager = get_user_manager()
 
 # Legacy alias for compatibility
-GITHUB_REPO = GITHUB_AGENTS_REPO
+GITHUB_REPO = get_github_repo("nexus")
 
 
 # --- RATE LIMITING DECORATOR ---
@@ -827,7 +827,7 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Examples:\n"
             "  `/assign 0` (assigns to you / @me)\n"
             "  `/assign 0 copilot` (assigns to configured Copilot user)\n"
-            "  `/assign https://github.com/Ghabs95/agents/issues/0 alice`",
+            f"  `/assign https://github.com/{get_github_repo("nexus")}/issues/0 alice`",
             parse_mode='Markdown'
         )
         return
@@ -851,7 +851,7 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Get repo from env or use default
-    repo = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+    repo = get_github_repo("nexus")
     # Optional assignee argument: `/assign 5 copilot` or `/assign 5 alice`
     assignee = "@me"
     if len(context.args) > 1:
@@ -909,7 +909,8 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Usage: `/implement <issue#>`\n\nExamples:\n  `/implement 0`\n  `/implement #0`\n  `/implement https://github.com/Ghabs95/agents/issues/0`",
+            "⚠️ Usage: `/implement <issue#>`\n\nExamples:\n  `/implement 0`\n  `/implement #0`\n"
+            f"  `/implement https://github.com/{get_github_repo("nexus")}/issues/0`",
             parse_mode='Markdown'
         )
         return
@@ -929,7 +930,7 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
         return
 
-    repo = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+    repo = get_github_repo("nexus")
 
     msg = await update.message.reply_text(f"🔔 Requesting Copilot implementation for issue #{issue_number}...")
 
@@ -978,7 +979,8 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Usage: `/prepare <issue#>`\n\nExamples:\n  `/prepare 0`\n  `/prepare #0`\n  `/prepare https://github.com/Ghabs95/agents/issues/0`",
+            "⚠️ Usage: `/prepare <issue#>`\n\nExamples:\n  `/prepare 0`\n  `/prepare #0`\n"
+            f"  `/prepare https://github.com/{get_github_repo("nexus")}/issues/0`",
             parse_mode='Markdown'
         )
         return
@@ -998,7 +1000,7 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid issue number. Please use a number like `5` or `#5`.", parse_mode='Markdown')
         return
 
-    repo = os.getenv("GITHUB_AGENTS_REPO", "Ghabs95/agents")
+    repo = get_github_repo("nexus")
 
     msg = await update.message.reply_text(f"🔧 Preparing issue #{issue_number} for Copilot...")
 

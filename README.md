@@ -92,7 +92,7 @@ Step through an interactive menu:
 
    Edit `vars.secret` with your credentials:
    ```bash
-GITHUB_AGENTS_REPO=Ghabs95/agents    # Where parent issues are created
+   PROJECT_CONFIG_PATH=config/project_config.yaml    # Per-project settings
    ```
 
    Add your values:
@@ -308,8 +308,8 @@ Comprehensive error handling for reliability:
 
 **Startup Validation**:
 - Validates all required environment variables
-- Checks WORKFLOW_CHAIN structure integrity
 - Tests DATA_DIR writability
+- Validates project_config.yaml structure
 - Fails fast with detailed error messages
 
 **User-Friendly Errors**:
@@ -323,7 +323,7 @@ Comprehensive error handling for reliability:
 ### Configuration (`vars.secret`)
 
 ```bash
-GITHUB_AGENTS_REPO=Ghabs95/agents    # Where parent issues are created
+PROJECT_CONFIG_PATH=config/project_config.yaml    # Per-project settings
 ```
 
 ## Bot Usage
@@ -350,7 +350,7 @@ sudo systemctl status nexus-bot.service
 ```
 TELEGRAM_TOKEN=...
 GITHUB_TOKEN=...
-GITHUB_AGENTS_REPO=Ghabs95/agents
+PROJECT_CONFIG_PATH=config/project_config.yaml
 INBOX_DIR=./.github/inbox
 ```
 
@@ -517,10 +517,11 @@ Edit the following dictionaries in [src/telegram_bot.py](src/telegram_bot.py) to
 
 Core configuration is centralized in [src/config.py](src/config.py):
 
-- **WORKFLOW_CHAIN**: Define agent sequences for each tier (full/shortened/fast-track)
-- **PROJECT_CONFIG**: Map projects to workspace and agent directories
+- **PROJECT_CONFIG**: Map projects to workspace, agent directories, and workflow definitions
 - **STUCK_AGENT_THRESHOLD**: Timeout threshold in seconds (default: 60)
 - **DATA_DIR**: Location for persistent state and audit logs
+
+Workflow orchestration is defined in YAML files (see `ghabs_org_workflow.yaml` in agents repo).
 
 ### Persistent State
 
@@ -561,9 +562,10 @@ Features:
 The system is split into focused, reusable modules:
 
 **[src/config.py](src/config.py)**
-- Centralized configuration (WORKFLOW_CHAIN, PROJECT_CONFIG, thresholds)
+- Centralized configuration (PROJECT_CONFIG, thresholds, paths)
 - Single source of truth for all constants and settings
 - Clean imports for other modules
+- Lazy-loading project configuration from YAML
 
 **[src/models.py](src/models.py)**
 - Type-safe data structures (Enums, Dataclasses)
@@ -735,7 +737,7 @@ python3 -m pytest tests/ --cov=src --cov-report=html
 cd src
 
 # Test imports
-python3 -c "from config import WORKFLOW_CHAIN; from state_manager import StateManager; print('✅ Imports OK')"
+python3 -c "from config import PROJECT_CONFIG; from state_manager import StateManager; print('✅ Imports OK')"
 
 # Test error handling
 python3 -c "from error_handling import retry_with_backoff; print('✅ Error Handling OK')"

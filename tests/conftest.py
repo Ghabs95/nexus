@@ -11,14 +11,32 @@ sys.path.insert(0, str(src_path))
 
 
 @pytest.fixture(autouse=True)
-def mock_env_vars(monkeypatch):
+def mock_env_vars(monkeypatch, tmp_path):
     """Auto-use fixture to set required environment variables for all tests."""
     monkeypatch.setenv("TELEGRAM_TOKEN", "test_token_123")
     monkeypatch.setenv("AI_API_KEY", "test_api_key_123")
     monkeypatch.setenv("AI_MODEL", "gemini-test")
     monkeypatch.setenv("ALLOWED_USER", "12345")
     monkeypatch.setenv("BASE_DIR", "/tmp/test_nexus")
-    monkeypatch.setenv("GITHUB_AGENTS_REPO", "test/repo")
+    
+    # Create minimal project config for tests with multiple projects
+    project_config_file = tmp_path / "project_config.yaml"
+    project_config_file.write_text("""
+    nexus:
+        agents_dir: ghabs/nexus-core/examples/agents
+        workspace: ghabs/nexus
+        github_repo: test/repo
+    test-project:
+        agents_dir: ghabs/test-agents
+        workspace: ghabs/test-project
+        github_repo: test/project
+    my-project:
+        agents_dir: ghabs/my-agents
+        workspace: ghabs/my-project
+        github_repo: test/my-project
+    """)
+    
+    monkeypatch.setenv("PROJECT_CONFIG_PATH", str(project_config_file))
 
 
 @pytest.fixture

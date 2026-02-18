@@ -24,7 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
     BASE_DIR, 
-    GITHUB_AGENTS_REPO, 
     WEBHOOK_PORT,
     WEBHOOK_SECRET
 )

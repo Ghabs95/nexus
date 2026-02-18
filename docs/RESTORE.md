@@ -137,7 +137,7 @@ Create `/home/ubuntu/git/ghabs/nexus/vars.secret`:
 TELEGRAM_TOKEN=<your_telegram_bot_token>
 ALLOWED_USER=<your_user_id>
 BASE_DIR=/home/ubuntu/git
-GITHUB_AGENTS_REPO=Ghabs95/agents
+PROJECT_CONFIG_PATH=config/project_config.yaml
 GITHUB_TOKEN=<your_github_pat>
 WEBHOOK_SECRET=$(openssl rand -base64 32)
 WEBHOOK_PORT=8081
