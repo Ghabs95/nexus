@@ -157,7 +157,7 @@ If `PROJECT_CONFIG_PATH` is not set, the system will fail to start with a clear 
 **Example `project_config.yaml`:**
 ```yaml
 # Global workflow definition path (single source of truth for agent orchestration)
-workflow_definition_path: /home/ubuntu/git/ghabs/agents/.github/workflows/ghabs_org_workflow.yaml
+workflow_definition_path: /home/ubuntu/git/ghabs/agents/workflows/ghabs_org_workflow.yaml
 
 # Global AI tool preferences (which AI tool each agent uses)
 ai_tool_preferences:

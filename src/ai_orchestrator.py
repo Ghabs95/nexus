@@ -205,7 +205,8 @@ class AIOrchestrator:
         base_dir: str,
         issue_url: Optional[str] = None,
         agent_name: Optional[str] = None,
-        use_gemini: bool = False
+        use_gemini: bool = False,
+        log_subdir: Optional[str] = None
     ) -> Tuple[Optional[int], AIProvider]:
         """
         Invoke an agent using appropriate tool with fallback support.
@@ -225,17 +226,36 @@ class AIOrchestrator:
         Raises:
             ToolUnavailableError: If all tools unavailable
         """
+        issue_num = None
+        if issue_url:
+            match = re.search(r"/issues/(\d+)", issue_url)
+            issue_num = match.group(1) if match else None
+
         primary = AIProvider.GEMINI if use_gemini else self.get_primary_tool(agent_name)
         fallback = self.get_fallback_tool(primary)
 
         # Try primary tool
         try:
             if primary == AIProvider.COPILOT:
-                pid = self._invoke_copilot(agent_prompt, workspace_dir, agents_dir, base_dir)
+                pid = self._invoke_copilot(
+                    agent_prompt,
+                    workspace_dir,
+                    agents_dir,
+                    base_dir,
+                    issue_num=issue_num,
+                    log_subdir=log_subdir,
+                )
                 if pid:
                     return pid, AIProvider.COPILOT
             else:
-                pid = self._invoke_gemini_agent(agent_prompt, workspace_dir, agents_dir, base_dir)
+                pid = self._invoke_gemini_agent(
+                    agent_prompt,
+                    workspace_dir,
+                    agents_dir,
+                    base_dir,
+                    issue_num=issue_num,
+                    log_subdir=log_subdir,
+                )
                 if pid:
                     return pid, AIProvider.GEMINI
         except RateLimitedError:
@@ -248,12 +268,26 @@ class AIOrchestrator:
         if fallback:
             try:
                 if fallback == AIProvider.COPILOT:
-                    pid = self._invoke_copilot(agent_prompt, workspace_dir, agents_dir, base_dir)
+                    pid = self._invoke_copilot(
+                        agent_prompt,
+                        workspace_dir,
+                        agents_dir,
+                        base_dir,
+                        issue_num=issue_num,
+                        log_subdir=log_subdir,
+                    )
                     if pid:
                         logger.info(f"✅ Fallback {fallback.value} succeeded")
                         return pid, AIProvider.COPILOT
                 else:
-                    pid = self._invoke_gemini_agent(agent_prompt, workspace_dir, agents_dir, base_dir)
+                    pid = self._invoke_gemini_agent(
+                        agent_prompt,
+                        workspace_dir,
+                        agents_dir,
+                        base_dir,
+                        issue_num=issue_num,
+                        log_subdir=log_subdir,
+                    )
                     if pid:
                         logger.info(f"✅ Fallback {fallback.value} succeeded")
                         return pid, AIProvider.GEMINI
@@ -270,7 +304,9 @@ class AIOrchestrator:
         agent_prompt: str,
         workspace_dir: str,
         agents_dir: str,
-        base_dir: str
+        base_dir: str,
+        issue_num: Optional[str] = None,
+        log_subdir: Optional[str] = None
     ) -> Optional[int]:
         """
         Invoke Copilot CLI agent.
@@ -295,8 +331,11 @@ class AIOrchestrator:
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
+        if log_subdir:
+            log_dir = os.path.join(log_dir, log_subdir)
         os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, f"copilot_{timestamp}.log")
+        log_suffix = f"{issue_num}_{timestamp}" if issue_num else timestamp
+        log_path = os.path.join(log_dir, f"copilot_{log_suffix}.log")
 
         logger.info(f"🤖 Launching Copilot CLI agent")
         logger.info(f"   Workspace: {workspace_dir}")
@@ -321,7 +360,9 @@ class AIOrchestrator:
         agent_prompt: str,
         workspace_dir: str,
         agents_dir: str,
-        base_dir: str
+        base_dir: str,
+        issue_num: Optional[str] = None,
+        log_subdir: Optional[str] = None
     ) -> Optional[int]:
         """
         Invoke Gemini CLI agent (experimental).
@@ -342,8 +383,11 @@ class AIOrchestrator:
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
+        if log_subdir:
+            log_dir = os.path.join(log_dir, log_subdir)
         os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, f"gemini_{timestamp}.log")
+        log_suffix = f"{issue_num}_{timestamp}" if issue_num else timestamp
+        log_path = os.path.join(log_dir, f"gemini_{log_suffix}.log")
 
         logger.info(f"🤖 Launching Gemini CLI agent")
         logger.info(f"   Workspace: {workspace_dir}")

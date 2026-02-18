@@ -1,5 +1,5 @@
 # Global workflow definition path (YAML workflow file - single source of truth)
-workflow_definition_path: /home/ubuntu/git/ghabs/agents/.github/workflows/ghabs_org_workflow.yaml
+workflow_definition_path: /home/ubuntu/git/ghabs/agents/workflows/ghabs_org_workflow.yaml
 
 # Global AI tool preferences (which AI tool each agent uses)
 ai_tool_preferences:
@@ -34,7 +34,7 @@ biome:
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
-  workspace: ghabs/nexus
+  workspace: ghabs/nexus-core
   github_repo: Ghabs95/nexus-core
   # Uncomment to use a different workflow definition for this project
   workflow_definition_path: /home/ubuntu/git/ghabs/nexus-core/examples/workflows/development_workflow.yaml
