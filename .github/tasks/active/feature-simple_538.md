@@ -72,3 +72,18 @@ steps:
 **Verdict:** ✅ APPROVED — branch is clean, all tests pass, implementation is sound.
 
 **Status:** QA complete — ready for deploy.
+
+---
+
+## Deploy — @OpsCommander
+
+**PR Merged:** https://github.com/Ghabs95/nexus/pull/1 → `main`
+**Merge commit:** Merged `feat/workflow-approval-gate` into `main`
+**Date:** 2026-02-18
+
+**Actions taken:**
+- Verified QA approval (136/136 tests passing, no regressions)
+- Merged PR #1 (`feat/workflow-approval-gate` → `main`) via squash-merge
+- ⚠️ Advisory noted: uncommitted local `tests/conftest.py` changes were NOT part of the merge; no action needed
+
+**Status:** ✅ Deployed — `feat/workflow-approval-gate` is live on `main`.
