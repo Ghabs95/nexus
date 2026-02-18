@@ -286,6 +286,64 @@ while True:
 
 **Agents:** ProjectLead → Tier2Lead → QAGuard → OpsCommander
 
+## PR Merge Approval Policy
+
+The system enforces human review gates to prevent @OpsCommander from auto-merging pull requests without oversight.
+
+### Two-Level Configuration
+
+**1. Project-Level Policy** (`config/project_config.yaml`)
+
+Controls the global enforcement level:
+
+```yaml
+require_human_merge_approval: always  # Options: always | workflow-based | never
+```
+
+- `always` (Recommended) - Human approval REQUIRED for all PRs, overrides workflow settings
+- `workflow-based` - Workflow YAML controls per-workflow/per-step behavior
+- `never` - Allow auto-merge (NOT recommended for production)
+
+**2. Workflow-Level Preference** (`agents/workflows/ghabs_org_workflow.yaml`)
+
+Only applies when project policy is `workflow-based`:
+
+```yaml
+monitoring:
+  require_human_merge_approval: true  # Workflow preference
+```
+
+### Precedence Rules
+
+| Project Config | Workflow Config | Result |
+|----------------|-----------------|---------|
+| `always` | [ignored] | Human approval REQUIRED |
+| `workflow-based` | `true` | Human approval required |
+| `workflow-based` | `false` | Auto-merge allowed |
+| `never` | [ignored] | Auto-merge ALWAYS allowed |
+
+### @OpsCommander Behavior
+
+When human approval is required, @OpsCommander:
+1. Posts deployment readiness comment: 🚀 Deployment ready. PR requires human review before merge
+2. Waits for explicit human approval
+3. NEVER executes `github:merge_pr` tool automatically
+
+See skill definitions:
+- [wlbl-agents/.agent/skills/ops_commander/SKILL.md](../agents/wlbl-agents/.agent/skills/ops_commander/SKILL.md)
+- [casit-agents/.agent/skills/ops_commander/SKILL.md](../agents/casit-agents/.agent/skills/ops_commander/SKILL.md)
+- [bm-agents/.agent/skills/ops_commander/SKILL.md](../agents/bm-agents/.agent/skills/ops_commander/SKILL.md)
+
+### Rationale
+
+Prevents accidental deployments from:
+- Unreviewed code changes
+- Security vulnerabilities
+- Breaking changes without human oversight
+- Compliance violations
+
+Maintains human-in-the-loop for critical decision points while preserving automation for routine tasks.
+
 ## Configuration
 
 ### Environment Variables (`vars.secret`)

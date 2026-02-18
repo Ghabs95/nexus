@@ -1,5 +1,13 @@
 # Global workflow definition path (YAML workflow file - single source of truth)
-workflow_definition_path: /home/ubuntu/git/ghabs/agents/workflows/ghabs_org_workflow.yaml
+workflow_definition_path: ghabs/agents/workflows/ghabs_org_workflow.yaml
+
+# PR Merge Policy (project-level enforcement)
+# Controls whether @OpsCommander can auto-merge PRs or must wait for human approval
+# Options:
+#   - always: Human approval REQUIRED for all PRs (overrides workflow settings)
+#   - workflow-based: Workflow YAML controls per-workflow/per-step merge behavior
+#   - never: Auto-merge allowed (NOT recommended for production)
+require_human_merge_approval: always  # Enforce human review for all projects
 
 # Global AI tool preferences (which AI tool each agent uses)
 ai_tool_preferences:
@@ -15,6 +23,7 @@ ai_tool_preferences:
   FrontendLead: copilot
   BackendLead: copilot
   MobileLead: copilot
+  Developer: copilot  # Generic developer agent for quick implementations
 
 # Project configurations
 case_italia:
@@ -34,12 +43,15 @@ biome:
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
-  workspace: ghabs/nexus-core
+  workspace: ghabs
   github_repo: Ghabs95/nexus-core
-  # Uncomment to use a different workflow definition for this project
-  workflow_definition_path: /home/ubuntu/git/ghabs/nexus-core/examples/workflows/development_workflow.yaml
-  ai_tool_preferences: # Override global AI tool preferences
-    Copilot: copilot
-    Architect: copilot
-    QAGuard: copilot
-    OpsCommander: gemini
+  # Uses nexus-core example workflow (different from org workflow)
+  workflow_definition_path: ghabs/nexus-core/examples/workflows/development_workflow.yaml
+  # AI tool preferences for nexus-core example agents
+  ai_tool_preferences:
+    triage: copilot          # Triage agent - issue classification
+    design: copilot          # Design agent - technical proposals
+    debug: copilot           # Debug agent - root cause analysis
+    code_reviewer: copilot   # Code review agent - PR reviews
+    docs: gemini             # Docs agent - documentation updates
+    summarizer: gemini       # Summarizer agent - workflow summaries
