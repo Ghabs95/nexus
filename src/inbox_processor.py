@@ -20,7 +20,7 @@ from config import (
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
-from agent_launcher import invoke_copilot_agent
+from agent_launcher import invoke_copilot_agent, is_recent_launch
 from ai_orchestrator import get_orchestrator
 from nexus_core_helpers import create_workflow_for_issue_sync
 from error_handling import (
@@ -186,18 +186,35 @@ def _iter_project_configs():
             yield project_name, cfg
 
 
-def _resolve_repo_for_issue(issue_num: str) -> str:
+def _resolve_project_from_path(summary_path: str) -> str:
+    """Resolve project name from a completion_summary file path.
+
+    Matches the path against configured project workspaces.
+    Returns project key or empty string if no match.
+    """
+    for key, cfg in _iter_project_configs():
+        workspace = cfg.get("workspace")
+        if not workspace:
+            continue
+        workspace_abs = os.path.join(BASE_DIR, workspace)
+        if summary_path.startswith(workspace_abs):
+            return key
+    return ""
+
+
+def _resolve_repo_for_issue(issue_num: str, default_project: str = "nexus") -> str:
     """Resolve repo for issue by reading task file location from issue body."""
     try:
         result = run_command_with_retry(
-            ["gh", "issue", "view", str(issue_num), "--repo", get_issue_repo(),
+            ["gh", "issue", "view", str(issue_num), "--repo", get_github_repo(default_project),
              "--json", "body"],
             max_attempts=2, timeout=10
         )
         body = _extract_body_from_result(result.stdout)
         task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
         if not task_file_match:
-            return get_issue_repo()
+            logger.debug(f"No task file in issue #{issue_num} body, returning default repo")
+            return get_github_repo(default_project)
 
         task_file = task_file_match.group(1)
         for key, cfg in _iter_project_configs():
@@ -206,11 +223,13 @@ def _resolve_repo_for_issue(issue_num: str) -> str:
                 continue
             workspace_abs = os.path.join(BASE_DIR, workspace)
             if task_file.startswith(workspace_abs):
+                logger.debug(f"Issue #{issue_num} resolved to project '{key}'")
                 return get_github_repo(key)
+        logger.debug(f"Issue #{issue_num} task file doesn't match any project workspace")
     except Exception as e:
-        logger.warning(f"Failed to resolve repo for issue #{issue_num}: {e}")
+        logger.debug(f"Could not resolve repo for issue #{issue_num} (will use default): {e}")
 
-    return get_issue_repo()
+    return get_github_repo(default_project)
 
 
 def _build_completion_comment(completion_data: dict) -> str:
@@ -252,90 +271,147 @@ def _build_completion_comment(completion_data: dict) -> str:
 
 
 def _post_completion_comments_from_logs() -> None:
-    """Post GitHub comments when agent logs show completion.
+    """Post GitHub comments when agents write completion_summary JSON files.
     
-    Looks for completion_summary.json in log directory. Falls back to pattern
-    matching on log content if JSON not found.
+    Scans log directories for completion_summary_{issue}.json files.
+    Only posts when JSON exists — no log pattern guessing.
     """
     global completion_comments
     nexus_dir_name = get_nexus_dir_name()
-    log_files = glob.glob(
-        os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
-        recursive=True
+    summary_files = glob.glob(
+        os.path.join(
+            BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**",
+            "completion_summary_*.json"
+        ),
+        recursive=True,
     )
 
-    completion_patterns = [
-        r"Step \d+ Complete",
-        r"✅.*(?:ready|complete|done)",
-        r"(?:Technical|[A-Z].*?) (?:assessment|work|review) (?:complete|done)",
-        r"Testing complete",
-        r"Task Complete",
-        r"Ready for @\w+",
-    ]
-
-    for log_file in log_files:
-        match = re.search(r"copilot_(\d+)_", os.path.basename(log_file))
+    for summary_path in summary_files:
+        match = re.search(r"completion_summary_(\d+)\.json$", summary_path)
         if not match:
             continue
         issue_num = match.group(1)
-        comment_key = f"{issue_num}:{os.path.basename(log_file)}"
-        if comment_key in completion_comments:
-            continue
 
         try:
-            # Skip if process still running
+            # Skip if agent for this issue is still running
             check_running = subprocess.run(
-                ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
-                text=True, capture_output=True, timeout=5
+                ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
+                text=True, capture_output=True, timeout=5,
             )
             if check_running.stdout:
                 continue
 
-            with open(log_file, "r") as f:
-                log_content = f.read()
+            with open(summary_path, "r") as f:
+                completion_data = json.load(f)
 
-            # Check for completion summary JSON in same directory
-            log_dir = os.path.dirname(log_file)
-            summary_json_path = os.path.join(log_dir, f"completion_summary_{issue_num}.json")
-            completion_data = None
-            
-            if os.path.exists(summary_json_path):
-                try:
-                    with open(summary_json_path, "r") as f:
-                        completion_data = json.load(f)
-                        logger.info(f"📋 Loaded completion summary for issue #{issue_num}")
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse completion_summary.json for #{issue_num}: {e}")
-            
-            # Fallback: check for completion pattern in log
-            if not completion_data:
-                completed = any(
-                    re.search(pattern, log_content, re.IGNORECASE)
-                    for pattern in completion_patterns
-                )
-                if not completed:
-                    continue
-                # Create minimal data from log content
-                completion_data = {"summary": "Agent work completed"}
+            # Key includes agent_type so each step in the chain gets processed
+            agent_type = completion_data.get("agent_type", "unknown")
+            comment_key = f"{issue_num}:{agent_type}:{os.path.basename(summary_path)}"
+            if comment_key in completion_comments:
+                continue
 
-            repo = _resolve_repo_for_issue(issue_num)
+            logger.info(f"📋 Found completion summary for issue #{issue_num} ({agent_type})")
+
+            project_name = _resolve_project_from_path(summary_path)
+            if project_name:
+                repo = get_github_repo(project_name)
+            else:
+                repo = _resolve_repo_for_issue(issue_num)
+
             comment_body = _build_completion_comment(completion_data)
             result = subprocess.run(
-                ["gh", "issue", "comment", str(issue_num), "--repo", repo, "--body", comment_body],
-                text=True, capture_output=True, timeout=15
+                ["gh", "issue", "comment", str(issue_num),
+                 "--repo", repo, "--body", comment_body],
+                text=True, capture_output=True, timeout=15,
             )
             if result.returncode != 0:
-                logger.error(
-                    f"Failed to post completion comment for issue #{issue_num}: "
+                logger.warning(
+                    f"Could not post comment for issue #{issue_num} on {repo}: "
                     f"{result.stderr or result.stdout}"
                 )
                 continue
 
             completion_comments[comment_key] = time.time()
             save_completion_comments(completion_comments)
-            logger.info(f"📝 Posted completion comment for issue #{issue_num}")
+            completed_agent = completion_data.get("agent_type", "unknown")
+            logger.info(f"📝 Posted completion comment for issue #{issue_num} ({completed_agent})")
+
+            # --- Auto-chain to next agent ---
+            next_agent = completion_data.get("next_agent", "").strip()
+            if not next_agent:
+                logger.info(f"✅ No next_agent in completion — workflow done for issue #{issue_num}")
+                send_telegram_alert(
+                    f"✅ **Workflow Complete**\n\n"
+                    f"Issue: #{issue_num}\n"
+                    f"Last agent: `{completed_agent}`\n\n"
+                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
+                )
+                continue
+
+            if is_recent_launch(issue_num):
+                logger.info(f"⏭️ Skipping auto-chain for issue #{issue_num} — agent recently launched")
+                continue
+
+            if not project_name:
+                logger.warning(f"Cannot auto-chain issue #{issue_num}: could not resolve project")
+                continue
+
+            proj_cfg = PROJECT_CONFIG.get(project_name, {})
+            agents_dir = proj_cfg.get("agents_dir", "")
+            workspace = proj_cfg.get("workspace", "")
+            if not agents_dir or not workspace:
+                logger.warning(f"Cannot auto-chain issue #{issue_num}: missing agents_dir/workspace for {project_name}")
+                continue
+
+            agents_abs = os.path.join(BASE_DIR, agents_dir)
+            workspace_abs = os.path.join(BASE_DIR, workspace)
+            issue_url = f"https://github.com/{repo}/issues/{issue_num}"
+
+            continuation_prompt = (
+                f"You are a {next_agent} agent. The previous step ({completed_agent}) is complete.\n\n"
+                f"Your task: Begin your step in the workflow.\n"
+                f"Read recent GitHub comments to understand what's been completed.\n"
+                f"Then perform your assigned work and post a status update."
+            )
+
+            pid, tool_used = invoke_copilot_agent(
+                agents_dir=agents_abs,
+                workspace_dir=workspace_abs,
+                issue_url=issue_url,
+                tier_name="fast-track",
+                task_content="",
+                continuation=True,
+                continuation_prompt=continuation_prompt,
+                log_subdir=project_name,
+                agent_type=next_agent,
+                project_name=project_name
+            )
+
+            if pid:
+                logger.info(
+                    f"🔗 Auto-chained {completed_agent} → {next_agent} "
+                    f"for issue #{issue_num} (PID: {pid}, tool: {tool_used})"
+                )
+                send_telegram_alert(
+                    f"🔗 **Agent Transition**\n\n"
+                    f"Issue: #{issue_num}\n"
+                    f"Completed: `{completed_agent}`\n"
+                    f"Launched: `{next_agent}` (PID: {pid})\n\n"
+                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
+                )
+            else:
+                logger.error(f"❌ Failed to auto-chain to {next_agent} for issue #{issue_num}")
+                send_telegram_alert(
+                    f"❌ **Auto-chain Failed**\n\n"
+                    f"Issue: #{issue_num}\n"
+                    f"Completed: `{completed_agent}`\n"
+                    f"Failed to launch: `{next_agent}`\n\n"
+                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
+                )
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid completion_summary.json for issue #{issue_num}: {e}")
         except Exception as e:
-            logger.error(f"Error posting completion comment for issue #{issue_num}: {e}")
+            logger.warning(f"Error processing completion summary for issue #{issue_num}: {e}")
 
 
 def _get_workflow_definition_path(project_name: str) -> str:
@@ -747,7 +823,7 @@ def check_completed_agents():
                             # CRITICAL: Check for duplicate launches
                             # Check 1: Running processes
                             check_result = subprocess.run(
-                                ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
+                                ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
                                 text=True, capture_output=True
                             )
                             if check_result.stdout:
@@ -857,7 +933,8 @@ def check_completed_agents():
                                     continuation=True,
                                     continuation_prompt=continuation_prompt,
                                     log_subdir=project_root,
-                                    agent_type=next_agent
+                                    agent_type=next_agent,
+                                    project_name=project_root
                                 )
                                 
                                 if pid:
@@ -936,7 +1013,7 @@ def check_completed_agents():
             
             # Check if process is still running
             result = subprocess.run(
-                ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
+                ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
                 text=True, capture_output=True
             )
             
@@ -1068,7 +1145,7 @@ def check_completed_agents():
                         # CRITICAL: Check for duplicate launches
                         # Check 1: Running processes
                         check_running = subprocess.run(
-                            ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
+                            ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
                             text=True, capture_output=True
                         )
                         if check_running.stdout:
@@ -1114,7 +1191,8 @@ def check_completed_agents():
                             continuation=True,
                             continuation_prompt=continuation_prompt,
                             log_subdir=project_root,
-                            agent_type=next_agent
+                            agent_type=next_agent,
+                            project_name=project_root
                         )
                         
                         if pid:
@@ -1381,7 +1459,8 @@ def process_file(filepath):
                     tier_name="fast-track",  # Default tier for webhook tasks
                     task_content=content,
                     log_subdir=project_name,
-                    agent_type=agent_type
+                    agent_type=agent_type,
+                    project_name=project_name
                 )
                 
                 if pid:
@@ -1515,7 +1594,8 @@ def process_file(filepath):
                 tier_name=tier_name,
                 task_content=content,
                 log_subdir=project_name,
-                agent_type=initial_agent
+                agent_type=initial_agent,
+                project_name=project_name
             )
 
             if pid:

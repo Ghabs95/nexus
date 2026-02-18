@@ -31,6 +31,121 @@ from ai_orchestrator import get_orchestrator, ToolUnavailableError
 logger = logging.getLogger(__name__)
 
 
+def _get_workflow_steps_for_prompt(project_name: str = None) -> str:
+    """Read the configured workflow YAML and return a formatted checklist
+    of steps with agent_type names for embedding in agent prompts.
+    
+    This ensures agents use the correct agent type names from the workflow
+    definition, not old hardcoded names from other workflow files.
+    """
+    # Resolve workflow path from project config
+    workflow_path = ""
+    if project_name:
+        project_cfg = PROJECT_CONFIG.get(project_name, {})
+        if isinstance(project_cfg, dict):
+            workflow_path = project_cfg.get("workflow_definition_path", "")
+
+    if not workflow_path:
+        workflow_path = PROJECT_CONFIG.get("workflow_definition_path", "")
+
+    if workflow_path and not os.path.isabs(workflow_path):
+        workflow_path = os.path.join(BASE_DIR, workflow_path)
+
+    if not workflow_path or not os.path.exists(workflow_path):
+        return ""
+
+    try:
+        with open(workflow_path, "r") as f:
+            wf = yaml.safe_load(f)
+
+        steps = wf.get("steps", [])
+        if not steps:
+            return ""
+
+        lines = [f"**Workflow Steps (from {os.path.basename(workflow_path)}):**\n"]
+        for i, step in enumerate(steps, 1):
+            agent_type = step.get("agent_type", "unknown")
+            name = step.get("name", step.get("id", f"Step {i}"))
+            desc = step.get("description", "")
+            # Skip router steps
+            if agent_type == "router":
+                continue
+            lines.append(f"- {i}. **{name}** — `{agent_type}` : {desc}")
+
+        lines.append(
+            "\n**CRITICAL:** Use ONLY the agent_type names listed above "
+            "(e.g., `triage`, `design`, `debug`, `code_reviewer`, `docs`, `summarizer`).\n"
+            "DO NOT use old agent names like ProjectLead, Atlas, QAGuard, OpsCommander, Architect, Scribe.\n"
+            "DO NOT read or reference any other workflow YAML files in the workspace."
+        )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Could not read workflow YAML for prompt: {e}")
+        return ""
+
+
+def _get_comment_and_summary_instructions(issue_url: str, agent_type: str, project_name: str = None) -> str:
+    """Return prompt instructions telling the agent to post a structured GitHub comment
+    and write a completion_summary JSON file when done.
+    
+    This is the key mechanism that ensures agents produce git-native output:
+    structured GitHub comments (like the old auto-chain system) and machine-readable
+    completion data for workflow progression.
+    """
+    issue_match = re.search(r"/issues/(\d+)", issue_url or "")
+    issue_num = issue_match.group(1) if issue_match else "UNKNOWN"
+
+    workflow_steps = _get_workflow_steps_for_prompt(project_name)
+
+    return (
+        f"**WHEN YOU FINISH — TWO MANDATORY DELIVERABLES:**\n\n"
+        f"{workflow_steps}\n\n"
+        f"## Deliverable 1: Post a structured GitHub comment\n\n"
+        f"Use `gh issue comment {issue_num} --repo <REPO> --body '<comment>'` to post a **structured** comment.\n"
+        f"The comment MUST follow this format (adapt sections to your work):\n\n"
+        f"```\n"
+        f"## 🔍 <Step Name> Complete — <agent_type>\n\n"
+        f"**Severity:** <Critical|High|Medium|Low>\n"
+        f"**Target Sub-Repo:** `<repo-name>`\n"
+        f"**Workflow:** <workflow type>\n\n"
+        f"### Findings\n\n"
+        f"<Describe what you analyzed/discovered. Use bullet points for key findings:>\n"
+        f"- Finding 1\n"
+        f"- Finding 2\n"
+        f"- Finding 3\n\n"
+        f"### SOP Checklist\n\n"
+        f"Use the workflow steps above to build the checklist. Example:\n"
+        f"- [x] 1. Triage Issue — `triage` : Severity + routing ✅\n"
+        f"- [ ] 2. Create Design Proposal — `design`\n"
+        f"- [ ] 3. Summarize & Close — `summarizer`\n\n"
+        f"Ready for **@<next_agent_type>**\n"
+        f"```\n\n"
+        f"**IMPORTANT:** The comment must contain real findings from YOUR analysis, not placeholder text.\n"
+        f"Adapt the template to your role ({agent_type}). Include concrete details.\n\n"
+        f"## Deliverable 2: Write completion summary JSON\n\n"
+        f"Write a JSON file with your structured results. Use this exact command:\n\n"
+        f"```bash\n"
+        f"LOG_DIR=$(find . -path '*/.nexus/tasks/logs' -type d 2>/dev/null | head -1)\n"
+        f"if [ -z \"$LOG_DIR\" ]; then LOG_DIR=\".nexus/tasks/logs\"; mkdir -p \"$LOG_DIR\"; fi\n"
+        f"cat > \"$LOG_DIR/completion_summary_{issue_num}.json\" << 'NEXUS_EOF'\n"
+        f"{{\n"
+        f"  \"status\": \"complete\",\n"
+        f"  \"agent_type\": \"{agent_type}\",\n"
+        f"  \"summary\": \"<one-line summary of what you did>\",\n"
+        f"  \"key_findings\": [\n"
+        f"    \"<finding 1>\",\n"
+        f"    \"<finding 2>\"\n"
+        f"  ],\n"
+        f"  \"next_agent\": \"<agent_type from workflow steps above>\"\n"
+        f"}}\n"
+        f"NEXUS_EOF\n"
+        f"```\n\n"
+        f"Replace the `<placeholder>` values with real data from your analysis.\n\n"
+        f"After posting the comment and writing the JSON, **EXIT immediately**.\n"
+        f"DO NOT attempt to invoke or launch any other agent."
+    )
+
+
 def _normalize_agent_key(agent_name: str) -> str:
     """Normalize agent name for matching YAML metadata.name values."""
     name = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", agent_name)
@@ -201,7 +316,7 @@ def is_recent_launch(issue_number):
     """
     # Check 1: Running processes
     check_result = subprocess.run(
-        ["pgrep", "-af", f"copilot.*issues/{issue_number}"],
+        ["pgrep", "-af", f"copilot.*issues/{issue_number}[^0-9]|copilot.*issues/{issue_number}$"],
         text=True, capture_output=True
     )
     if check_result.stdout:
@@ -251,7 +366,8 @@ def invoke_copilot_agent(
     continuation_prompt=None,
     use_gemini=False,
     log_subdir=None,
-    agent_type="triage"
+    agent_type="triage",
+    project_name=None
 ):
     """Invokes an AI agent on the agents directory to process the task.
 
@@ -268,6 +384,7 @@ def invoke_copilot_agent(
         continuation_prompt: Custom prompt for continuation
         use_gemini: If True, prefer Gemini CLI; if False, prefer Copilot (default: False)
         agent_type: Agent type to route to (triage, design, debug, etc.)
+        project_name: Project name for resolving workflow definition
         
     Returns:
         Tuple of (PID of launched process or None if failed, tool_used: str)
@@ -299,15 +416,7 @@ def invoke_copilot_agent(
                 f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
                 f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
                 f"⚠️  Violating these rules can break production and cause team disruption\n\n"
-                f"When you finish your work:\n"
-                f"1. Commit and push all changes to the target branch\n"
-                f"2. Update the task file with your results\n"
-                f"3. Post a GitHub comment summarizing your work and confirming the push\n"
-                f"4. END YOUR COMMENT with a clear completion marker:\n\n"
-                f"   **Required format:** 'Ready for @NextAgentName'\n"
-                f"   Example: 'Ready for @ProductDesigner to begin UX design'\n\n"
-                f"5. Exit when done - DO NOT attempt to invoke the next agent\n\n"
-                f"The system will automatically detect your completion and launch the next agent.\n\n"
+                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name)}\n\n"
                 f"Task context:\n{task_content}"
             )
         else:
@@ -319,7 +428,7 @@ def invoke_copilot_agent(
                 f"Tier: {tier_name}\n"
                 f"Workflow: /{workflow_name}\n\n"
                 f"{base_prompt}\n\n"
-                f"Complete your step and end with: 'Ready for @NextAgent'\n\n"
+                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name)}\n\n"
                 f"Task content:\n{task_content}"
             )
     else:
@@ -329,21 +438,18 @@ def invoke_copilot_agent(
             f"Issue: {issue_url}\n"
             f"Tier: {tier_name}\n"
             f"Workflow: /{workflow_name}\n\n"
-            f"**YOUR JOB:** Triage and route only. DO NOT try to implement or invoke other agents.\n\n"
+            f"**YOUR JOB:** Analyze, triage, and route. DO NOT try to implement or invoke other agents.\n\n"
             f"REQUIRED ACTIONS:\n"
-            f"1. Analyze the task requirements\n"
-            f"2. Identify which sub-repo(s) are affected\n"
-            f"3. Update the task file with triage details\n"
-            f"4. Post a GitHub comment showing:\n"
-            f"   - Task severity\n"
-            f"   - Target sub-repo(s)\n"
-            f"   - Which agent should handle it next\n"
-            f"   - Use format: 'Ready for @NextAgent' (e.g., 'Ready for @Atlas')\n"
-            f"5. **EXIT** - The system will auto-route to the next agent\n\n"
+            f"1. Read the GitHub issue body and understand the task\n"
+            f"2. Analyze the codebase to assess scope and complexity\n"
+            f"3. Identify which sub-repo(s) are affected\n"
+            f"4. Determine severity (Critical/High/Medium/Low)\n"
+            f"5. Determine which agent type should handle it next\n\n"
             f"**DO NOT:**\n"
             f"❌ Read other agent configuration files\n"
             f"❌ Use any 'invoke', 'task', or 'run tool' to start other agents\n"
             f"❌ Try to implement the feature yourself\n\n"
+            f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name)}\n\n"
             f"Task details:\n{task_content}"
         )
 
@@ -525,7 +631,8 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         continuation=True,
         continuation_prompt=continuation_prompt,
         log_subdir=project_root,
-        agent_type=next_agent
+        agent_type=next_agent,
+        project_name=project_root
     )
     
     if pid:

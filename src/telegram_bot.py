@@ -1996,7 +1996,8 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         issue_url=issue_url,
         tier_name=tier_name,
         task_content=content,
-        log_subdir=log_subdir
+        log_subdir=log_subdir,
+        project_name=log_subdir
     )
 
     if pid:
@@ -2021,7 +2022,7 @@ def find_agent_pid_for_issue(issue_num):
     try:
         # Search for copilot processes with the issue reference
         result = subprocess.run(
-            ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
+            ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
             text=True, capture_output=True
         )
         if result.stdout:
@@ -2126,7 +2127,8 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         continuation=True,
         continuation_prompt=continuation_prompt,
         log_subdir=log_subdir,
-        agent_type=agent_type
+        agent_type=agent_type,
+        project_name=log_subdir
     )
 
     if pid:
@@ -2657,7 +2659,8 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task_content=content,
             continuation=True,
             continuation_prompt=continuation_prompt,
-            log_subdir=log_subdir
+            log_subdir=log_subdir,
+            project_name=log_subdir
         )
 
         if pid:
