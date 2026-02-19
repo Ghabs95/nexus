@@ -72,7 +72,8 @@ def _validate_config_with_project_config(config: dict) -> None:
         'workflow_chains',
         'final_agents',
         'require_human_merge_approval',  # PR merge approval policy (deprecated - use nexus-core approval gates)
-        'github_issue_triage'  # GitHub issue → triage agent routing configuration
+        'github_issue_triage',  # GitHub issue → triage agent routing configuration
+        'shared_agents_dir',  # Shared org-level agent YAML definitions directory
     }
     
     for project, proj_config in config.items():
@@ -158,7 +159,6 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # GitHub webhook secret for signat
 # --- AI ORCHESTRATOR CONFIGURATION ---
 # These are now loaded from project_config.yaml
 # Get defaults from config, with per-project overrides supported
-
 def get_ai_tool_preferences(project: str = "nexus") -> dict:
     """Get AI tool preferences for a project.
     
@@ -188,102 +188,8 @@ def get_ai_tool_preferences(project: str = "nexus") -> dict:
     return {}
 
 
-def get_workflow_chains(project: str = "nexus") -> dict:
-    """Get workflow chains for a project.
-    
-    Priority:
-    1. Project-specific workflow_chains in PROJECT_CONFIG
-    2. Global workflow_chains in PROJECT_CONFIG
-    3. Built-in fallback (for backward compatibility)
-    
-    Args:
-        project: Project name (default: "nexus")
-        
-    Returns:
-        Dictionary of workflow tiers and their agent steps
-    """
-    config = _get_project_config()
-    
-    # Check project-specific override
-    if project in config:
-        proj_config = config[project]
-        if isinstance(proj_config, dict) and "workflow_chains" in proj_config:
-            return proj_config["workflow_chains"]
-    
-    # Fall back to global
-    if "workflow_chains" in config:
-        return config["workflow_chains"]
-    
-    # Built-in fallback (for backward compatibility with older configs)
-    return {
-        "full": [
-            ("ProjectLead", "Vision & Scope"),
-            ("Atlas", "Technical Feasibility"),
-            ("Architect", "Architecture Design"),
-            ("ProductDesigner", "UX Design"),
-            ("Tier2Lead", "Implementation"),
-            ("QAGuard", "Quality Gate"),
-            ("Privacy", "Compliance Gate"),
-            ("OpsCommander", "Deployment"),
-            ("Scribe", "Documentation")
-        ],
-        "shortened": [
-            ("ProjectLead", "Triage"),
-            ("Tier2Lead", "Root Cause Analysis"),
-            ("Tier2Lead", "Fix"),
-            ("QAGuard", "Verify"),
-            ("OpsCommander", "Deploy"),
-            ("Scribe", "Document")
-        ],
-        "fast-track": [
-            ("ProjectLead", "Triage"),
-            ("Copilot", "Implementation"),
-            ("QAGuard", "Verify"),
-            ("OpsCommander", "Deploy")
-        ]
-    }
-
-
-def get_final_agents(project: str = "nexus") -> dict:
-    """Get final agents mapping for a project.
-    
-    Maps workflow tier names to final agent names (for issue closing).
-    
-    Priority:
-    1. Project-specific final_agents in PROJECT_CONFIG
-    2. Global final_agents in PROJECT_CONFIG
-    3. Built-in fallback (for backward compatibility)
-    
-    Args:
-        project: Project name (default: "nexus")
-        
-    Returns:
-        Dictionary mapping tier names to final agent names
-    """
-    config = _get_project_config()
-    
-    # Check project-specific override
-    if project in config:
-        proj_config = config[project]
-        if isinstance(proj_config, dict) and "final_agents" in proj_config:
-            return proj_config["final_agents"]
-    
-    # Fall back to global
-    if "final_agents" in config:
-        return config["final_agents"]
-    
-    # Built-in fallback
-    return {
-        "full": "Scribe",
-        "shortened": "Scribe",
-        "fast-track": "OpsCommander"
-    }
-
-
 # Caching wrappers for lazy-loading on first access (support monkeypatch in tests)
 _ai_tool_preferences_cache = {}
-_workflow_chains_cache = {}
-_final_agents_cache = {}
 
 
 class _LazyConfigWrapper:
@@ -331,8 +237,6 @@ class _LazyConfigWrapper:
 # Create lazy-loading wrappers (for backward compatibility with code that accesses these directly)
 # Note: These will get the global defaults from project_config.yaml when first accessed
 AI_TOOL_PREFERENCES = _LazyConfigWrapper(get_ai_tool_preferences, _ai_tool_preferences_cache, "nexus")
-WORKFLOW_CHAIN = _LazyConfigWrapper(get_workflow_chains, _workflow_chains_cache, "nexus")
-FINAL_AGENTS = _LazyConfigWrapper(get_final_agents, _final_agents_cache, "nexus")
 
 # Orchestrator configuration (lazy-loaded)
 _orchestrator_config_cache = {}
@@ -513,25 +417,6 @@ def validate_configuration():
     
     if not ALLOWED_USER_ID:
         warnings.append("ALLOWED_USER is missing! Bot will not respond to anyone.")
-    
-    # Validate WORKFLOW_CHAIN structure
-    try:
-        required_tiers = ['full', 'shortened', 'fast-track']
-        for tier in required_tiers:
-            if tier not in WORKFLOW_CHAIN:
-                errors.append(f"WORKFLOW_CHAIN missing required tier: '{tier}'")
-            elif not isinstance(WORKFLOW_CHAIN[tier], list) or len(WORKFLOW_CHAIN[tier]) == 0:
-                errors.append(f"WORKFLOW_CHAIN['{tier}'] must be a non-empty list")
-            else:
-                # Validate each step is a tuple
-                for idx, step in enumerate(WORKFLOW_CHAIN[tier]):
-                    if not isinstance(step, tuple) or len(step) != 2:
-                        errors.append(
-                            f"WORKFLOW_CHAIN['{tier}'][{idx}] must be tuple (agent_name, description), "
-                            f"got {type(step).__name__}"
-                        )
-    except Exception as e:
-        errors.append(f"WORKFLOW_CHAIN validation error: {e}")
     
     # Validate PROJECT_CONFIG (when loaded)
     try:

@@ -116,6 +116,31 @@ def handle_issue_opened(payload):
     if action != "opened":
         return {"status": "ignored", "reason": f"action is {action}, not opened"}
     
+    # Skip issues created by Nexus itself (inbox processor → create_github_issue).
+    # These already have an agent launched via the standard task processing path.
+    # Detect via workflow labels that create_github_issue() always applies.
+    workflow_labels = [l for l in issue_labels if l.startswith("workflow:")]
+    if workflow_labels:
+        logger.info(f"⏭️ Skipping self-created issue #{issue_number} (has workflow label: {workflow_labels})")
+        return {"status": "ignored", "reason": "self-created issue (has workflow label)"}
+    
+    # Also skip if an active task file already exists for this issue
+    try:
+        import os
+        from config import PROJECT_CONFIG, BASE_DIR
+        from config import get_tasks_active_dir
+        for _key, _cfg in PROJECT_CONFIG.items():
+            if isinstance(_cfg, dict) and _cfg.get("github_repo") == repo_name:
+                _ws = os.path.join(BASE_DIR, _cfg.get("workspace", ""))
+                _active = get_tasks_active_dir(_ws)
+                _task = os.path.join(_active, f"issue_{issue_number}.md")
+                if os.path.exists(_task):
+                    logger.info(f"⏭️ Skipping issue #{issue_number} — active task file already exists: {_task}")
+                    return {"status": "ignored", "reason": "task file already exists"}
+                break
+    except Exception as e:
+        logger.warning(f"Could not check for existing task file: {e}")
+    
     # Determine which agent type to route to
     try:
         from config import PROJECT_CONFIG, get_inbox_dir

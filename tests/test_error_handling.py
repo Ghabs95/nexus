@@ -12,7 +12,6 @@ from error_handling import (
     RetryExhaustedError,
     ConfigurationError,
     validate_required_env_vars,
-    validate_workflow_structure,
     format_error_for_user,
     safe_file_read,
     safe_file_write
@@ -127,38 +126,6 @@ class TestValidation:
         
         with pytest.raises(ConfigurationError):
             validate_required_env_vars(["TEST_VAR1", "MISSING_VAR"])
-    
-    def test_validate_workflow_structure_valid(self):
-        """Test valid workflow structure validation."""
-        valid_workflow = {
-            "full": [("Agent1", "Description1"), ("Agent2", "Description2")],
-            "shortened": [("Agent1", "Description1")],
-            "fast-track": [("Agent1", "Description1")]
-        }
-        
-        # Should not raise
-        validate_workflow_structure(valid_workflow)
-    
-    def test_validate_workflow_structure_missing_tier(self):
-        """Test validation failure when tier is missing."""
-        invalid_workflow = {
-            "full": [("Agent1", "Description1")],
-            # Missing "shortened" and "fast-track"
-        }
-        
-        with pytest.raises(ConfigurationError):
-            validate_workflow_structure(invalid_workflow)
-    
-    def test_validate_workflow_structure_invalid_step(self):
-        """Test validation failure when step format is wrong."""
-        invalid_workflow = {
-            "full": ["Agent1"],  # Should be tuple, not string
-            "shortened": [("Agent1", "Description1")],
-            "fast-track": [("Agent1", "Description1")]
-        }
-        
-        with pytest.raises(ConfigurationError):
-            validate_workflow_structure(invalid_workflow)
 
 
 class TestErrorFormatting:

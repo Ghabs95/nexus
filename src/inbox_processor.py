@@ -14,7 +14,6 @@ import yaml
 # Nexus Core framework imports
 from nexus.core.completion import (
     CompletionSummary,
-    build_completion_comment,
     scan_for_completions,
 )
 
@@ -28,7 +27,7 @@ from config import (
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
-from agent_launcher import invoke_copilot_agent, is_recent_launch
+from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
 from ai_orchestrator import get_orchestrator
 from nexus_core_helpers import create_workflow_for_issue_sync, get_git_platform, get_workflow_definition_path
 from error_handling import (
@@ -268,8 +267,7 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
                 pr_body = (
                     f"Automated PR for issue #{issue_num}.\n\n"
                     f"Workflow completed by Nexus agent chain.\n"
-                    f"Last agent: `{last_agent}`\n\n"
-                    f"Closes #{issue_num}"
+                    f"Last agent: `{last_agent}`"
                 )
                 pr_result = asyncio.run(platform.create_pr_from_changes(
                     repo_dir=git_dir,
@@ -313,10 +311,11 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
 
 
 def _post_completion_comments_from_logs() -> None:
-    """Post GitHub comments when agents write completion_summary JSON files.
-    
-    Uses nexus-core's scan_for_completions() to detect completion files,
-    then handles GitHub posting and auto-chaining (app-specific logic).
+    """Detect agent completions and auto-chain to the next workflow step.
+
+    Uses nexus-core's scan_for_completions() to detect completion files.
+    Agents post their own rich GitHub comments, so this function only handles
+    orchestration: dedup, finalization, Telegram alerts, and auto-chaining.
     """
     global completion_comments
     nexus_dir_name = get_nexus_dir_name()
@@ -342,28 +341,18 @@ def _post_completion_comments_from_logs() -> None:
             if comment_key in completion_comments:
                 continue
 
-            logger.info(f"📋 Found completion summary for issue #{issue_num} ({summary.agent_type})")
-
             project_name = _resolve_project_from_path(detection.file_path)
             if project_name:
                 repo = get_github_repo(project_name)
             else:
                 repo = _resolve_repo_for_issue(issue_num)
 
-            comment_body = build_completion_comment(summary)
-            try:
-                platform = get_git_platform(repo)
-                asyncio.run(platform.add_comment(str(issue_num), comment_body))
-            except Exception as e:
-                logger.warning(
-                    f"Could not post comment for issue #{issue_num} on {repo}: {e}"
-                )
-                continue
+            completed_agent = summary.agent_type
 
+            # Record completion (no GitHub comment — agents post their own)
             completion_comments[comment_key] = time.time()
             save_completion_comments(completion_comments)
-            completed_agent = summary.agent_type
-            logger.info(f"📝 Posted completion comment for issue #{issue_num} ({completed_agent})")
+            logger.info(f"📋 Agent completed for issue #{issue_num} ({completed_agent})")
 
             # --- Auto-chain to next agent (uses framework's is_workflow_done) ---
             if summary.is_workflow_done:
@@ -373,9 +362,10 @@ def _post_completion_comments_from_logs() -> None:
 
             next_agent = summary.next_agent.strip()
 
-            if is_recent_launch(issue_num):
-                logger.info(f"⏭️ Skipping auto-chain for issue #{issue_num} — agent recently launched")
-                continue
+            # NOTE: no is_recent_launch() check here — in the auto-chain path the
+            # just-completed agent's log file will always be "recent" (< 120s),
+            # which would falsely block the next agent.  The dedup_key check above
+            # already guarantees each completion triggers auto-chain at most once.
 
             if not project_name:
                 logger.warning(f"Cannot auto-chain issue #{issue_num}: could not resolve project")
@@ -401,6 +391,23 @@ def _post_completion_comments_from_logs() -> None:
                 f"🔗 https://github.com/{repo}/issues/{issue_num}"
             )
 
+            # Validate next_agent against workflow definition
+            workflow_path = get_workflow_definition_path(project_name)
+            tier_name = get_sop_tier_from_issue(issue_num, project_name) or "fast-track"
+            if workflow_path and os.path.exists(workflow_path):
+                try:
+                    from nexus.core.workflow import WorkflowDefinition
+                    valid_next = WorkflowDefinition.resolve_next_agents(
+                        workflow_path, completed_agent, workflow_type=tier_name
+                    )
+                    if valid_next and next_agent not in valid_next:
+                        logger.warning(
+                            f"next_agent '{next_agent}' not in valid successors {valid_next} "
+                            f"for '{completed_agent}' — proceeding anyway"
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not validate next_agent: {e}")
+
             continuation_prompt = (
                 f"You are a {next_agent} agent. The previous step ({completed_agent}) is complete.\n\n"
                 f"Your task: Begin your step in the workflow.\n"
@@ -412,7 +419,7 @@ def _post_completion_comments_from_logs() -> None:
                 agents_dir=agents_abs,
                 workspace_dir=workspace_abs,
                 issue_url=issue_url,
-                tier_name="fast-track",
+                tier_name=tier_name,
                 task_content="",
                 continuation=True,
                 continuation_prompt=continuation_prompt,
@@ -441,11 +448,15 @@ def _post_completion_comments_from_logs() -> None:
             logger.warning(f"Error processing completion summary for issue #{detection.issue_number}: {e}")
 
 
-def _get_initial_agent_from_workflow(project_name: str) -> str:
+def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "") -> str:
     """Get the first agent/agent_type from a workflow YAML definition.
 
     Delegates to nexus-core's WorkflowDefinition.from_yaml() to parse the
     workflow, then reads the first step's agent name.
+
+    Args:
+        project_name: Project name to resolve workflow path.
+        workflow_type: Tier name (full/shortened/fast-track) for multi-tier workflows.
 
     Returns empty string if workflow definition is missing or invalid.
     """
@@ -463,7 +474,7 @@ def _get_initial_agent_from_workflow(project_name: str) -> str:
         send_telegram_alert(f"Workflow definition not found: {path}")
         return ""
     try:
-        workflow = WorkflowDefinition.from_yaml(path)
+        workflow = WorkflowDefinition.from_yaml(path, workflow_type=workflow_type)
         if not workflow.steps:
             logger.error(f"Workflow definition has no steps: {path}")
             send_telegram_alert(f"Workflow definition has no steps: {path}")
@@ -831,6 +842,18 @@ def process_file(filepath):
             
             logger.info(f"📌 Webhook task for existing issue #{issue_number}, launching agent directly")
             
+            # Guard: skip if an agent was recently launched for this issue
+            # (prevents double-launch when processor creates a GH issue and the
+            # resulting webhook fires back into this path)
+            if is_recent_launch(issue_number):
+                logger.info(f"⏭️ Skipping webhook launch for issue #{issue_number} — agent recently launched")
+                # Still move file to active so it's not re-processed
+                active_dir = get_tasks_active_dir(project_root)
+                os.makedirs(active_dir, exist_ok=True)
+                new_filepath = os.path.join(active_dir, os.path.basename(filepath))
+                shutil.move(filepath, new_filepath)
+                return
+            
             # Move file to project workspace active folder
             active_dir = get_tasks_active_dir(project_root)
             os.makedirs(active_dir, exist_ok=True)
@@ -852,11 +875,14 @@ def process_file(filepath):
                         send_telegram_alert(f"Stopping launch: missing workflow for {project_name}")
                         return
                 
+                # Resolve tier from issue labels; fall back to fast-track
+                tier_name = get_sop_tier_from_issue(issue_number, project_name) or "fast-track"
+
                 pid, tool_used = invoke_copilot_agent(
                     agents_dir=agents_abs,
                     workspace_dir=workspace_abs,
                     issue_url=issue_url,
-                    tier_name="fast-track",  # Default tier for webhook tasks
+                    tier_name=tier_name,
                     task_content=content,
                     log_subdir=project_name,
                     agent_type=agent_type,

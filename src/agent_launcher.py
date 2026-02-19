@@ -6,7 +6,6 @@ in response to workflow events, whether triggered by polling (inbox processor)
 or webhooks (webhook server).
 """
 
-import glob
 import json
 import logging
 import os
@@ -16,6 +15,7 @@ import time
 import yaml
 
 # Nexus Core framework imports
+from nexus.core.agents import find_agent_yaml
 from nexus.core.completion import generate_completion_instructions
 from nexus.core.guards import LaunchGuard
 from nexus.core.workflow import WorkflowDefinition
@@ -97,11 +97,18 @@ def record_agent_launch(issue_number: str, pid: int = None) -> None:
     _launch_guard.record_launch(str(issue_number), agent_type="*", pid=pid)
 
 
-def _get_workflow_steps_for_prompt(project_name: str = None) -> str:
+def _get_workflow_steps_for_prompt(
+    project_name: str = None,
+    agent_type: str = "",
+    workflow_type: str = "",
+) -> str:
     """Read the configured workflow YAML and return a formatted checklist
     of steps with agent_type names for embedding in agent prompts.
 
     Delegates to nexus-core's WorkflowDefinition.to_prompt_context().
+    When *agent_type* is provided, the output includes an explicit directive
+    telling the agent which next_agent values are valid.
+    When *workflow_type* is provided, only the matching tier's steps are shown.
     """
     # Resolve workflow path from project config
     workflow_path = ""
@@ -119,10 +126,19 @@ def _get_workflow_steps_for_prompt(project_name: str = None) -> str:
     if not workflow_path or not os.path.exists(workflow_path):
         return ""
 
-    return WorkflowDefinition.to_prompt_context(workflow_path)
+    return WorkflowDefinition.to_prompt_context(
+        workflow_path,
+        current_agent_type=agent_type,
+        workflow_type=workflow_type,
+    )
 
 
-def _get_comment_and_summary_instructions(issue_url: str, agent_type: str, project_name: str = None) -> str:
+def _get_comment_and_summary_instructions(
+    issue_url: str,
+    agent_type: str,
+    project_name: str = None,
+    workflow_type: str = "",
+) -> str:
     """Return prompt instructions telling the agent to post a structured GitHub comment
     and write a completion_summary JSON file when done.
 
@@ -131,7 +147,9 @@ def _get_comment_and_summary_instructions(issue_url: str, agent_type: str, proje
     issue_match = re.search(r"/issues/(\d+)", issue_url or "")
     issue_num = issue_match.group(1) if issue_match else "UNKNOWN"
 
-    workflow_steps = _get_workflow_steps_for_prompt(project_name)
+    workflow_steps = _get_workflow_steps_for_prompt(
+        project_name, agent_type=agent_type, workflow_type=workflow_type
+    )
     nexus_dir = get_nexus_dir_name()
 
     return generate_completion_instructions(
@@ -142,48 +160,19 @@ def _get_comment_and_summary_instructions(issue_url: str, agent_type: str, proje
     )
 
 
-def _normalize_agent_key(agent_name: str) -> str:
-    """Normalize agent name for matching YAML metadata.name values."""
-    name = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", agent_name)
-    name = name.replace("_", "-").replace(" ", "-")
-    name = re.sub(r"-+", "-", name)
-    return name.lower()
+def _build_agent_search_dirs(agents_dir: str) -> list:
+    """Build the ordered list of directories to search for agent YAML files.
 
-
-def _find_agent_yaml(agents_dir: str, agent_type: str) -> str:
-    """Find an agent YAML definition by spec.agent_type.
-    
-    Searches for an agent where spec.agent_type matches the requested type.
-    This enables routing by abstract agent types (triage, design, debug, etc.)
-    rather than specific agent names.
+    Starts with the project-specific *agents_dir*, then appends the shared
+    org-level agents directory configured via ``shared_agents_dir`` in config.
     """
-    normalized = _normalize_agent_key(agent_type)
-    patterns = [
-        os.path.join(agents_dir, "**", "*.yaml"),
-        os.path.join(agents_dir, "**", "*.yml"),
-    ]
-    for pattern in patterns:
-        for path in glob.glob(pattern, recursive=True):
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    data = yaml.safe_load(handle)
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            if data.get("kind") != "Agent":
-                continue
-            
-            # Look for spec.agent_type field
-            spec = data.get("spec", {})
-            spec_agent_type = spec.get("agent_type", "")
-            if not spec_agent_type:
-                continue
-            
-            normalized_type = _normalize_agent_key(spec_agent_type)
-            if normalized == normalized_type:
-                return path
-    return ""
+    dirs = [agents_dir]
+    shared = PROJECT_CONFIG.get("shared_agents_dir", "")
+    if shared:
+        shared_abs = os.path.join(BASE_DIR, shared) if not os.path.isabs(shared) else shared
+        if shared_abs != agents_dir:
+            dirs.append(shared_abs)
+    return dirs
 
 
 def _get_copilot_translator_path() -> str:
@@ -203,11 +192,12 @@ def _get_copilot_translator_path() -> str:
 
 def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
     """Ensure an agent definition exists by generating it from YAML if needed."""
-    yaml_path = _find_agent_yaml(agents_dir, agent_type)
+    search_dirs = _build_agent_search_dirs(agents_dir)
+    yaml_path = find_agent_yaml(agent_type, search_dirs)
     if not yaml_path:
-        logger.error(f"Missing agent YAML for agent_type '{agent_type}' in {agents_dir}")
+        logger.error(f"Missing agent YAML for agent_type '{agent_type}' in {search_dirs}")
         send_telegram_alert(
-            f"Missing agent YAML for agent_type '{agent_type}' in {agents_dir}."
+            f"Missing agent YAML for agent_type '{agent_type}' in {search_dirs}."
         )
         return False
 
@@ -260,33 +250,21 @@ def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
 
 def get_sop_tier_from_issue(issue_number, project="nexus"):
     """Get workflow tier from issue labels.
-    
+
+    Delegates to nexus-core's GitHubPlatform.get_workflow_type_from_issue().
+
     Args:
         issue_number: GitHub issue number
         project: Project name to determine repo
-    
+
     Returns: tier_name (full/shortened/fast-track) or None
     """
+    from nexus.adapters.git.github import GitHubPlatform
+
     try:
         repo = get_github_repo(project)
-        result = run_command_with_retry(
-            ["gh", "issue", "view", str(issue_number), "--repo", repo,
-             "--json", "labels"],
-            max_attempts=2,
-            timeout=10
-        )
-        data = json.loads(result.stdout)
-        labels = [l.get("name", "") for l in data.get("labels", [])]
-        
-        for label in labels:
-            if "workflow:full" in label:
-                return "full"
-            elif "workflow:shortened" in label:
-                return "shortened"
-            elif "workflow:fast-track" in label:
-                return "fast-track"
-        
-        return None
+        platform = GitHubPlatform(repo)
+        return platform.get_workflow_type_from_issue(int(issue_number))
     except Exception as e:
         logger.error(f"Failed to get tier from issue #{issue_number} in {project}: {e}")
         return None
@@ -330,13 +308,16 @@ def invoke_copilot_agent(
         continuation: If True, this is a continuation of previous work
         continuation_prompt: Custom prompt for continuation
         use_gemini: If True, prefer Gemini CLI; if False, prefer Copilot (default: False)
-        agent_type: Agent type to route to (triage, design, debug, etc.)
+        agent_type: Agent type to route to (triage, design, analysis, etc.)
         project_name: Project name for resolving workflow definition
         
     Returns:
         Tuple of (PID of launched process or None if failed, tool_used: str)
     """
     workflow_name = get_workflow_name(tier_name)
+
+    # Map tier_name to canonical workflow_type via nexus-core
+    workflow_type = WorkflowDefinition.normalize_workflow_type(tier_name)
 
     if continuation:
         # Auto-chained continuation: use custom continuation_prompt directly
@@ -363,7 +344,7 @@ def invoke_copilot_agent(
                 f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
                 f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
                 f"⚠️  Violating these rules can break production and cause team disruption\n\n"
-                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name)}\n\n"
+                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name, workflow_type=workflow_type)}\n\n"
                 f"Task context:\n{task_content}"
             )
         else:
@@ -375,7 +356,7 @@ def invoke_copilot_agent(
                 f"Tier: {tier_name}\n"
                 f"Workflow: /{workflow_name}\n\n"
                 f"{base_prompt}\n\n"
-                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name)}\n\n"
+                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name, workflow_type=workflow_type)}\n\n"
                 f"Task content:\n{task_content}"
             )
     else:
@@ -396,7 +377,7 @@ def invoke_copilot_agent(
             f"❌ Read other agent configuration files\n"
             f"❌ Use any 'invoke', 'task', or 'run tool' to start other agents\n"
             f"❌ Try to implement the feature yourself\n\n"
-            f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name)}\n\n"
+            f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name, workflow_type=workflow_type)}\n\n"
             f"Task details:\n{task_content}"
         )
 

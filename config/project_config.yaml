@@ -1,6 +1,10 @@
 # Global workflow definition path (YAML workflow file - single source of truth)
 workflow_definition_path: ghabs/agents/workflows/ghabs_org_workflow.yaml
 
+# Shared agent YAML definitions (org-level agents used across all projects)
+# Searched as fallback when agent_type is not found in project-specific agents_dir
+shared_agents_dir: ghabs/agents/workflows/agents
+
 # VCS-agnostic inbox/tasks directory (can be .nexus, .gitlab, .gitea, etc.)
 # Relative to project workspace root
 nexus_dir: .nexus
@@ -57,14 +61,29 @@ github_issue_triage:
 #     agent_type: "triage"       # This agent handles type: triage
 #     provider_preference: null  # Will use value from ai_tool_preferences
 ai_tool_preferences:
-  # System agent types (used by github_issue_triage, workflows, etc.)
+  # Abstract agent types (used by nexus-core example workflows)
   triage: copilot          # Initial issue analysis
   debug: copilot           # Bug root cause analysis
   escalation: copilot      # Urgent issues (escalate to senior agent)
   design: copilot          # Architecture and design proposals
-  code_reviewer: copilot   # PR reviews
+  reviewer: copilot        # PR reviews
+  developer: copilot       # Code implementation
   docs: gemini             # Documentation updates (faster)
   summarizer: gemini       # Workflow summaries (faster)
+
+  # Ghabs org agent types (used by ghabs_org_workflow.yaml)
+  ceo: copilot               # Ghabs — vision & scope
+  cto: copilot               # Atlas — technical feasibility
+  business-advisor: copilot  # Business — strategic advisor
+  architect: copilot         # Architect — architecture design
+  product-designer: copilot  # ProductDesigner — UX design
+  project-lead: copilot      # ProjectLead — triage & orchestration
+  execution-lead: copilot    # ExecutionLead — implementation & bug fixing
+  qa: copilot                # QAGuard — quality gate & verification
+  privacy-advisor: copilot   # Privacy — compliance review
+  ops: copilot               # OpsCommander — deployment & ops
+  scribe: gemini             # Scribe — documentation (faster)
+  developer: copilot         # Developer — fast-track implementation
 
 # Project configurations
 case_italia:
@@ -93,6 +112,7 @@ nexus:
     triage: copilot          # Triage agent - issue classification
     design: copilot          # Design agent - technical proposals
     debug: copilot           # Debug agent - root cause analysis
-    code_reviewer: copilot   # Code review agent - PR reviews
+    reviewer: copilot        # Reviewer agent - PR reviews
+    developer: copilot       # Developer agent - code implementation
     docs: gemini             # Docs agent - documentation updates
     summarizer: gemini       # Summarizer agent - workflow summaries
