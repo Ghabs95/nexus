@@ -9,8 +9,6 @@ import subprocess
 import time
 from typing import Any, Optional
 
-import yaml
-
 # Nexus Core framework imports
 from nexus.core.completion import (
     CompletionSummary,
@@ -252,6 +250,20 @@ def _resolve_repo_for_issue(issue_num: str, default_project: str = "nexus") -> s
     return resolved_repo
 
 
+def _normalize_agent_reference(agent_ref: str) -> str:
+    """Normalize next-agent references emitted by completion summaries."""
+    value = (agent_ref or "").strip()
+    value = value.lstrip("@").strip()
+    return value.strip("`").strip()
+
+
+def _is_terminal_agent_reference(agent_ref: str) -> bool:
+    """Return True when a next-agent reference means workflow completion."""
+    return _normalize_agent_reference(agent_ref).lower() in {
+        "none", "n/a", "null", "no", "end", "done", "finish", "complete", ""
+    }
+
+
 def _resolve_git_dir(project_name: str) -> Optional[str]:
     """Resolve the actual git repo directory for a project.
 
@@ -368,7 +380,7 @@ def _post_completion_comments_from_logs() -> None:
                 _finalize_workflow(issue_num, repo, completed_agent, project_name)
                 continue
 
-            next_agent = summary.next_agent.strip()
+            next_agent = _normalize_agent_reference(summary.next_agent)
 
             # NOTE: no is_recent_launch() check here — in the auto-chain path the
             # just-completed agent's log file will always be "recent" (< 120s),
@@ -392,7 +404,68 @@ def _post_completion_comments_from_logs() -> None:
 
             workflow_policy = get_workflow_policy_plugin(cache_key="workflow-policy:inbox")
 
-            # Send transition notification
+            # Resolve tier: launched_agents tracker → issue labels → "full" (safest default)
+            workflow_path = get_workflow_definition_path(project_name)
+            tier_name = (
+                StateManager.get_last_tier_for_issue(issue_num)
+                or get_sop_tier_from_issue(issue_num, project_name)
+                or "full"
+            )
+            if workflow_path and os.path.exists(workflow_path):
+                try:
+                    from nexus.core.workflow import WorkflowDefinition
+                    valid_next = WorkflowDefinition.resolve_next_agents(
+                        workflow_path, completed_agent, workflow_type=tier_name
+                    )
+                    canonical_next = WorkflowDefinition.canonicalize_next_agent(
+                        workflow_path,
+                        completed_agent,
+                        summary.next_agent,
+                        workflow_type=tier_name,
+                    )
+
+                    if canonical_next:
+                        if canonical_next != next_agent:
+                            logger.warning(
+                                f"Canonicalized next_agent '{next_agent}' to '{canonical_next}' "
+                                f"for '{completed_agent}'"
+                            )
+                        next_agent = canonical_next
+                    elif valid_next and next_agent not in valid_next:
+                        logger.error(
+                            f"Invalid next_agent '{next_agent}' for '{completed_agent}'. "
+                            f"Valid successors: {valid_next}. Skipping auto-chain."
+                        )
+                        send_telegram_alert(
+                            f"❌ Auto-chain skipped for issue #{issue_num}: invalid next_agent "
+                            f"`{next_agent}` after `{completed_agent}`. "
+                            f"Valid options: {', '.join(valid_next)}"
+                        )
+                        continue
+
+                    if valid_next and next_agent not in valid_next:
+                        logger.error(
+                            f"Canonicalized next_agent '{next_agent}' is not valid for '{completed_agent}'. "
+                            f"Valid successors: {valid_next}. Skipping auto-chain."
+                        )
+                        send_telegram_alert(
+                            f"❌ Auto-chain skipped for issue #{issue_num}: invalid next_agent "
+                            f"`{next_agent}` after `{completed_agent}`. "
+                            f"Valid options: {', '.join(valid_next)}"
+                        )
+                        continue
+                except Exception as e:
+                    logger.debug(f"Could not validate next_agent: {e}")
+
+            if _is_terminal_agent_reference(next_agent):
+                logger.info(
+                    f"✅ Workflow complete for issue #{issue_num} "
+                    f"(terminal next_agent after {completed_agent})"
+                )
+                _finalize_workflow(issue_num, repo, completed_agent, project_name)
+                continue
+
+            # Send transition notification after next_agent has been validated/corrected
             send_telegram_alert(
                 workflow_policy.build_transition_message(
                     issue_number=issue_num,
@@ -401,23 +474,6 @@ def _post_completion_comments_from_logs() -> None:
                     repo=repo,
                 )
             )
-
-            # Validate next_agent against workflow definition
-            workflow_path = get_workflow_definition_path(project_name)
-            tier_name = get_sop_tier_from_issue(issue_num, project_name) or "fast-track"
-            if workflow_path and os.path.exists(workflow_path):
-                try:
-                    from nexus.core.workflow import WorkflowDefinition
-                    valid_next = WorkflowDefinition.resolve_next_agents(
-                        workflow_path, completed_agent, workflow_type=tier_name
-                    )
-                    if valid_next and next_agent not in valid_next:
-                        logger.warning(
-                            f"next_agent '{next_agent}' not in valid successors {valid_next} "
-                            f"for '{completed_agent}' — proceeding anyway"
-                        )
-                except Exception as e:
-                    logger.debug(f"Could not validate next_agent: {e}")
 
             continuation_prompt = (
                 f"You are a {next_agent} agent. The previous step ({completed_agent}) is complete.\n\n"
@@ -915,8 +971,12 @@ def process_file(filepath):
                         send_telegram_alert(f"Stopping launch: missing workflow for {project_name}")
                         return
                 
-                # Resolve tier from issue labels; fall back to fast-track
-                tier_name = get_sop_tier_from_issue(issue_number, project_name) or "fast-track"
+                # Resolve tier: launched_agents tracker → issue labels → "full" (safest default)
+                tier_name = (
+                    StateManager.get_last_tier_for_issue(issue_number)
+                    or get_sop_tier_from_issue(issue_number, project_name)
+                    or "full"
+                )
 
                 pid, tool_used = invoke_copilot_agent(
                     agents_dir=agents_abs,

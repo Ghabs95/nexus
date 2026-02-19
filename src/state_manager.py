@@ -127,6 +127,22 @@ class StateManager:
         )
 
     @staticmethod
+    def get_last_tier_for_issue(issue_num: str) -> Optional[str]:
+        """Get the last known workflow tier for an issue from launched_agents.
+
+        Unlike :meth:`load_launched_agents`, this reads without the recency
+        cutoff so that tier information persists across slow agent executions.
+
+        Returns:
+            Tier name (e.g. ``"full"``, ``"fast-track"``) or ``None``.
+        """
+        data = StateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
+        entry = data.get(str(issue_num))
+        if entry and isinstance(entry, dict):
+            return entry.get("tier")
+        return None
+
+    @staticmethod
     def register_launched_agent(issue_num: str, agent_name: str, pid: int) -> None:
         """Register a newly launched agent."""
         data = StateManager.load_launched_agents()

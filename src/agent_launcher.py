@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import time
+import glob
 import yaml
 
 # Nexus Core framework imports
@@ -478,11 +479,13 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         logger.error(f"Failed to read task file {task_file}: {e}")
         return False
     
-    # Get workflow tier
-    tier_name = get_sop_tier_from_issue(issue_number, project_root)
-    if not tier_name:
-        logger.warning(f"Could not determine workflow tier for issue #{issue_number}")
-        tier_name = "full"  # Default to full workflow
+    # Get workflow tier: launched_agents tracker → issue labels → "full"
+    from state_manager import StateManager
+    tier_name = (
+        StateManager.get_last_tier_for_issue(issue_number)
+        or get_sop_tier_from_issue(issue_number, project_root)
+        or "full"
+    )
     
     issue_url = f"https://github.com/{get_github_repo(project_root)}/issues/{issue_number}"
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])

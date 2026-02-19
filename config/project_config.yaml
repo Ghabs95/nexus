@@ -105,14 +105,16 @@ nexus:
   agents_dir: ghabs/nexus-core/examples/agents
   workspace: ghabs
   github_repo: Ghabs95/nexus-core
-  # Uses nexus-core example workflow (different from org workflow)
-  workflow_definition_path: ghabs/nexus-core/examples/workflows/development_workflow.yaml
-  # AI tool preferences for nexus-core example agents
+  # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
+  workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
+  # AI tool preferences for enterprise workflow agent types
   ai_tool_preferences:
     triage: copilot          # Triage agent - issue classification
-    design: copilot          # Design agent - technical proposals
+    design: copilot          # Design agent - architecture proposals
     debug: copilot           # Debug agent - root cause analysis
-    reviewer: copilot        # Reviewer agent - PR reviews
     developer: copilot       # Developer agent - code implementation
-    docs: gemini             # Docs agent - documentation updates
-    summarizer: gemini       # Summarizer agent - workflow summaries
+    reviewer: copilot        # Reviewer agent - PR reviews
+    compliance: copilot      # Compliance agent - security/privacy review
+    deployer: copilot        # Deployer agent - merge & release
+    writer: gemini           # Writer agent - docs & close (faster)
+    finalizer: gemini        # Finalizer agent - rejected issue close (faster)
