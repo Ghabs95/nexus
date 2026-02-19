@@ -19,7 +19,7 @@ from config import (
     TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
     DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
-    get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name,
+    get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir, get_tasks_logs_dir, get_nexus_dir_name,
     NEXUS_CORE_STORAGE_DIR,
 )
 from state_manager import StateManager
@@ -1256,9 +1256,14 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
+    cleanup_mode = any(arg.lower() in {"cleanup", "--cleanup"} for arg in (context.args or []))
+
     active_text = "🚀 Active Tasks (In Progress)\n\n"
+    if cleanup_mode:
+        active_text += "🧹 Cleanup mode: archiving closed tasks to `tasks/closed`\n\n"
     total_active = 0
-    total_skipped_stale = 0
+    total_skipped_closed = 0
+    total_archived = 0
 
     # Cache GitHub issue states to avoid duplicate API calls in one command run.
     issue_state_cache = {}
@@ -1285,7 +1290,8 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         issue_number = filename_match.group(1) if filename_match else None
 
                     if not issue_number:
-                        stale_count += 1
+                        # Non-GitHub or orphan task: keep visible as active.
+                        open_files.append((f, None))
                         continue
 
                     cache_key = f"{repo}:{issue_number}"
@@ -1295,7 +1301,29 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             details.get("state", "") if details else "unknown"
                         )
 
-                    if issue_state_cache[cache_key] == "open":
+                    issue_state = issue_state_cache[cache_key]
+
+                    if issue_state == "closed":
+                        stale_count += 1
+                        if cleanup_mode:
+                            try:
+                                closed_dir = get_tasks_closed_dir(project_root)
+                                os.makedirs(closed_dir, exist_ok=True)
+                                target_path = os.path.join(closed_dir, f)
+                                if os.path.exists(target_path):
+                                    base, ext = os.path.splitext(f)
+                                    target_path = os.path.join(
+                                        closed_dir,
+                                        f"{base}_{int(time.time())}{ext}",
+                                    )
+                                os.replace(file_path, target_path)
+                                total_archived += 1
+                                logger.info(f"Archived closed task file: {file_path} -> {target_path}")
+                            except Exception as exc:
+                                logger.warning(f"Failed to archive {file_path}: {exc}")
+                        continue
+
+                    if issue_state in {"open", "unknown"}:
                         open_files.append((f, issue_number))
                     else:
                         stale_count += 1
@@ -1306,13 +1334,16 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 active_text += f"{display_name}: {len(open_files)} task(s)\n"
                 total_active += len(open_files)
-                total_skipped_stale += stale_count
+                total_skipped_closed += stale_count
 
                 for f, issue_number in open_files[:3]:
                     task_type = f.split('_')[0]
                     emoji = TYPES.get(task_type, "📝")
-                    issue_link = f"https://github.com/{repo}/issues/{issue_number}"
-                    issue_suffix = f" [#{issue_number}]({issue_link})"
+                    if issue_number:
+                        issue_link = f"https://github.com/{repo}/issues/{issue_number}"
+                        issue_suffix = f" [#{issue_number}]({issue_link})"
+                    else:
+                        issue_suffix = " (no issue link)"
                     active_text += f"  • {emoji} `{f}`{issue_suffix}\n"
                 if len(open_files) > 3:
                     active_text += f"  ... +{len(open_files) - 3} more\n"
@@ -1323,8 +1354,10 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         active_text += f"Total: {total_active} active task(s)"
 
-    if total_skipped_stale:
-        active_text += f"\n\nℹ️ Skipped {total_skipped_stale} stale task file(s) (closed/unknown issue)."
+    if total_skipped_closed:
+        active_text += f"\n\nℹ️ Skipped {total_skipped_closed} closed task file(s)."
+    if cleanup_mode:
+        active_text += f"\n📦 Archived {total_archived} closed task file(s) to `tasks/closed`."
 
     await update.message.reply_text(active_text, parse_mode='Markdown', disable_web_page_preview=True)
 

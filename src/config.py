@@ -361,6 +361,16 @@ def get_tasks_active_dir(workspace: str = None) -> str:
     return os.path.join(nexus_dir, "tasks", "active")
 
 
+def get_tasks_closed_dir(workspace: str = None) -> str:
+    """Get closed tasks directory path for archived work.
+
+    Returns:
+        Path to {nexus_dir}/tasks/closed directory
+    """
+    nexus_dir = get_nexus_dir(workspace)
+    return os.path.join(nexus_dir, "tasks", "closed")
+
+
 def get_tasks_logs_dir(workspace: str = None, project: str = None) -> str:
     """Get task logs directory path for agent execution logs.
     
