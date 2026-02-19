@@ -30,7 +30,8 @@ from commands.workflow import (
     stop_handler as workflow_stop_handler,
 )
 from agent_launcher import invoke_copilot_agent
-from inbox_processor import get_sop_tier
+from inbox_processor import get_sop_tier, _normalize_agent_reference
+from nexus.core.completion import scan_for_completions
 from ai_orchestrator import get_orchestrator
 from plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 from error_handling import format_error_for_user, run_command_with_retry
@@ -2279,14 +2280,44 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     type_match = re.search(r"\*\*Type:\*\*\s*(.+)", content)
     task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
-    # Extract agent_type from task file (defaults to triage if not found)
-    agent_type_match = re.search(r"\*\*Agent Type:\*\*\s*(.+)", content)
-    agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
+    # Resolve which agent to launch: check last completion's next_agent first
+    agent_type = None
+    resumed_from = None
+    try:
+        completions = scan_for_completions(BASE_DIR)
+        issue_completions = [
+            c for c in completions if c.issue_number == str(issue_num)
+        ]
+        if issue_completions:
+            # Use the most recent completion (by file mtime)
+            latest = max(issue_completions, key=lambda c: os.path.getmtime(c.file_path))
+            raw_next = latest.summary.next_agent
+            normalized = _normalize_agent_reference(raw_next)
+            if normalized and normalized.lower() not in {
+                "none", "n/a", "null", "done", "end", "finish", "complete", ""
+            }:
+                agent_type = normalized
+                resumed_from = latest.summary.agent_type
+                logger.info(
+                    f"Continue issue #{issue_num}: last step was {resumed_from}, "
+                    f"resuming with next_agent={agent_type}"
+                )
+    except Exception as e:
+        logger.warning(f"Could not scan completions for issue #{issue_num}: {e}")
+
+    # Fallback: extract from task file (defaults to triage)
+    if not agent_type:
+        agent_type_match = re.search(r"\*\*Agent Type:\*\*\s*(.+)", content)
+        agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
+        logger.info(f"Continue issue #{issue_num}: no prior completion found, starting with {agent_type}")
 
     tier_name, _, _ = get_sop_tier(task_type)
     issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
-    msg = await update.effective_message.reply_text(f"⏩ Continuing agent for issue #{issue_num}...")
+    resume_info = f" (after {resumed_from})" if resumed_from else ""
+    msg = await update.effective_message.reply_text(
+        f"⏩ Continuing issue #{issue_num} with `{agent_type}`{resume_info}..."
+    )
 
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
