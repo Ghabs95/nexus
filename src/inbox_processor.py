@@ -626,25 +626,45 @@ def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "")
 # send_telegram_alert is now imported from notifications module
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Check whether a process is still running via kill(pid, 0)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we can't signal it — still alive
+        return True
+    except Exception:
+        return False
+
+
 def check_stuck_agents():
-    """Monitor agent processes and handle timeouts with auto-kill and retry."""
+    """Monitor agent processes and handle timeouts with auto-kill and retry.
+
+    Two detection strategies:
+    1. Log-file scan: find stale log files with a still-running PID → kill + retry.
+    2. Dead-process scan: iterate launched_agents.json, detect PIDs that exited
+       without posting a completion → alert via Telegram.
+    """
     scope = "stuck-agents:loop"
     try:
-        # Find all copilot log files using configured nexus_dir
+        # --- Strategy 1: stale log file detection (kills still-running agents) ---
         nexus_dir_name = get_nexus_dir_name()
         log_files = glob.glob(
             os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
             recursive=True
         )
-        
+
         for log_file in log_files:
             # Extract issue number from filename: copilot_4_20260215_112450.log
             match = re.search(r"copilot_(\d+)_", os.path.basename(log_file))
             if not match:
                 continue
-            
+
             issue_num = match.group(1)
-            
+
             # Get latest log file for this issue only (ignore old ones)
             all_logs_for_issue = sorted(
                 [f for f in log_files if f"copilot_{issue_num}_" in f],
@@ -653,29 +673,130 @@ def check_stuck_agents():
             )
             if all_logs_for_issue and log_file != all_logs_for_issue[0]:
                 continue  # Skip old log files
-            
+
             # Check for timeout
             timed_out, pid = AgentMonitor.check_timeout(issue_num, log_file)
-            
+
             if timed_out and pid:
                 # Kill the stuck agent
                 killed = AgentMonitor.kill_agent(pid, issue_num)
-                
+
                 if killed:
-                    # Get agent type from launched agents tracker
                     launched_agents = load_launched_agents()
                     agent_data = launched_agents.get(str(issue_num), {})
-                    agent_type = agent_data.get('agent_type', 'unknown')
-                    
-                    # Check if we should retry
+                    agent_type = agent_data.get("agent_type", "unknown")
+
                     will_retry = AgentMonitor.should_retry(issue_num, agent_type)
                     notify_agent_timeout(issue_num, agent_type, will_retry, project="nexus")
 
+        # --- Strategy 2: dead-process detection (catches crashed agents) ---
+        _check_dead_agents()
+
         _clear_polling_failures(scope)
-            
+
     except Exception as e:
         logger.error(f"Error in check_stuck_agents: {e}")
         _record_polling_failure(scope, e)
+
+
+# Track issues we've already alerted about to avoid repeat notifications
+_dead_agent_alerted: set = set()
+
+
+def _check_dead_agents() -> None:
+    """Detect agents that exited without completing and send alerts.
+
+    Reads launched_agents.json, checks each PID, and alerts if the process
+    is dead but no completion was recorded (i.e. still in launched_agents).
+    Gives a grace period of STUCK_AGENT_THRESHOLD seconds before alerting
+    to allow normal completion scanning to detect the result first.
+    """
+    launched_agents = load_launched_agents()
+    if not launched_agents:
+        return
+
+    current_time = time.time()
+    dirty = False
+
+    for issue_num, agent_data in list(launched_agents.items()):
+        pid = agent_data.get("pid")
+        launch_ts = agent_data.get("timestamp", 0)
+        agent_type = agent_data.get("agent_type", "unknown")
+        tier = agent_data.get("tier", "unknown")
+
+        if not pid:
+            continue
+
+        # Grace period: let completion scanner run first
+        age_seconds = current_time - launch_ts
+        if age_seconds < STUCK_AGENT_THRESHOLD:
+            continue
+
+        # Check if process is still alive
+        if _is_pid_alive(pid):
+            continue  # Still running — Strategy 1 handles timeout kills
+
+        # Process is dead. Check if completion scanner already handled it
+        # (it would have removed from launched_agents or the dedup would fire).
+        # If we get here, the agent exited without a detected completion.
+
+        alert_key = f"{issue_num}:{pid}"
+        if alert_key in _dead_agent_alerted:
+            continue  # Already alerted for this specific launch
+
+        _dead_agent_alerted.add(alert_key)
+
+        logger.warning(
+            f"💀 Dead agent detected: issue #{issue_num} "
+            f"({agent_type}, PID {pid}, tier {tier}, age {age_seconds/60:.0f}min)"
+        )
+
+        StateManager.audit_log(
+            int(issue_num),
+            "AGENT_DEAD",
+            f"Agent process PID {pid} ({agent_type}) exited without completion "
+            f"after {age_seconds/60:.0f}min"
+        )
+
+        # Determine project for GitHub link
+        project_name = _resolve_project_for_issue(issue_num)
+        repo = get_github_repo(project_name) if project_name else get_github_repo()
+
+        will_retry = AgentMonitor.should_retry(issue_num, agent_type)
+        if will_retry:
+            send_telegram_alert(
+                f"💀 **Agent Crashed → Retrying**\n\n"
+                f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
+                f"Agent: {agent_type} (PID {pid})\n"
+                f"Tier: {tier}\n"
+                f"Status: Process exited without completion, retry scheduled"
+            )
+            # Remove from tracker so the retry can write a fresh entry
+            del launched_agents[issue_num]
+            dirty = True
+        else:
+            send_telegram_alert(
+                f"💀 **Agent Crashed → Manual Intervention**\n\n"
+                f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
+                f"Agent: {agent_type} (PID {pid})\n"
+                f"Tier: {tier}\n"
+                f"Status: Process exited without completion, max retries reached\n\n"
+                f"Use /reprocess nexus {issue_num} to retry"
+            )
+            AgentMonitor.mark_failed(issue_num, agent_type, "Agent process exited without completion")
+            del launched_agents[issue_num]
+            dirty = True
+
+    if dirty:
+        save_launched_agents(launched_agents)
+
+
+def _resolve_project_for_issue(issue_num: str) -> Optional[str]:
+    """Best-effort project resolution from config for an issue number."""
+    # Try to find which project this issue belongs to by checking agents data
+    for project_name, _ in _iter_project_configs():
+        return project_name
+    return None
 
 
 def check_agent_comments():
