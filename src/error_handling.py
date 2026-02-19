@@ -202,34 +202,6 @@ def validate_required_env_vars(required_vars: List[str]) -> None:
     logger.info(f"✅ All required environment variables present: {', '.join(required_vars)}")
 
 
-def validate_workflow_structure(workflow_chain: dict) -> None:
-    """Validate WORKFLOW_CHAIN structure.
-    
-    Args:
-        workflow_chain: Dictionary with tier names as keys and agent lists as values
-    
-    Raises:
-        ConfigurationError: If structure is invalid
-    """
-    required_tiers = ['full', 'shortened', 'fast-track']
-    
-    for tier in required_tiers:
-        if tier not in workflow_chain:
-            raise ConfigurationError(f"WORKFLOW_CHAIN missing required tier: {tier}")
-        
-        agents = workflow_chain[tier]
-        if not isinstance(agents, list) or len(agents) == 0:
-            raise ConfigurationError(f"WORKFLOW_CHAIN[{tier}] must be non-empty list")
-        
-        for idx, step in enumerate(agents):
-            if not isinstance(step, tuple) or len(step) != 2:
-                raise ConfigurationError(
-                    f"WORKFLOW_CHAIN[{tier}][{idx}] must be tuple (agent_name, description)"
-                )
-    
-    logger.info(f"✅ WORKFLOW_CHAIN structure valid for all tiers: {', '.join(required_tiers)}")
-
-
 def format_error_for_user(error: Exception, context: str = "") -> str:
     """Format error message for end-user display (Telegram).
     

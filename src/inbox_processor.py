@@ -1,5 +1,5 @@
+import asyncio
 import glob
-import hashlib
 import json
 import logging
 import os
@@ -7,29 +7,35 @@ import re
 import shutil
 import subprocess
 import time
-import requests
+from typing import Optional
+
+import yaml
+
+# Nexus Core framework imports
+from nexus.core.completion import (
+    CompletionSummary,
+    scan_for_completions,
+)
 
 # Import centralized configuration
 from config import (
-    BASE_DIR, get_github_repo, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
+    BASE_DIR, get_github_repo,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
-    WORKFLOW_CHAIN, PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
-    USE_NEXUS_CORE
+    PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
+    USE_NEXUS_CORE, get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
-from agent_launcher import invoke_copilot_agent
+from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
 from ai_orchestrator import get_orchestrator
-from nexus_core_helpers import create_workflow_for_issue_sync
+from nexus_core_helpers import create_workflow_for_issue_sync, get_git_platform, get_workflow_definition_path
 from error_handling import (
-    run_command_with_retry, 
-    format_error_for_user,
+    run_command_with_retry,
     RetryExhaustedError
 )
 from notifications import (
     notify_agent_needs_input,
-    notify_workflow_started,
     notify_agent_completed,
     notify_agent_timeout,
     notify_workflow_completed,
@@ -50,10 +56,6 @@ def get_issue_repo(project: str = "nexus") -> str:
           issue tracking is implemented.
     """
     return get_github_repo("nexus")
-
-# Alias for backward compatibility
-LAUNCHED_AGENTS_FILE = StateManager.__dict__.get("LAUNCHED_AGENTS_FILE")
-WORKFLOW_STATE_FILE = StateManager.__dict__.get("WORKFLOW_STATE_FILE")
 
 # Initialize orchestrator (CLI-only)
 orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
@@ -99,6 +101,51 @@ def get_workflow_state(issue_num):
 launched_agents_tracker = StateManager.load_launched_agents()
 # PROJECT_CONFIG is now imported from config.py
 
+# Failed task file lookup tracking (stop checking after 3 failures)
+FAILED_LOOKUPS_FILE = os.path.join(DATA_DIR, "failed_task_lookups.json")
+COMPLETION_COMMENTS_FILE = os.path.join(DATA_DIR, "completion_comments.json")
+
+def load_failed_lookups():
+    """Load failed task file lookup counters."""
+    try:
+        if os.path.exists(FAILED_LOOKUPS_FILE):
+            with open(FAILED_LOOKUPS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading failed lookups: {e}")
+    return {}
+
+def save_failed_lookups(lookups):
+    """Save failed task file lookup counters."""
+    try:
+        with open(FAILED_LOOKUPS_FILE, 'w') as f:
+            json.dump(lookups, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving failed lookups: {e}")
+
+
+def load_completion_comments():
+    """Load completion comment tracking data."""
+    try:
+        if os.path.exists(COMPLETION_COMMENTS_FILE):
+            with open(COMPLETION_COMMENTS_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to read completion comments file: {e}")
+    return {}
+
+
+def save_completion_comments(comments):
+    """Save completion comment tracking data."""
+    try:
+        with open(COMPLETION_COMMENTS_FILE, "w") as f:
+            json.dump(comments, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save completion comments file: {e}")
+
+failed_task_lookups = load_failed_lookups()
+completion_comments = load_completion_comments()
+
 # Logging
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -119,25 +166,325 @@ def slugify(text):
     return text[:50]
 
 
-def _extract_body_from_result(result_stdout: str) -> str:
-    """Extract issue body from gh result, handling JSON or raw string output."""
-    try:
-        parsed = json.loads(result_stdout)
-    except json.JSONDecodeError:
-        return result_stdout.strip()
-
-    if isinstance(parsed, dict):
-        return parsed.get("body", "")
-    if isinstance(parsed, str):
-        return parsed
-    return ""
-
-
 def _iter_project_configs():
     """Yield (project_name, config) pairs for dict-based project configs."""
     for project_name, cfg in PROJECT_CONFIG.items():
         if isinstance(cfg, dict) and "github_repo" in cfg:
             yield project_name, cfg
+
+
+def _resolve_project_from_path(summary_path: str) -> str:
+    """Resolve project name from a completion_summary file path.
+
+    Matches the path against configured project workspaces.
+    Returns project key or empty string if no match.
+    """
+    for key, cfg in _iter_project_configs():
+        workspace = cfg.get("workspace")
+        if not workspace:
+            continue
+        workspace_abs = os.path.join(BASE_DIR, workspace)
+        if summary_path.startswith(workspace_abs):
+            return key
+    return ""
+
+
+def _resolve_repo_for_issue(issue_num: str, default_project: str = "nexus") -> str:
+    """Resolve repo for issue by reading task file location from issue body.
+
+    Delegates to nexus-core's GitHubPlatform.get_issue() to fetch the body.
+    """
+    try:
+        platform = get_git_platform(get_github_repo(default_project))
+        issue = asyncio.run(platform.get_issue(str(issue_num)))
+        if not issue:
+            return get_github_repo(default_project)
+
+        body = issue.body or ""
+        task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
+        if not task_file_match:
+            logger.debug(f"No task file in issue #{issue_num} body, returning default repo")
+            return get_github_repo(default_project)
+
+        task_file = task_file_match.group(1)
+        for key, cfg in _iter_project_configs():
+            workspace = cfg.get("workspace")
+            if not workspace:
+                continue
+            workspace_abs = os.path.join(BASE_DIR, workspace)
+            if task_file.startswith(workspace_abs):
+                logger.debug(f"Issue #{issue_num} resolved to project '{key}'")
+                return get_github_repo(key)
+        logger.debug(f"Issue #{issue_num} task file doesn't match any project workspace")
+    except Exception as e:
+        logger.debug(f"Could not resolve repo for issue #{issue_num} (will use default): {e}")
+
+    return get_github_repo(default_project)
+
+
+def _resolve_git_dir(project_name: str) -> Optional[str]:
+    """Resolve the actual git repo directory for a project.
+
+    Tries:
+    1. workspace itself (e.g. /home/ubuntu/git/case_italia)
+    2. workspace/repo_name (e.g. /home/ubuntu/git/ghabs/nexus-core)
+
+    Returns absolute path or None.
+    """
+    proj_cfg = PROJECT_CONFIG.get(project_name, {})
+    workspace = proj_cfg.get("workspace", "")
+    github_repo = proj_cfg.get("github_repo", "")
+    if not workspace:
+        return None
+    workspace_abs = os.path.join(BASE_DIR, workspace)
+
+    if os.path.isdir(os.path.join(workspace_abs, ".git")):
+        return workspace_abs
+    if github_repo and "/" in github_repo:
+        repo_name = github_repo.split("/")[-1]
+        candidate = os.path.join(workspace_abs, repo_name)
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return candidate
+    return None
+
+
+def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name: str) -> None:
+    """Handle workflow completion: close issue, create PR if needed, send Telegram.
+
+    Called when the last agent finishes (next_agent is 'none' or empty).
+    Delegates PR creation and issue closing to nexus-core GitHubPlatform.
+    """
+    pr_url = None
+
+    # --- Create branch + PR if there are uncommitted changes ---
+    if project_name:
+        git_dir = _resolve_git_dir(project_name)
+        if not git_dir:
+            logger.info(f"No git repo found for {project_name} — skipping PR creation")
+        else:
+            try:
+                platform = get_git_platform(repo)
+                pr_body = (
+                    f"Automated PR for issue #{issue_num}.\n\n"
+                    f"Workflow completed by Nexus agent chain.\n"
+                    f"Last agent: `{last_agent}`"
+                )
+                pr_result = asyncio.run(platform.create_pr_from_changes(
+                    repo_dir=git_dir,
+                    issue_number=str(issue_num),
+                    title=f"fix: resolve #{issue_num}",
+                    body=pr_body,
+                ))
+                if pr_result:
+                    pr_url = pr_result.url
+                    logger.info(f"🔀 Created PR for issue #{issue_num}: {pr_url}")
+                else:
+                    logger.info(f"No code changes for issue #{issue_num} — skipping PR creation")
+            except Exception as e:
+                logger.warning(f"Error creating PR for issue #{issue_num}: {e}")
+
+    # --- Close the issue ---
+    try:
+        platform = get_git_platform(repo)
+        close_comment = (
+            f"✅ Workflow completed. All agent steps finished successfully.\n"
+            f"Last agent: `{last_agent}`"
+        )
+        if pr_url:
+            close_comment += f"\nPR: {pr_url}"
+
+        asyncio.run(platform.close_issue(str(issue_num), comment=close_comment))
+        logger.info(f"🔒 Closed issue #{issue_num}")
+    except Exception as e:
+        logger.warning(f"Error closing issue #{issue_num}: {e}")
+
+    # --- Telegram notification ---
+    parts = [
+        f"✅ **Workflow Complete**\n\n"
+        f"Issue: #{issue_num}\n"
+        f"Last agent: `{last_agent}`\n"
+    ]
+    if pr_url:
+        parts.append(f"PR: {pr_url}\n")
+    parts.append(f"\n🔗 https://github.com/{repo}/issues/{issue_num}")
+    send_telegram_alert("".join(parts))
+
+
+def _post_completion_comments_from_logs() -> None:
+    """Detect agent completions and auto-chain to the next workflow step.
+
+    Uses nexus-core's scan_for_completions() to detect completion files.
+    Agents post their own rich GitHub comments, so this function only handles
+    orchestration: dedup, finalization, Telegram alerts, and auto-chaining.
+    """
+    global completion_comments
+    nexus_dir_name = get_nexus_dir_name()
+
+    # Use framework scanner to find all completion summaries
+    detected = scan_for_completions(BASE_DIR, nexus_dir=nexus_dir_name)
+
+    for detection in detected:
+        issue_num = detection.issue_number
+        summary = detection.summary
+
+        try:
+            # Skip if agent for this issue is still running
+            check_running = subprocess.run(
+                ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
+                text=True, capture_output=True, timeout=5,
+            )
+            if check_running.stdout:
+                continue
+
+            # Dedup using framework's dedup_key
+            comment_key = detection.dedup_key
+            if comment_key in completion_comments:
+                continue
+
+            project_name = _resolve_project_from_path(detection.file_path)
+            if project_name:
+                repo = get_github_repo(project_name)
+            else:
+                repo = _resolve_repo_for_issue(issue_num)
+
+            completed_agent = summary.agent_type
+
+            # Record completion (no GitHub comment — agents post their own)
+            completion_comments[comment_key] = time.time()
+            save_completion_comments(completion_comments)
+            logger.info(f"📋 Agent completed for issue #{issue_num} ({completed_agent})")
+
+            # --- Auto-chain to next agent (uses framework's is_workflow_done) ---
+            if summary.is_workflow_done:
+                logger.info(f"✅ Workflow complete for issue #{issue_num} (last agent: {completed_agent})")
+                _finalize_workflow(issue_num, repo, completed_agent, project_name)
+                continue
+
+            next_agent = summary.next_agent.strip()
+
+            # NOTE: no is_recent_launch() check here — in the auto-chain path the
+            # just-completed agent's log file will always be "recent" (< 120s),
+            # which would falsely block the next agent.  The dedup_key check above
+            # already guarantees each completion triggers auto-chain at most once.
+
+            if not project_name:
+                logger.warning(f"Cannot auto-chain issue #{issue_num}: could not resolve project")
+                continue
+
+            proj_cfg = PROJECT_CONFIG.get(project_name, {})
+            agents_dir = proj_cfg.get("agents_dir", "")
+            workspace = proj_cfg.get("workspace", "")
+            if not agents_dir or not workspace:
+                logger.warning(f"Cannot auto-chain issue #{issue_num}: missing agents_dir/workspace for {project_name}")
+                continue
+
+            agents_abs = os.path.join(BASE_DIR, agents_dir)
+            workspace_abs = os.path.join(BASE_DIR, workspace)
+            issue_url = f"https://github.com/{repo}/issues/{issue_num}"
+
+            # Send transition notification
+            send_telegram_alert(
+                f"🔗 **Agent Transition**\n\n"
+                f"Issue: #{issue_num}\n"
+                f"Completed: `{completed_agent}`\n"
+                f"Launching: `{next_agent}`\n\n"
+                f"🔗 https://github.com/{repo}/issues/{issue_num}"
+            )
+
+            # Validate next_agent against workflow definition
+            workflow_path = get_workflow_definition_path(project_name)
+            tier_name = get_sop_tier_from_issue(issue_num, project_name) or "fast-track"
+            if workflow_path and os.path.exists(workflow_path):
+                try:
+                    from nexus.core.workflow import WorkflowDefinition
+                    valid_next = WorkflowDefinition.resolve_next_agents(
+                        workflow_path, completed_agent, workflow_type=tier_name
+                    )
+                    if valid_next and next_agent not in valid_next:
+                        logger.warning(
+                            f"next_agent '{next_agent}' not in valid successors {valid_next} "
+                            f"for '{completed_agent}' — proceeding anyway"
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not validate next_agent: {e}")
+
+            continuation_prompt = (
+                f"You are a {next_agent} agent. The previous step ({completed_agent}) is complete.\n\n"
+                f"Your task: Begin your step in the workflow.\n"
+                f"Read recent GitHub comments to understand what's been completed.\n"
+                f"Then perform your assigned work and post a status update."
+            )
+
+            pid, tool_used = invoke_copilot_agent(
+                agents_dir=agents_abs,
+                workspace_dir=workspace_abs,
+                issue_url=issue_url,
+                tier_name=tier_name,
+                task_content="",
+                continuation=True,
+                continuation_prompt=continuation_prompt,
+                log_subdir=project_name,
+                agent_type=next_agent,
+                project_name=project_name
+            )
+
+            if pid:
+                logger.info(
+                    f"🔗 Auto-chained {completed_agent} → {next_agent} "
+                    f"for issue #{issue_num} (PID: {pid}, tool: {tool_used})"
+                )
+            else:
+                logger.error(f"❌ Failed to auto-chain to {next_agent} for issue #{issue_num}")
+                send_telegram_alert(
+                    f"❌ **Auto-chain Failed**\n\n"
+                    f"Issue: #{issue_num}\n"
+                    f"Completed: `{completed_agent}`\n"
+                    f"Failed to launch: `{next_agent}`\n\n"
+                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
+                )
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid completion_summary.json for issue #{detection.issue_number}: {e}")
+        except Exception as e:
+            logger.warning(f"Error processing completion summary for issue #{detection.issue_number}: {e}")
+
+
+def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "") -> str:
+    """Get the first agent/agent_type from a workflow YAML definition.
+
+    Delegates to nexus-core's WorkflowDefinition.from_yaml() to parse the
+    workflow, then reads the first step's agent name.
+
+    Args:
+        project_name: Project name to resolve workflow path.
+        workflow_type: Tier name (full/shortened/fast-track) for multi-tier workflows.
+
+    Returns empty string if workflow definition is missing or invalid.
+    """
+    from nexus.core.workflow import WorkflowDefinition
+
+    path = get_workflow_definition_path(project_name)
+    if not path:
+        logger.error(f"Missing workflow_definition_path for project '{project_name}'")
+        send_telegram_alert(
+            f"Missing workflow_definition_path for project '{project_name}'."
+        )
+        return ""
+    if not os.path.exists(path):
+        logger.error(f"Workflow definition not found: {path}")
+        send_telegram_alert(f"Workflow definition not found: {path}")
+        return ""
+    try:
+        workflow = WorkflowDefinition.from_yaml(path, workflow_type=workflow_type)
+        if not workflow.steps:
+            logger.error(f"Workflow definition has no steps: {path}")
+            send_telegram_alert(f"Workflow definition has no steps: {path}")
+            return ""
+        first_step = workflow.steps[0]
+        return first_step.agent.name or first_step.agent.display_name or ""
+    except Exception as e:
+        logger.error(f"Failed to read workflow definition {path}: {e}")
+        send_telegram_alert(f"Failed to read workflow definition {path}: {e}")
+        return ""
 
 
 # send_telegram_alert is now imported from notifications module
@@ -146,17 +493,12 @@ def _iter_project_configs():
 def check_stuck_agents():
     """Monitor agent processes and handle timeouts with auto-kill and retry."""
     try:
-        # Find all copilot log files
-        log_pattern = os.path.join(
-            BASE_DIR,
-            "**",
-            ".github",
-            "tasks",
-            "logs",
-            "**",
-            "copilot_*.log"
+        # Find all copilot log files using configured nexus_dir
+        nexus_dir_name = get_nexus_dir_name()
+        log_files = glob.glob(
+            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
+            recursive=True
         )
-        log_files = glob.glob(log_pattern, recursive=True)
         
         for log_file in log_files:
             # Extract issue number from filename: copilot_4_20260215_112450.log
@@ -183,18 +525,14 @@ def check_stuck_agents():
                 killed = AgentMonitor.kill_agent(pid, issue_num)
                 
                 if killed:
-                    # Try to extract agent name from the log for retry logic
-                    try:
-                        with open(log_file, 'r') as f:
-                            log_content = f.read()
-                            agent_match = re.search(r"Agent: (\w+)|@(\w+)", log_content)
-                            agent_name = agent_match.group(1 or 2) if agent_match else "Unknown"
-                    except:
-                        agent_name = "Unknown"
+                    # Get agent type from launched agents tracker
+                    launched_agents = load_launched_agents()
+                    agent_data = launched_agents.get(str(issue_num), {})
+                    agent_type = agent_data.get('agent_type', 'unknown')
                     
                     # Check if we should retry
-                    will_retry = AgentMonitor.should_retry(issue_num, agent_name)
-                    notify_agent_timeout(issue_num, agent_name, will_retry, project="nexus")
+                    will_retry = AgentMonitor.should_retry(issue_num, agent_type)
+                    notify_agent_timeout(issue_num, agent_type, will_retry, project="nexus")
             
     except Exception as e:
         logger.error(f"Error in check_stuck_agents: {e}")
@@ -229,36 +567,23 @@ def check_agent_comments():
             if not issue_num:
                 continue
                 
-            # Get issue comments
-            result = subprocess.run(
-                ["gh", "issue", "view", issue_num, "--repo", repo,
-                 "--json", "comments", "--jq", ".comments[] | select(.author.login == \"Ghabs95\") | {id: .id, body: .body, createdAt: .createdAt}"],
-                text=True, capture_output=True, timeout=10
-            )
-            
-            if not result.stdout:
+            # Get issue comments via framework
+            try:
+                platform = get_git_platform(repo)
+                comments = asyncio.run(platform.get_comments(str(issue_num)))
+                # Filter to only the bot owner's comments
+                bot_comments = [c for c in comments if c.author == "Ghabs95"]
+            except Exception as e:
+                logger.warning(f"Failed to fetch comments for issue #{issue_num}: {e}")
+                continue
+
+            if not bot_comments:
                 continue
             
-            # Parse comments (one JSON object per line)
-            for line in result.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                
+            for comment in bot_comments:
                 try:
-                    comment = json.loads(line)
-                    if isinstance(comment, dict):
-                        comment_id = str(comment.get("id")) if comment.get("id") else ""
-                        body = comment.get("body", "")
-                    elif isinstance(comment, str):
-                        body = comment
-                        comment_id = ""
-                    else:
-                        logger.warning("Skipping unexpected comment payload type")
-                        continue
-
-                    if not comment_id:
-                        digest = hashlib.sha1(f"{issue_num}:{body}".encode("utf-8")).hexdigest()
-                        comment_id = f"{issue_num}:{digest}"
+                    comment_id = comment.id
+                    body = comment.body or ""
                     
                     # Skip if we've already notified about this comment
                     if comment_id in notified_comments:
@@ -282,85 +607,43 @@ def check_agent_comments():
                         # Extract preview (first 200 chars)
                         preview = body[:200] + "..." if len(body) > 200 else body
                         
-                        if notify_agent_needs_input(issue_num, "ProjectLead", preview, project="nexus"):
+                        if notify_agent_needs_input(issue_num, "agent", preview, project=project_name):
                             logger.info(f"📨 Sent input request alert for issue #{issue_num}")
                             notified_comments.add(comment_id)
                         else:
                             logger.warning(f"Failed to send input alert for issue #{issue_num}")
                 
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse comment JSON: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing comment for issue #{issue_num}: {e}")
                     
-    except subprocess.TimeoutExpired:
-        logger.warning("GitHub comment check timed out")
     except Exception as e:
         logger.error(f"Error in check_agent_comments: {e}")
-
-
-# WORKFLOW_CHAIN is now imported from config.py
-
-def get_previous_agent(next_agent, tier_name):
-    """Determine which agent just completed based on the next agent in workflow.
-    
-    Args:
-        next_agent: The agent about to be launched (e.g. "Copilot", "QAGuard")
-        tier_name: The workflow tier ("full", "shortened", or "fast-track")
-    
-    Returns:
-        The name of the agent who just completed, or None if we can't determine it
-    """
-    try:
-        workflow = WORKFLOW_CHAIN.get(tier_name, [])
-        if not workflow:
-            return None
-        
-        # Get agent names from workflow steps (tuples: (agent_name, step_description))
-        agents_in_workflow = [step[0] if isinstance(step, tuple) else step for step in workflow]
-        
-        try:
-            next_idx = agents_in_workflow.index(next_agent)
-            if next_idx > 0:
-                return agents_in_workflow[next_idx - 1]
-        except ValueError:
-            logger.warning(f"Agent {next_agent} not found in {tier_name} workflow")
-        
-        return None
-    except Exception as e:
-        logger.error(f"Error determining previous agent: {e}")
-        return None
 
 
 def check_and_notify_pr(issue_num, project):
     """
     Check if there's a PR linked to the issue and notify user for review.
-    
+
+    Delegates to nexus-core's GitHubPlatform.search_linked_prs().
+
     Args:
         issue_num: GitHub issue number
         project: Project name
     """
     try:
-        # Search for PRs that mention this issue
         repo = get_github_repo(project)
-        result = run_command_with_retry(
-            ["gh", "pr", "list", "--repo", repo,
-             "--search", f"{issue_num} in:body", 
-             "--json", "number,url,title,state",
-             "--limit", "1"],
-            max_attempts=2, timeout=10
-        )
-        
-        if result.stdout and result.stdout.strip():
-            prs = json.loads(result.stdout)
-            if prs and len(prs) > 0:
-                pr = prs[0]
-                if pr.get("state") == "OPEN":
-                    pr_number = str(pr.get("number"))
-                    pr_url = pr.get("url")
-                    logger.info(f"✅ Found PR #{pr_number} for issue #{issue_num}")
-                    notify_workflow_completed(issue_num, project, pr_number=pr_number, pr_url=pr_url)
-                    return
-        
-        # No PR found - notify without PR info
+        platform = get_git_platform(repo)
+        prs = asyncio.run(platform.search_linked_prs(str(issue_num)))
+
+        open_prs = [pr for pr in prs if pr.state == "open"]
+        if open_prs:
+            pr = open_prs[0]
+            logger.info(f"✅ Found PR #{pr.number} for issue #{issue_num}")
+            notify_workflow_completed(
+                issue_num, project, pr_number=str(pr.number), pr_url=pr.url,
+            )
+            return
+
         logger.info(f"ℹ️ No open PR found for issue #{issue_num}")
         notify_workflow_completed(issue_num, project)
     
@@ -372,554 +655,41 @@ def check_and_notify_pr(issue_num, project):
 
 def check_completed_agents():
     """Monitor for completed agent steps and auto-chain to next agent.
-    
-    Checks both:
-    1. Log files in .github/tasks/logs/
-    2. GitHub issue comments for completion markers
+
+    With USE_NEXUS_CORE enabled, delegates to _post_completion_comments_from_logs()
+    which uses the nexus-core framework for completion scanning and auto-chaining.
     """
-    try:
-        # FIRST: Check GitHub comments for recent completions
-        try:
-            # Get all open workflow issues (OR logic: any of the workflow labels)
-            workflow_labels = ["workflow:full", "workflow:shortened", "workflow:fast-track"]
-            issue_numbers = set()
-            
-            for label in workflow_labels:
-                try:
-                    result = run_command_with_retry(
-                        ["gh", "issue", "list", "--repo", get_issue_repo(),
-                         "--label", label,
-                         "--state", "open", "--json", "number", "--jq", ".[].number"],
-                        max_attempts=2, timeout=10
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to list issues with label {label}: {e}")
-                    continue
-                
-                if result.stdout and result.stdout.strip():
-                    issue_numbers.update(result.stdout.strip().split("\n"))
-            
-            # Process each unique open workflow issue
-            for issue_num in issue_numbers:
-                    if not issue_num:
-                        continue
-                    
-                    # Check workflow state (paused/stopped = skip auto-chain)
-                    state = get_workflow_state(issue_num)
-                    if state in ("paused", "stopped"):
-                        logger.debug(f"Skipping auto-chain for issue #{issue_num} (state: {state})")
-                        continue
-                    
-                    # Check if we've already processed this issue
-                    comment_chain_key = f"comment_{issue_num}"
-                    if comment_chain_key in auto_chained_agents:
-                        continue
-                    
-                    # Get recent comments
-                    try:
-                        result = run_command_with_retry(
-                            ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
-                             "--json", "comments", "--jq", ".comments[-1].body"],
-                            max_attempts=2, timeout=10
-                        )
-                        
-                        if result.stdout and result.stdout.strip():
-                            comment_body = result.stdout.strip()
-                            
-                            # Look for "Ready for @Agent" patterns (with or without backticks)
-                            # Patterns: "Ready for `@Agent`", "Ready for @Agent", "routing to @Agent"
-                            ready_patterns = [
-                                r"Ready for `@(\w+)`",
-                                r"Ready for @(\w+)",
-                                r"ready for `@(\w+)`",
-                                r"ready for @(\w+)",
-                                r"routing to `@(\w+)`",
-                                r"routing to @(\w+)",
-                                r"🔄 @(\w+) \(.*?\) ← NEXT"  # From workflow progress sections
-                            ]
-                            
-                            # Also check for explicit completion markers (no next agent)
-                            completion_markers = [
-                                r"workflow\s+complete",
-                                r"implementation\s+complete",
-                                r"all\s+steps?\s+complete",
-                                r"ready\s+for\s+review",
-                                r"ready\s+to\s+merge"
-                            ]
-                            
-                            is_complete = any(re.search(pattern, comment_body, re.IGNORECASE) for pattern in completion_markers)
-                            
-                            next_agent = None
-                            for pattern in ready_patterns:
-                                match = re.search(pattern, comment_body, re.IGNORECASE)
-                                if match:
-                                    next_agent = match.group(1)
-                                    logger.info(f"🔍 Detected completion in GitHub comment for issue #{issue_num}, next agent: @{next_agent}")
-                                    break
-                            
-                            if not next_agent and not is_complete:
-                                continue  # No agent mentioned and no completion marker, skip this issue
-                            
-                            # If workflow is complete (completion marker found), check for PR
-                            if is_complete and not next_agent:
-                                logger.info(f"✅ Workflow completion detected in GitHub comment for issue #{issue_num}")
-                                auto_chained_agents[comment_chain_key] = True
-                                
-                                # Determine project from issue body
-                                try:
-                                    result = run_command_with_retry(
-                                        ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
-                                         "--json", "body"],
-                                        max_attempts=2, timeout=10
-                                    )
-                                    body = _extract_body_from_result(result.stdout)
-                                    
-                                    task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
-                                    if task_file_match:
-                                        task_file = task_file_match.group(1)
-                                        project_root = None
-                                        for key, cfg in _iter_project_configs():
-                                            workspace = cfg.get("workspace")
-                                            if workspace:
-                                                workspace_abs = os.path.join(BASE_DIR, workspace)
-                                                if task_file.startswith(workspace_abs):
-                                                    project_root = key
-                                                    break
-                                        
-                                        if project_root:
-                                            logger.info(f"🎯 Checking for PR for completed workflow #{issue_num} (project: {project_root})")
-                                            check_and_notify_pr(issue_num, project_root)
-                                        else:
-                                            check_and_notify_pr(issue_num, "unknown")
-                                except Exception as e:
-                                    logger.error(f"Error checking for completion PR: {e}")
-                                
-                                continue  # Don't try to chain to next agent
-                            
-                            # CRITICAL: Check for duplicate launches
-                            # Check 1: Running processes
-                            check_result = subprocess.run(
-                                ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
-                                text=True, capture_output=True
-                            )
-                            if check_result.stdout:
-                                logger.info(f"⏭️ Agent already running for issue #{issue_num} (PID found), skipping auto-chain")
-                                auto_chained_agents[comment_chain_key] = True
-                                continue
-                            
-                            # Check 2: Recently launched (persistent tracker)
-                            launched_agents_tracker = load_launched_agents()  # Reload to catch other process launches
-                            if issue_num in launched_agents_tracker:
-                                last_launch = launched_agents_tracker[issue_num]
-                                age = time.time() - last_launch.get('timestamp', 0)
-                                if age < 120:  # Within last 2 minutes
-                                    logger.info(f"⏭️ Agent recently launched for issue #{issue_num} ({age:.0f}s ago), skipping duplicate")
-                                    auto_chained_agents[comment_chain_key] = True
-                                    continue
-                            
-                            # Check 3: Recent log files (within last 2 minutes)
-                            recent_logs = glob.glob(
-                                os.path.join(
-                                    BASE_DIR,
-                                    "**",
-                                    ".github",
-                                    "tasks",
-                                    "logs",
-                                    "**",
-                                    f"copilot_{issue_num}_*.log"
-                                ),
-                                recursive=True
-                            )
-                            if recent_logs:
-                                recent_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-                                latest_log_age = time.time() - os.path.getmtime(recent_logs[0])
-                                if latest_log_age < 120:  # Within last 2 minutes
-                                    logger.info(f"⏭️ Recent log file for issue #{issue_num} ({latest_log_age:.0f}s old), skipping duplicate")
-                                    auto_chained_agents[comment_chain_key] = True
-                                    continue
-                            
-                            # Launch the agent
-                            try:
-                                result = run_command_with_retry(
-                                    ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
-                                     "--json", "body"],
-                                    max_attempts=2, timeout=10
-                                )
-                                body = _extract_body_from_result(result.stdout)
-                                
-                                # Debug: log first 200 chars of body
-                                logger.debug(f"Issue #{issue_num} body preview: {body[:200]}")
-                                
-                                # Find task file (format: **Task File:** `/path/to/file`)
-                                task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
-                                if not task_file_match:
-                                    logger.warning(f"No task file in issue #{issue_num}")
-                                    continue
-                                
-                                task_file = task_file_match.group(1)
-                                if not os.path.exists(task_file):
-                                    logger.warning(f"Task file not found: {task_file}")
-                                    continue
-                                        
-                                
-                                # Get project config
-                                project_root = None
-                                for key, cfg in _iter_project_configs():
-                                    workspace = cfg.get("workspace")
-                                    if workspace:
-                                        workspace_abs = os.path.join(BASE_DIR, workspace)
-                                        if task_file.startswith(workspace_abs):
-                                            project_root = key
-                                            config = cfg
-                                            break
-                                
-                                if not project_root or not config.get("agents_dir"):
-                                    logger.warning(f"No project config for task file: {task_file}")
-                                    continue
-                                
-                                # Read task content
-                                with open(task_file, "r") as f:
-                                    task_content = f.read()
-                                
-                                # Determine tier
-                                type_match = re.search(r"\*\*Type:\*\*\s*(.+)", task_content)
-                                task_type = type_match.group(1).strip().lower() if type_match else "feature"
-                                tier_name, _, _ = get_sop_tier(task_type)
-                                
-                                issue_url = f"https://github.com/{get_issue_repo()}/issues/{issue_num}"
-                                agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
-                                workspace_abs = os.path.join(BASE_DIR, config["workspace"])
-                                
-                                # Create continuation prompt
-                                continuation_prompt = (
-                                    f"You are @{next_agent}. The previous workflow step is complete.\n\n"
-                                    f"Your task: Begin your step in the workflow.\n"
-                                    f"Read recent GitHub comments to understand what's been completed.\n"
-                                    f"Then perform your assigned work and post a status update.\n"
-                                    f"End with a completion marker like: 'Ready for `@NextAgent`'"
-                                )
-                                
-                                pid, tool_used = invoke_copilot_agent(
-                                    agents_dir=agents_abs,
-                                    workspace_dir=workspace_abs,
-                                    issue_url=issue_url,
-                                    tier_name=tier_name,
-                                    task_content=task_content,
-                                    continuation=True,
-                                    continuation_prompt=continuation_prompt,
-                                    log_subdir=project_root
-                                )
-                                
-                                if pid:
-                                    logger.info(f"🔗 Auto-chained from GitHub comment to @{next_agent} for issue #{issue_num} (PID: {pid}, tool: {tool_used})")
-                                    auto_chained_agents[comment_chain_key] = True
-                                    
-                                    # Track launch in persistent storage
-                                    launched_agents_tracker[issue_num] = {
-                                        'pid': pid,
-                                        'timestamp': time.time(),
-                                        'agent': next_agent,
-                                        'tool': tool_used
-                                    }
-                                    save_launched_agents(launched_agents_tracker)
-                                    
-                                    # Reset retry counter for the agent that just completed
-                                    # (they successfully transitioned to next agent)
-                                    current_agent = get_previous_agent(next_agent, tier_name)
-                                    if current_agent:
-                                        agent_monitor = AgentMonitor()
-                                        agent_monitor.reset_retries(issue_num, current_agent)
-                                        logger.info(f"✨ Reset retry counter for @{current_agent} (completed successfully)")
-                                    
-                                    # Send notification
-                                    message = (
-                                        f"🔗 **Auto-Chain from GitHub Comment**\n\n"
-                                        f"Issue: #{issue_num}\n"
-                                        f"Next agent: @{next_agent}\n"
-                                        f"PID: {pid}\n\n"
-                                        f"🔗 https://github.com/{get_issue_repo()}/issues/{issue_num}"
-                                    )
-                                    send_telegram_alert(message)
-                            except Exception as e:
-                                logger.error(f"Error launching agent from GitHub comment: {e}")
-                    
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"Timeout checking comments for issue #{issue_num}")
-                    except Exception as e:
-                        logger.error(f"Error checking GitHub comments for issue #{issue_num}: {e}")
-        
-        except Exception as e:
-            logger.debug(f"GitHub comment detection not available: {e}")
-        
-        # SECOND: Check log files for completions (existing logic)
-        log_pattern = os.path.join(
-            BASE_DIR,
-            "**",
-            ".github",
-            "tasks",
-            "logs",
-            "**",
-            "copilot_*.log"
-        )
-        log_files = glob.glob(log_pattern, recursive=True)
-        
-        for log_file in log_files:
-            # Extract issue number from filename
-            match = re.search(r"copilot_(\d+)_", os.path.basename(log_file))
-            if not match:
-                continue
-            
-            issue_num = match.group(1)
-            
-            # Check workflow state (paused/stopped = skip auto-chain)
-            state = get_workflow_state(issue_num)
-            if state in ("paused", "stopped"):
-                logger.debug(f"Skipping auto-chain for issue #{issue_num} (state: {state})")
-                continue
-            
-            # Skip if we've already chained from this exact log file
-            chain_key = f"{issue_num}_{os.path.basename(log_file)}"
-            if chain_key in auto_chained_agents:
-                continue
-            
-            # Check if process is still running
-            result = subprocess.run(
-                ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
-                text=True, capture_output=True
-            )
-            
-            # Only process if agent has finished
-            if not result.stdout:
-                # Check log for completion indicators
-                try:
-                    with open(log_file, "r") as f:
-                        log_content = f.read()
-                    
-                    # Look for completion markers
-                    completion_patterns = [
-                        r"Step \d+ Complete",
-                        r"✅.*(?:ready|complete|done)",
-                        r"(?:Technical|[A-Z].*?) (?:assessment|work|review) (?:complete|done)",
-                        r"Testing complete",
-                        r"Task Complete",
-                        r"`@\w+`",  # Any backtick-escaped mention is a signal of context
-                    ]
-                    
-                    completed = any(re.search(pattern, log_content, re.IGNORECASE) for pattern in completion_patterns)
-                    
-                    if not completed:
-                        continue
-                    
-                    # Extract next agent mention - look for ANY backtick-escaped agent name
-                    # Patterns: `@AgentName`, "Ball is in `@Agent`'s court", etc.
-                    next_agent_matches = re.findall(r"`@(\w+)`", log_content)
-                    
-                    if not next_agent_matches:
-                        logger.info(f"✅ Workflow completion detected for issue #{issue_num} (no next agent mentioned)")
-                        auto_chained_agents[chain_key] = True  # Mark as processed to avoid re-processing
-                        
-                        # Try to determine project from task file
-                        try:
-                            result = subprocess.run(
-                                ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
-                                 "--json", "body"],
-                                text=True, capture_output=True, timeout=10
-                            )
-                            body = _extract_body_from_result(result.stdout)
-                            
-                            # Find task file
-                            task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
-                            if task_file_match:
-                                task_file = task_file_match.group(1)
-                                # Determine project from task file path
-                                project_root = None
-                                for key, cfg in _iter_project_configs():
-                                    workspace = cfg.get("workspace")
-                                    if workspace:
-                                        workspace_abs = os.path.join(BASE_DIR, workspace)
-                                        if task_file.startswith(workspace_abs):
-                                            project_root = key
-                                            break
-                                
-                                if project_root:
-                                    logger.info(f"🎯 Checking for PR for completed workflow #{issue_num} (project: {project_root})")
-                                    check_and_notify_pr(issue_num, project_root)
-                                else:
-                                    logger.warning(f"Could not determine project for issue #{issue_num}")
-                                    check_and_notify_pr(issue_num, "unknown")
-                        except Exception as e:
-                            logger.error(f"Error checking for completion PR: {e}")
-                        
-                        continue
-                    
-                    # Use the last mentioned agent (most likely the next one)
-                    next_agent = next_agent_matches[-1]
-                    
-                    # Get issue details to find task file
-                    try:
-                        result = subprocess.run(
-                            ["gh", "issue", "view", issue_num, "--repo", get_issue_repo(),
-                             "--json", "body"],
-                            text=True, capture_output=True, timeout=10
-                        )
-                        body = _extract_body_from_result(result.stdout)
-                        
-                        # Find task file (format: **Task File:** `/path/to/file`)
-                        task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
-                        if not task_file_match:
-                            logger.warning(f"No task file found for issue #{issue_num}")
-                            continue
-                        
-                        task_file = task_file_match.group(1)
-                        if not os.path.exists(task_file):
-                            logger.warning(f"Task file not found: {task_file}")
-                            continue
-                        
-                        # Get project config
-                        project_root = None
-                        for key, cfg in _iter_project_configs():
-                            workspace = cfg.get("workspace")
-                            if workspace:
-                                workspace_abs = os.path.join(BASE_DIR, workspace)
-                                if task_file.startswith(workspace_abs):
-                                    project_root = key
-                                    config = cfg
-                                    break
-                        
-                        if not project_root or not config.get("agents_dir"):
-                            logger.warning(f"No project config for task file: {task_file}")
-                            continue
-                        
-                        # Read task content
-                        with open(task_file, "r") as f:
-                            task_content = f.read()
-                        
-                        # Determine tier
-                        type_match = re.search(r"\*\*Type:\*\*\s*(.+)", task_content)
-                        task_type = type_match.group(1).strip().lower() if type_match else "feature"
-                        tier_name, _, _ = get_sop_tier(task_type)
-                        
-                        issue_url = f"https://github.com/{get_issue_repo()}/issues/{issue_num}"
-                        agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
-                        workspace_abs = os.path.join(BASE_DIR, config["workspace"])
-                        
-                        # CRITICAL: Check for duplicate launches
-                        # Check 1: Running processes
-                        check_running = subprocess.run(
-                            ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
-                            text=True, capture_output=True
-                        )
-                        if check_running.stdout:
-                            logger.info(f"⏭️ Agent already running for issue #{issue_num} (PID found), skipping auto-chain from log")
-                            auto_chained_agents[chain_key] = True
-                            continue
-                        
-                        # Check 2: Recently launched (persistent tracker)
-                        launched_agents_tracker = load_launched_agents()  # Reload
-                        if issue_num in launched_agents_tracker:
-                            last_launch = launched_agents_tracker[issue_num]
-                            age = time.time() - last_launch.get('timestamp', 0)
-                            if age < 120:  # Within last 2 minutes
-                                logger.info(f"⏭️ Agent recently launched for issue #{issue_num} ({age:.0f}s ago), skipping duplicate from log")
-                                auto_chained_agents[chain_key] = True
-                                continue
-                        
-                        # Launch next agent with clear instructions
-                        continuation_prompt = (
-                            f"You are @{next_agent}. The previous step has been completed by another agent.\n\n"
-                            f"Your task: Complete the next step in the workflow.\n"
-                            f"1. Review previous agent's work in GitHub comments and the task file\n"
-                            f"2. Perform your assigned work for this step\n"
-                            f"3. Update the task file with your results\n"
-                            f"4. Post a GitHub comment with your findings\n"
-                            f"5. **END YOUR RESPONSE WITH AN EXACT COMPLETION MARKER** (copy one):\n\n"
-                            f"   ✅ Step X Complete - Ready for `@NextAgent`\n"
-                            f"   OR\n"
-                            f"   ✅ ready for `@NextAgent`\n\n"
-                            f"**Replace 'NextAgent' with the actual name** (e.g., `@Architect`, `@QAGuard`)\n"
-                            f"**IMPORTANT:** Use backticks around @AgentName - this is required for detection\n\n"
-                            f"DO NOT attempt to invoke the next agent yourself.\n"
-                            f"The system will automatically detect your completion marker and chain to the next agent.\n"
-                            f"Simply complete your work, add the marker, and exit."
-                        )
-                        
-                        pid, tool_used = invoke_copilot_agent(
-                            agents_dir=agents_abs,
-                            workspace_dir=workspace_abs,
-                            issue_url=issue_url,
-                            tier_name=tier_name,
-                            task_content=task_content,
-                            continuation=True,
-                            continuation_prompt=continuation_prompt,
-                            log_subdir=project_root
-                        )
-                        
-                        if pid:
-                            logger.info(f"🔗 Auto-chained to @{next_agent} for issue #{issue_num} (PID: {pid}, tool: {tool_used})")
-                            auto_chained_agents[chain_key] = True
-                            
-                            # Track launch in persistent storage
-                            launched_agents_tracker[issue_num] = {
-                                'pid': pid,
-                                'timestamp': time.time(),
-                                'agent': next_agent,
-                                'tool': tool_used
-                            }
-                            save_launched_agents(launched_agents_tracker)
-                            
-                            # Send notification
-                            message = (
-                                f"🔗 **Auto-Chain**\n\n"
-                                f"Issue: #{issue_num}\n"
-                                f"Previous agent completed\n"
-                                f"Next agent: @{next_agent}\n"
-                                f"PID: {pid}\n"
-                                f"Tool: {tool_used}\n\n"
-                                f"🔗 https://github.com/{get_issue_repo()}/issues/{issue_num}"
-                            )
-                            send_telegram_alert(message)
-                        else:
-                            logger.error(f"Failed to auto-chain to @{next_agent} for issue #{issue_num}")
-                    
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"Timeout fetching issue #{issue_num} for auto-chain")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse issue data: {e}")
-                    except Exception as e:
-                        logger.error(f"Error in auto-chain for issue #{issue_num}: {e}")
-                
-                except Exception as e:
-                    logger.error(f"Error reading log file {log_file}: {e}")
-    
-    except Exception as e:
-        logger.error(f"Error in check_completed_agents: {e}")
+    if not USE_NEXUS_CORE:
+        logger.warning("Legacy check_completed_agents path removed — set USE_NEXUS_CORE=true")
+        return
+    _post_completion_comments_from_logs()
 
 
 # SOP Checklist Templates
 SOP_FULL = """## SOP Checklist — New Feature
-- [ ] 1. **Vision & Scope** — `Ghabs`: Founder's Check
-- [ ] 2. **Technical Feasibility** — `Atlas`: HOW and WHEN
-- [ ] 3. **Architecture Design** — `Architect`: ADR + breakdown
-- [ ] 4. **UX Design** — `ProductDesigner`: Wireframes
-- [ ] 5. **Implementation** — Tier 2 Lead: Code + tests
-- [ ] 6. **Quality Gate** — `QAGuard`: Coverage check
-- [ ] 7. **Compliance Gate** — `Privacy`: PIA (if user data)
-- [ ] 8. **Deployment** — `OpsCommander`: Production
-- [ ] 9. **Documentation** — `Scribe`: Changelog + docs"""
+- [ ] 1. **Vision & Scope** — Define requirements
+- [ ] 2. **Technical Feasibility** — Assess approach and timeline
+- [ ] 3. **Architecture Design** — Create ADR + breakdown
+- [ ] 4. **UX Design** — Design wireframes
+- [ ] 5. **Implementation** — Write code + tests
+- [ ] 6. **Quality Gate** — Verify coverage
+- [ ] 7. **Compliance Gate** — PIA (if user data)
+- [ ] 8. **Deployment** — Deploy to production
+- [ ] 9. **Documentation** — Update changelog + docs"""
 
 SOP_SHORTENED = """## SOP Checklist — Bug Fix
-- [ ] 1. **Triage** — `ProjectLead`: Severity + routing
-- [ ] 2. **Root Cause Analysis** — Tier 2 Lead
-- [ ] 3. **Fix** — Tier 2 Lead: Code + regression test
-- [ ] 4. **Verify** — `QAGuard`: Regression suite
-- [ ] 5. **Deploy** — `OpsCommander`
-- [ ] 6. **Document** — `Scribe`: Changelog"""
+- [ ] 1. **Triage** — Severity + routing
+- [ ] 2. **Root Cause Analysis** — Investigate issue
+- [ ] 3. **Fix** — Code + regression test
+- [ ] 4. **Verify** — Regression suite
+- [ ] 5. **Deploy** — Deploy to production
+- [ ] 6. **Document** — Update changelog"""
 
 SOP_FAST_TRACK = """## SOP Checklist — Fast-Track
-- [ ] 1. **Triage** — `ProjectLead`: Route to repo
-- [ ] 2. **Implementation** — Copilot: Code + tests
-- [ ] 3. **Verify** — `QAGuard`: Quick check
-- [ ] 4. **Deploy** — `OpsCommander`"""
+- [ ] 1. **Triage** — Route to repo
+- [ ] 2. **Implementation** — Code + tests
+- [ ] 3. **Verify** — Quick check
+- [ ] 4. **Deploy** — Deploy changes"""
 
 
 def get_sop_tier(task_type, title=None, body=None):
@@ -957,24 +727,6 @@ def get_sop_tier(task_type, title=None, body=None):
         return "shortened", SOP_SHORTENED, "workflow:shortened"
     else:
         return "full", SOP_FULL, "workflow:full"
-
-
-def get_workflow_name(tier_name):
-    """Returns the workflow slash-command name for the tier."""
-    if tier_name == "fast-track":
-        return "bug_fix"  # Fast-track follows simplified bug_fix flow
-    elif tier_name == "shortened":
-        return "bug_fix"
-    else:
-        return "new_feature"
-
-
-def is_final_agent(tier_name, agent_name):
-    """Check if this agent is the final step in the workflow."""
-    workflow = WORKFLOW_CHAIN.get(tier_name, [])
-    if workflow and workflow[-1][0] == agent_name:
-        return True
-    return False
 
 
 def create_github_issue(title, body, project, workflow_label, task_type, tier_name, github_repo):
@@ -1047,18 +799,111 @@ def process_file(filepath):
         task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
         # Determine project from filepath
-        # filepath is .../project/.github/inbox/file.md
-        # project_root is .../project
+        # filepath is .../workspace/.nexus/inbox/file.md
+        # Find which project config has a workspace that matches this path
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(filepath)))
-        project_name = os.path.basename(project_root)
-
-        config = PROJECT_CONFIG.get(project_name)
+        
+        # Look up project by matching workspace path
+        project_name = None
+        config = None
+        for key, cfg in _iter_project_configs():
+            workspace = cfg.get("workspace")
+            if workspace:
+                workspace_abs = os.path.join(BASE_DIR, workspace)
+                if project_root == workspace_abs or project_root.startswith(workspace_abs + os.sep):
+                    project_name = key
+                    config = cfg
+                    break
+        
         if not config:
-            logger.warning(f"⚠️ No project config for '{project_name}', skipping.")
+            logger.warning(f"⚠️ No project config for workspace '{project_root}', skipping.")
             return
 
         logger.info(f"Project: {project_name}")
 
+        # Check if this task came from webhook (already has GitHub issue)
+        source_match = re.search(r'\*\*Source:\*\*\s*(.+)', content)
+        source = source_match.group(1).strip().lower() if source_match else None
+        
+        # Extract issue number and URL if from webhook
+        issue_num_match = re.search(r'\*\*Issue Number:\*\*\s*(.+)', content)
+        issue_url_match = re.search(r'\*\*URL:\*\*\s*(.+)', content)
+        agent_type_match = re.search(r'\*\*Agent Type:\*\*\s*(.+)', content)
+        
+        if source == "webhook":
+            # This task is from a webhook - issue already exists, skip creation
+            issue_number = issue_num_match.group(1).strip() if issue_num_match else None
+            issue_url = issue_url_match.group(1).strip() if issue_url_match else None
+            agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
+            
+            if not issue_url or not issue_number:
+                logger.error(f"⚠️ Webhook task missing issue URL or number, skipping: {filepath}")
+                return
+            
+            logger.info(f"📌 Webhook task for existing issue #{issue_number}, launching agent directly")
+            
+            # Guard: skip if an agent was recently launched for this issue
+            # (prevents double-launch when processor creates a GH issue and the
+            # resulting webhook fires back into this path)
+            if is_recent_launch(issue_number):
+                logger.info(f"⏭️ Skipping webhook launch for issue #{issue_number} — agent recently launched")
+                # Still move file to active so it's not re-processed
+                active_dir = get_tasks_active_dir(project_root)
+                os.makedirs(active_dir, exist_ok=True)
+                new_filepath = os.path.join(active_dir, os.path.basename(filepath))
+                shutil.move(filepath, new_filepath)
+                return
+            
+            # Move file to project workspace active folder
+            active_dir = get_tasks_active_dir(project_root)
+            os.makedirs(active_dir, exist_ok=True)
+            new_filepath = os.path.join(active_dir, os.path.basename(filepath))
+            logger.info(f"Moving task to active: {new_filepath}")
+            shutil.move(filepath, new_filepath)
+            
+            # Launch agent directly for existing GitHub issue
+            agents_dir_val = config.get("agents_dir")
+            if agents_dir_val and issue_url:
+                agents_abs = os.path.join(BASE_DIR, agents_dir_val)
+                workspace_abs = os.path.join(BASE_DIR, config["workspace"])
+                
+                # Use specified agent type or get from workflow
+                if not agent_type or agent_type == "triage":
+                    agent_type = _get_initial_agent_from_workflow(project_name)
+                    if not agent_type:
+                        logger.error(f"Stopping launch: missing workflow definition for {project_name}")
+                        send_telegram_alert(f"Stopping launch: missing workflow for {project_name}")
+                        return
+                
+                # Resolve tier from issue labels; fall back to fast-track
+                tier_name = get_sop_tier_from_issue(issue_number, project_name) or "fast-track"
+
+                pid, tool_used = invoke_copilot_agent(
+                    agents_dir=agents_abs,
+                    workspace_dir=workspace_abs,
+                    issue_url=issue_url,
+                    tier_name=tier_name,
+                    task_content=content,
+                    log_subdir=project_name,
+                    agent_type=agent_type,
+                    project_name=project_name
+                )
+                
+                if pid:
+                    try:
+                        with open(new_filepath, 'a') as f:
+                            f.write(f"\n**Agent PID:** {pid}\n")
+                            f.write(f"**Agent Tool:** {tool_used}\n")
+                    except Exception as e:
+                        logger.error(f"Failed to append PID: {e}")
+                
+                logger.info(f"✅ Launched {agent_type} agent for webhook issue #{issue_number}")
+            else:
+                logger.info(f"ℹ️ No agents directory for {project_name}, skipping agent launch.")
+            
+            return  # Done processing webhook task
+        
+        # Standard task processing (create new GitHub issue)
         # Check if issue name was already generated (in telegram_bot)
         issue_name_match = re.search(r'\*\*Issue Name:\*\*\s*(.+)', content)
         if issue_name_match:
@@ -1077,7 +922,7 @@ def process_file(filepath):
         sop_checklist = sop_template
 
         # Move file to project workspace active folder
-        active_dir = os.path.join(project_root, ".github", "tasks", "active")
+        active_dir = get_tasks_active_dir(project_root)
         os.makedirs(active_dir, exist_ok=True)
         new_filepath = os.path.join(active_dir, os.path.basename(filepath))
         logger.info(f"Moving task to active: {new_filepath}")
@@ -1158,6 +1003,15 @@ def process_file(filepath):
         if agents_dir_val is not None and issue_url:
             agents_abs = os.path.join(BASE_DIR, agents_dir_val)
             workspace_abs = os.path.join(BASE_DIR, config["workspace"])
+            initial_agent = _get_initial_agent_from_workflow(project_name)
+            if not initial_agent:
+                logger.error(
+                    f"Stopping launch: missing workflow definition for {project_name}"
+                )
+                send_telegram_alert(
+                    f"Stopping launch: missing workflow definition for {project_name}"
+                )
+                return
 
             pid, tool_used = invoke_copilot_agent(
                 agents_dir=agents_abs,
@@ -1165,7 +1019,9 @@ def process_file(filepath):
                 issue_url=issue_url,
                 tier_name=tier_name,
                 task_content=content,
-                log_subdir=project_name
+                log_subdir=project_name,
+                agent_type=initial_agent,
+                project_name=project_name
             )
 
             if pid:
@@ -1193,8 +1049,9 @@ def main():
     check_interval = 60  # Check for stuck agents and comments every 60 seconds
     
     while True:
-        # Scan for md files in project/.github/inbox/*.md
-        pattern = os.path.join(BASE_DIR, "**", ".github", "inbox", "*.md")
+        # Scan for md files in project/{nexus_dir}/inbox/*.md
+        nexus_dir_name = get_nexus_dir_name()
+        pattern = os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*.md")
         files = glob.glob(pattern, recursive=True)
 
         for filepath in files:

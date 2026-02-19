@@ -33,7 +33,7 @@ class AgentMonitor:
             if time_since_update > STUCK_AGENT_THRESHOLD:
                 # Check if process is still running
                 result = subprocess.run(
-                    ["pgrep", "-af", f"copilot.*issues/{issue_num}"],
+                    ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
                     text=True, capture_output=True, timeout=5
                 )
 

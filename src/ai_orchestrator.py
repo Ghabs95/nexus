@@ -19,6 +19,8 @@ from enum import Enum
 from typing import Dict, Optional, Tuple, Any
 from pathlib import Path
 
+from config import get_tasks_logs_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -330,9 +332,7 @@ class AIOrchestrator:
         ]
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
-        if log_subdir:
-            log_dir = os.path.join(log_dir, log_subdir)
+        log_dir = get_tasks_logs_dir(workspace_dir, log_subdir)
         os.makedirs(log_dir, exist_ok=True)
         log_suffix = f"{issue_num}_{timestamp}" if issue_num else timestamp
         log_path = os.path.join(log_dir, f"copilot_{log_suffix}.log")
@@ -382,9 +382,7 @@ class AIOrchestrator:
         ]
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_dir = os.path.join(workspace_dir, ".github", "tasks", "logs")
-        if log_subdir:
-            log_dir = os.path.join(log_dir, log_subdir)
+        log_dir = get_tasks_logs_dir(workspace_dir, log_subdir)
         os.makedirs(log_dir, exist_ok=True)
         log_suffix = f"{issue_num}_{timestamp}" if issue_num else timestamp
         log_path = os.path.join(log_dir, f"gemini_{log_suffix}.log")
@@ -661,6 +659,16 @@ Project: {project}
 
 Return ONLY the name, no quotes."""
 
+        elif task == "refine_description":
+            return f"""Rewrite this task description to be clear, concise, and structured.
+Preserve all concrete requirements, constraints, and details. Do not invent facts.
+
+Return in plain text (no Markdown headers), using short paragraphs and bullet points if helpful.
+
+Input:
+{text.strip()}
+"""
+
         else:
             return text
 
@@ -696,6 +704,8 @@ Return ONLY the name, no quotes."""
             text = kwargs.get("text", "")
             words = text.split()[:3]
             return {"text": "-".join(words).lower()}
+        elif task == "refine_description":
+            return {"text": kwargs.get("text", "")}
         else:
             return {}
 

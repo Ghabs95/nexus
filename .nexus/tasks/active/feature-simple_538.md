@@ -2,7 +2,7 @@
 **Project:** General Inbox (Nexus)
 **Type:** feature-simple
 **Issue Name:** workflow-approval-gate
-**Status:** Pending
+**Status:** Complete
 
 What: Allow workflows to pause and wait for human approval before proceeding (e.g., PR review, deploy confirmation)
 
@@ -72,3 +72,32 @@ steps:
 **Verdict:** ✅ APPROVED — branch is clean, all tests pass, implementation is sound.
 
 **Status:** QA complete — ready for deploy.
+
+---
+
+## Deploy — @OpsCommander
+
+**PR Merged:** https://github.com/Ghabs95/nexus/pull/1 → `main`
+**Merge commit:** `df6fcd85` — Merged `feat/workflow-approval-gate` into `main`
+**Date:** 2026-02-18
+
+**Actions taken:**
+- Verified QA approval (136/136 tests passing, no regressions)
+- Merged PR #1 (`feat/workflow-approval-gate` → `main`) via squash-merge
+- ⚠️ Advisory noted: uncommitted local `tests/conftest.py` changes were NOT part of the merge; no action needed
+
+**Status:** ✅ Deployed — `feat/workflow-approval-gate` is live on `main`.
+
+---
+
+## Documentation — @Scribe
+
+**Branch:** `docs/changelog-workflow-approval-gate`
+**Date:** 2026-02-18
+
+**Actions taken:**
+- Created `CHANGELOG.md` at repo root documenting the `workflow-approval-gate` feature
+- Changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format
+- Documents: new YAML fields (`approval_required`, `approval_timeout`, `approvers`), `AWAITING_APPROVAL` state, engine methods (`approve_step`, `deny_step`), Telegram notification integration, and `StateManager` persistence additions
+
+**Status:** ✅ Documentation complete — changelog pushed to `docs/changelog-workflow-approval-gate`.
