@@ -2164,15 +2164,18 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     type_match = re.search(r"\*\*Type:\*\*\s*(.+)", content)
     task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
-    # Resolve tier: launched_agents tracker → issue labels → task_type heuristic
+    # Resolve tier: launched_agents tracker → issue labels → halt if unknown
     from state_manager import StateManager
     from agent_launcher import get_sop_tier_from_issue
-    tier_name = (
-        StateManager.get_last_tier_for_issue(issue_num)
-        or get_sop_tier_from_issue(issue_num, project_name or project_key)
-    )
+    tracker_tier = StateManager.get_last_tier_for_issue(issue_num)
+    label_tier = get_sop_tier_from_issue(issue_num, project_name or project_key)
+    tier_name = label_tier or tracker_tier
     if not tier_name:
-        tier_name, _, _ = get_sop_tier(task_type)
+        await update.effective_message.reply_text(
+            f"⚠️ Cannot determine workflow tier for issue #{issue_num}.\n"
+            f"Add a `workflow:` label (e.g. `workflow:full`) to the issue and retry."
+        )
+        return
     issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
     msg = await update.effective_message.reply_text(f"🔁 Reprocessing issue #{issue_num}...")

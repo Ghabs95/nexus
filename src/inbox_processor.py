@@ -91,6 +91,74 @@ def _get_github_issue_plugin(repo: str, max_attempts: int = 3, timeout: int = 30
         cache_key=f"github:inbox:{repo}:{max_attempts}:{timeout}",
     )
 
+
+def _resolve_tier_for_issue(
+    issue_num: str,
+    project_name: str,
+    repo: str,
+    *,
+    context: str = "auto-chain",
+) -> Optional[str]:
+    """Resolve workflow tier for an issue, halt with alert when unknown.
+
+    Resolution order:
+      1. ``launched_agents`` tracker (persisted from the most recent launch)
+      2. Issue ``workflow:`` labels on GitHub
+      3. ``None`` — caller must halt the flow
+
+    When the tier is found from the tracker but the issue has no
+    ``workflow:`` label, the label is added automatically so that
+    future reads succeed.
+
+    Returns:
+        Tier name (``"full"``, ``"shortened"``, ``"fast-track"``) or
+        ``None`` when the tier cannot be determined.  When ``None`` is
+        returned, a Telegram alert has already been sent.
+    """
+    tracker_tier = StateManager.get_last_tier_for_issue(issue_num)
+    label_tier = get_sop_tier_from_issue(issue_num, project_name)
+
+    if tracker_tier and label_tier:
+        # Both sources available — prefer label (canonical), but warn on mismatch
+        if tracker_tier != label_tier:
+            logger.warning(
+                f"Tier mismatch for issue #{issue_num}: "
+                f"tracker={tracker_tier}, label={label_tier}. Using label."
+            )
+        return label_tier
+
+    if label_tier:
+        return label_tier
+
+    if tracker_tier:
+        # Label missing — backfill it so future reads work
+        _ensure_workflow_label(issue_num, tracker_tier, repo)
+        return tracker_tier
+
+    # Neither source available — halt
+    logger.error(
+        f"Cannot determine workflow tier for issue #{issue_num} "
+        f"({context}): no tracker entry and no workflow: label."
+    )
+    send_telegram_alert(
+        f"⚠️ {context.title()} halted for issue #{issue_num}: "
+        f"missing `workflow:` label and no prior launch data.\n"
+        f"Add a label (e.g. `workflow:full`) to the issue and retry."
+    )
+    return None
+
+
+def _ensure_workflow_label(issue_num: str, tier_name: str, repo: str) -> None:
+    """Add `workflow:<tier>` label to an issue if missing."""
+    label = f"workflow:{tier_name}"
+    try:
+        plugin = _get_github_issue_plugin(repo, max_attempts=2, timeout=10)
+        plugin.add_label(str(issue_num), label)
+        logger.info(f"Added missing label '{label}' to issue #{issue_num}")
+    except Exception as e:
+        logger.warning(f"Failed to add label '{label}' to issue #{issue_num}: {e}")
+
+
 # Wrapper functions for backward compatibility - these now delegate to StateManager
 def load_launched_agents():
     """Load recently launched agents from persistent storage."""
@@ -404,13 +472,13 @@ def _post_completion_comments_from_logs() -> None:
 
             workflow_policy = get_workflow_policy_plugin(cache_key="workflow-policy:inbox")
 
-            # Resolve tier: launched_agents tracker → issue labels → "full" (safest default)
+            # Resolve tier (halt if unknown — prevents wrong workflow execution)
             workflow_path = get_workflow_definition_path(project_name)
-            tier_name = (
-                StateManager.get_last_tier_for_issue(issue_num)
-                or get_sop_tier_from_issue(issue_num, project_name)
-                or "full"
+            tier_name = _resolve_tier_for_issue(
+                issue_num, project_name, repo, context="auto-chain"
             )
+            if not tier_name:
+                continue
             if workflow_path and os.path.exists(workflow_path):
                 try:
                     from nexus.core.workflow import WorkflowDefinition
@@ -971,12 +1039,13 @@ def process_file(filepath):
                         send_telegram_alert(f"Stopping launch: missing workflow for {project_name}")
                         return
                 
-                # Resolve tier: launched_agents tracker → issue labels → "full" (safest default)
-                tier_name = (
-                    StateManager.get_last_tier_for_issue(issue_number)
-                    or get_sop_tier_from_issue(issue_number, project_name)
-                    or "full"
+                # Resolve tier (halt if unknown — prevents wrong workflow execution)
+                repo_for_tier = config.get("github_repo", get_github_repo("nexus"))
+                tier_name = _resolve_tier_for_issue(
+                    issue_number, project_name, repo_for_tier, context="webhook launch"
                 )
+                if not tier_name:
+                    return
 
                 pid, tool_used = invoke_copilot_agent(
                     agents_dir=agents_abs,

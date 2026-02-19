@@ -479,15 +479,20 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         logger.error(f"Failed to read task file {task_file}: {e}")
         return False
     
-    # Get workflow tier: launched_agents tracker → issue labels → "full"
+    # Get workflow tier: launched_agents tracker → issue labels → halt if unknown
     from state_manager import StateManager
-    tier_name = (
-        StateManager.get_last_tier_for_issue(issue_number)
-        or get_sop_tier_from_issue(issue_number, project_root)
-        or "full"
-    )
+    repo = get_github_repo(project_root)
+    tracker_tier = StateManager.get_last_tier_for_issue(issue_number)
+    label_tier = get_sop_tier_from_issue(issue_number, project_root)
+    tier_name = label_tier or tracker_tier
+    if not tier_name:
+        logger.error(
+            f"Cannot determine workflow tier for issue #{issue_number}: "
+            "no tracker entry and no workflow: label."
+        )
+        return False
     
-    issue_url = f"https://github.com/{get_github_repo(project_root)}/issues/{issue_number}"
+    issue_url = f"https://github.com/{repo}/issues/{issue_number}"
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])
     workspace_abs = os.path.join(BASE_DIR, config["workspace"])
     
