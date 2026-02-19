@@ -1,10 +1,7 @@
 """Tests for state_manager module."""
 import pytest
-import json
-import os
-import tempfile
 import time
-from unittest.mock import patch, mock_open, MagicMock
+from unittest.mock import patch, MagicMock
 import sys
 sys.path.insert(0, '/home/ubuntu/git/ghabs/nexus/src')
 from state_manager import StateManager
@@ -15,45 +12,36 @@ class TestTrackedIssues:
     """Tests for tracked issues persistence."""
     
     def test_load_tracked_issues_empty_file(self):
-        """Test loading when file doesn't exist."""
-        with patch('state_manager.os.path.exists', return_value=False):
+        """Test loading tracked issues when store is empty."""
+        plugin = MagicMock()
+        plugin.load_json.return_value = {}
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             result = StateManager.load_tracked_issues()
             assert result == {}
     
     def test_load_tracked_issues_valid_data(self):
         """Test loading valid tracked issues."""
         test_data = {"123": {"project": "test", "status": "active"}}
-        mock_file = mock_open(read_data=json.dumps(test_data))
-        
-        with patch('state_manager.os.path.exists', return_value=True):
-            with patch('builtins.open', mock_file):
-                result = StateManager.load_tracked_issues()
-                assert result == test_data
+        plugin = MagicMock()
+        plugin.load_json.return_value = test_data
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
+            result = StateManager.load_tracked_issues()
+            assert result == test_data
     
-    def test_load_tracked_issues_invalid_json(self):
-        """Test loading when JSON is corrupted."""
-        mock_file = mock_open(read_data="not valid json")
-        
-        with patch('state_manager.os.path.exists', return_value=True):
-            with patch('builtins.open', mock_file):
-                result = StateManager.load_tracked_issues()
-                assert result == {}
+    def test_load_tracked_issues_plugin_missing(self):
+        """Test loading when plugin is unavailable."""
+        with patch('state_manager._get_state_store_plugin', return_value=None):
+            result = StateManager.load_tracked_issues()
+            assert result == {}
     
     def test_save_tracked_issues(self):
         """Test saving tracked issues."""
         test_data = {"111": {"project": "test", "status": "active"}}
-        mock_file = mock_open()
-        
-        with patch('builtins.open', mock_file):
+        plugin = MagicMock()
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             StateManager.save_tracked_issues(test_data)
-            
-            # Verify file was opened for writing
-            assert mock_file.called
-            
-            # Get the written content
-            handle = mock_file()
-            written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
-            assert json.loads(written_data) == test_data
+            plugin.save_json.assert_called_once()
+            assert plugin.save_json.call_args.args[1] == test_data
     
     def test_add_tracked_issue(self):
         """Test adding a tracked issue."""
@@ -84,8 +72,10 @@ class TestWorkflowState:
     """Tests for workflow state persistence."""
     
     def test_load_workflow_state_empty(self):
-        """Test loading workflow state when file doesn't exist."""
-        with patch('state_manager.os.path.exists', return_value=False):
+        """Test loading workflow state when store is empty."""
+        plugin = MagicMock()
+        plugin.load_json.return_value = {}
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             result = StateManager.load_workflow_state()
             assert result == {}
     
@@ -97,12 +87,11 @@ class TestWorkflowState:
                 "timestamp": 1234567890.0
             }
         }
-        mock_file = mock_open(read_data=json.dumps(test_data))
-        
-        with patch('state_manager.os.path.exists', return_value=True):
-            with patch('builtins.open', mock_file):
-                result = StateManager.load_workflow_state()
-                assert result == test_data
+        plugin = MagicMock()
+        plugin.load_json.return_value = test_data
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
+            result = StateManager.load_workflow_state()
+            assert result == test_data
     
     def test_save_workflow_state(self):
         """Test saving workflow state."""
@@ -112,15 +101,11 @@ class TestWorkflowState:
                 "timestamp": 1234567890.0
             }
         }
-        mock_file = mock_open()
-        
-        with patch('builtins.open', mock_file):
+        plugin = MagicMock()
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             StateManager.save_workflow_state(test_data)
-            
-            assert mock_file.called
-            handle = mock_file()
-            written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
-            assert json.loads(written_data) == test_data
+            plugin.save_json.assert_called_once()
+            assert plugin.save_json.call_args.args[1] == test_data
     
     def test_set_workflow_state_paused(self):
         """Test setting workflow to PAUSED."""
@@ -162,18 +147,16 @@ class TestAuditLog:
     """Tests for audit logging."""
     
     def test_audit_log_creates_entry(self):
-        """Test that audit log creates/appends to file."""
-        mock_file = mock_open()
-        
-        with patch('builtins.open', mock_file):
+        """Test that audit log appends an entry through the state store plugin."""
+        plugin = MagicMock()
+        plugin.append_line.return_value = True
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             with patch('state_manager.datetime') as mock_dt:
                 mock_dt.now.return_value.isoformat.return_value = "2024-01-01T12:00:00"
                 
                 StateManager.audit_log(123, "test_event", "test details")
-                
-                assert mock_file.called
-                handle = mock_file()
-                written = handle.write.call_args[0][0]
+
+                written = plugin.append_line.call_args.args[1]
                 
                 assert "Issue #123" in written
                 assert "test_event" in written
@@ -182,16 +165,15 @@ class TestAuditLog:
     
     def test_audit_log_no_details(self):
         """Test audit log with no additional details."""
-        mock_file = mock_open()
-        
-        with patch('builtins.open', mock_file):
+        plugin = MagicMock()
+        plugin.append_line.return_value = True
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             with patch('state_manager.datetime') as mock_dt:
                 mock_dt.now.return_value.isoformat.return_value = "2024-01-01T12:00:00"
                 
                 StateManager.audit_log(456, "simple_event")
-                
-                handle = mock_file()
-                written = handle.write.call_args[0][0]
+
+                written = plugin.append_line.call_args.args[1]
                 
                 assert "Issue #456" in written
                 assert "simple_event" in written
@@ -201,8 +183,10 @@ class TestLaunchedAgents:
     """Tests for launched agents tracking."""
     
     def test_load_launched_agents_empty(self):
-        """Test loading launched agents when file doesn't exist."""
-        with patch('state_manager.os.path.exists', return_value=False):
+        """Test loading launched agents when store is empty."""
+        plugin = MagicMock()
+        plugin.load_json.return_value = {}
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
             result = StateManager.load_launched_agents()
             assert result == {}
     
@@ -214,15 +198,14 @@ class TestLaunchedAgents:
             "123_OldAgent": {"timestamp": old_time, "issue": "123"},
             "456_RecentAgent": {"timestamp": recent_time, "issue": "456"}
         }
-        mock_file = mock_open(read_data=json.dumps(test_data))
-        
-        with patch('state_manager.os.path.exists', return_value=True):
-            with patch('builtins.open', mock_file):
-                result = StateManager.load_launched_agents()
-                
-                # Old entry should be filtered out (>2 minute window)
-                assert "123_OldAgent" not in result
-                assert "456_RecentAgent" in result
+        plugin = MagicMock()
+        plugin.load_json.return_value = test_data
+        with patch('state_manager._get_state_store_plugin', return_value=plugin):
+            result = StateManager.load_launched_agents()
+
+            # Old entry should be filtered out (>2 minute window)
+            assert "123_OldAgent" not in result
+            assert "456_RecentAgent" in result
     
     def test_register_launched_agent(self):
         """Test registering a newly launched agent."""

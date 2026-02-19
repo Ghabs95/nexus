@@ -6,7 +6,6 @@ in response to workflow events, whether triggered by polling (inbox processor)
 or webhooks (webhook server).
 """
 
-import json
 import logging
 import os
 import re
@@ -16,9 +15,7 @@ import yaml
 
 # Nexus Core framework imports
 from nexus.core.agents import find_agent_yaml
-from nexus.core.completion import generate_completion_instructions
 from nexus.core.guards import LaunchGuard
-from nexus.core.workflow import WorkflowDefinition
 
 from config import (
     BASE_DIR,
@@ -28,11 +25,45 @@ from config import (
     get_nexus_dir_name
 )
 from state_manager import StateManager
-from error_handling import run_command_with_retry
 from notifications import notify_agent_completed, send_telegram_alert
 from ai_orchestrator import get_orchestrator, ToolUnavailableError
+from plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
+_issue_plugin_cache = {}
+_launch_policy_plugin = None
+
+
+def _get_issue_plugin(repo: str):
+    """Return GitHub issue plugin instance for repository."""
+    if repo in _issue_plugin_cache:
+        return _issue_plugin_cache[repo]
+
+    plugin = get_profiled_plugin(
+        "github_agent_launcher",
+        overrides={
+            "repo": repo,
+        },
+        cache_key=f"github:agent-launcher:{repo}",
+    )
+    if plugin:
+        _issue_plugin_cache[repo] = plugin
+    return plugin
+
+
+def _get_launch_policy_plugin():
+    """Return shared agent launch policy plugin instance."""
+    global _launch_policy_plugin
+    if _launch_policy_plugin:
+        return _launch_policy_plugin
+
+    plugin = get_profiled_plugin(
+        "agent_launch_policy",
+        cache_key="agent-launch:policy",
+    )
+    if plugin:
+        _launch_policy_plugin = plugin
+    return plugin
 
 
 def _pgrep_and_logfile_guard(issue_id: str, agent_type: str) -> bool:
@@ -97,20 +128,8 @@ def record_agent_launch(issue_number: str, pid: int = None) -> None:
     _launch_guard.record_launch(str(issue_number), agent_type="*", pid=pid)
 
 
-def _get_workflow_steps_for_prompt(
-    project_name: str = None,
-    agent_type: str = "",
-    workflow_type: str = "",
-) -> str:
-    """Read the configured workflow YAML and return a formatted checklist
-    of steps with agent_type names for embedding in agent prompts.
-
-    Delegates to nexus-core's WorkflowDefinition.to_prompt_context().
-    When *agent_type* is provided, the output includes an explicit directive
-    telling the agent which next_agent values are valid.
-    When *workflow_type* is provided, only the matching tier's steps are shown.
-    """
-    # Resolve workflow path from project config
+def _resolve_workflow_path(project_name: str = None) -> str:
+    """Resolve workflow definition path for project or global config."""
     workflow_path = ""
     if project_name:
         project_cfg = PROJECT_CONFIG.get(project_name, {})
@@ -123,41 +142,7 @@ def _get_workflow_steps_for_prompt(
     if workflow_path and not os.path.isabs(workflow_path):
         workflow_path = os.path.join(BASE_DIR, workflow_path)
 
-    if not workflow_path or not os.path.exists(workflow_path):
-        return ""
-
-    return WorkflowDefinition.to_prompt_context(
-        workflow_path,
-        current_agent_type=agent_type,
-        workflow_type=workflow_type,
-    )
-
-
-def _get_comment_and_summary_instructions(
-    issue_url: str,
-    agent_type: str,
-    project_name: str = None,
-    workflow_type: str = "",
-) -> str:
-    """Return prompt instructions telling the agent to post a structured GitHub comment
-    and write a completion_summary JSON file when done.
-
-    Delegates to nexus-core's generate_completion_instructions().
-    """
-    issue_match = re.search(r"/issues/(\d+)", issue_url or "")
-    issue_num = issue_match.group(1) if issue_match else "UNKNOWN"
-
-    workflow_steps = _get_workflow_steps_for_prompt(
-        project_name, agent_type=agent_type, workflow_type=workflow_type
-    )
-    nexus_dir = get_nexus_dir_name()
-
-    return generate_completion_instructions(
-        issue_number=issue_num,
-        agent_type=agent_type,
-        workflow_steps_text=workflow_steps,
-        nexus_dir=nexus_dir,
-    )
+    return workflow_path
 
 
 def _build_agent_search_dirs(agents_dir: str) -> list:
@@ -272,12 +257,12 @@ def get_sop_tier_from_issue(issue_number, project="nexus"):
 
 def get_workflow_name(tier_name):
     """Returns the workflow slash-command name for the tier."""
-    if tier_name == "fast-track":
+    policy = _get_launch_policy_plugin()
+    if policy and hasattr(policy, "get_workflow_name"):
+        return policy.get_workflow_name(tier_name)
+    if tier_name in {"fast-track", "shortened"}:
         return "bug_fix"
-    elif tier_name == "shortened":
-        return "bug_fix"
-    else:
-        return "new_feature"
+    return "new_feature"
 
 
 
@@ -315,69 +300,25 @@ def invoke_copilot_agent(
         Tuple of (PID of launched process or None if failed, tool_used: str)
     """
     workflow_name = get_workflow_name(tier_name)
-
-    # Map tier_name to canonical workflow_type via nexus-core
-    workflow_type = WorkflowDefinition.normalize_workflow_type(tier_name)
-
-    if continuation:
-        # Auto-chained continuation: use custom continuation_prompt directly
-        if continuation_prompt and continuation_prompt.startswith("You are @"):
-            # This is an auto-chain to a different agent, use it as-is
-            prompt = (
-                f"{continuation_prompt}\n\n"
-                f"Issue: {issue_url}\n"
-                f"Tier: {tier_name}\n"
-                f"Workflow: /{workflow_name}\n\n"
-                f"Review the previous work in the GitHub comments and task file, then complete your step.\n\n"
-                f"**GIT WORKFLOW (CRITICAL):**\n"
-                f"1. Check the issue body for **Target Branch** field (e.g., `feat/surveyor-plan`)\n"
-                f"2. Identify the correct sub-repo within the workspace (e.g., casit-be, casit-app, casit-omi)\n"
-                f"3. In that sub-repo: \n"
-                f"   - For feat/fix/chore: create branch from `develop`: `git checkout develop && git pull && git checkout -b <branch-name>`\n"
-                f"   - For hotfix: create branch from `main`: `git checkout main && git pull && git checkout -b <branch-name>`\n"
-                f"4. Make your changes and commit with descriptive messages\n"
-                f"5. Push the branch: `git push -u origin <branch-name>`\n"
-                f"6. Include branch name in your GitHub comment (e.g., 'Pushed to feat/surveyor-plan in casit-be')\n\n"
-                f"⛔ **GIT SAFETY RULES (STRICT):**\n"
-                f"❌ NEVER push to protected branches: `main`, `develop`, `master`, `test`, `staging`, `production`\n"
-                f"❌ NEVER delete any branch: No `git branch -d` or `git push --delete`\n"
-                f"✅ ONLY push to the dedicated feature branch specified in **Target Branch** field\n"
-                f"✅ Valid branch prefixes: feat/*, fix/*, hotfix/*, chore/*, refactor/*, docs/*, build/*, ci/*\n"
-                f"⚠️  Violating these rules can break production and cause team disruption\n\n"
-                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name, workflow_type=workflow_type)}\n\n"
-                f"Task context:\n{task_content}"
-            )
-        else:
-            # Manual continuation - should not be used by webhook, but kept for compatibility
-            base_prompt = continuation_prompt or "Please continue with the next step."
-            prompt = (
-                f"You are a {agent_type} agent. You previously started working on this task:\n\n"
-                f"Issue: {issue_url}\n"
-                f"Tier: {tier_name}\n"
-                f"Workflow: /{workflow_name}\n\n"
-                f"{base_prompt}\n\n"
-                f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name, workflow_type=workflow_type)}\n\n"
-                f"Task content:\n{task_content}"
-            )
+    workflow_path = _resolve_workflow_path(project_name)
+    policy = _get_launch_policy_plugin()
+    if policy and hasattr(policy, "build_agent_prompt"):
+        prompt = policy.build_agent_prompt(
+            issue_url=issue_url,
+            tier_name=tier_name,
+            task_content=task_content,
+            agent_type=agent_type,
+            continuation=continuation,
+            continuation_prompt=continuation_prompt,
+            workflow_path=workflow_path,
+            nexus_dir=get_nexus_dir_name(),
+        )
     else:
-        # Fresh start prompt for initial agent (typically triage)
         prompt = (
-            f"You are a {agent_type} agent. A new task has arrived and a GitHub issue has been created.\n\n"
+            f"You are a {agent_type} agent.\n\n"
             f"Issue: {issue_url}\n"
             f"Tier: {tier_name}\n"
             f"Workflow: /{workflow_name}\n\n"
-            f"**YOUR JOB:** Analyze, triage, and route. DO NOT try to implement or invoke other agents.\n\n"
-            f"REQUIRED ACTIONS:\n"
-            f"1. Read the GitHub issue body and understand the task\n"
-            f"2. Analyze the codebase to assess scope and complexity\n"
-            f"3. Identify which sub-repo(s) are affected\n"
-            f"4. Determine severity (Critical/High/Medium/Low)\n"
-            f"5. Determine which agent type should handle it next\n\n"
-            f"**DO NOT:**\n"
-            f"❌ Read other agent configuration files\n"
-            f"❌ Use any 'invoke', 'task', or 'run tool' to start other agents\n"
-            f"❌ Try to implement the feature yourself\n\n"
-            f"{_get_comment_and_summary_instructions(issue_url, agent_type, project_name, workflow_type=workflow_type)}\n\n"
             f"Task details:\n{task_content}"
         )
 
@@ -487,13 +428,17 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
     
     # Get issue details
     try:
-        result = run_command_with_retry(
-            ["gh", "issue", "view", str(issue_number), "--repo", get_github_repo("nexus"),
-             "--json", "body"],
-            max_attempts=2,
-            timeout=10
-        )
-        data = json.loads(result.stdout)
+        repo = get_github_repo("nexus")
+        plugin = _get_issue_plugin(repo)
+        if not plugin:
+            logger.error(f"GitHub issue plugin unavailable for repo {repo}")
+            return False
+
+        data = plugin.get_issue(str(issue_number), ["body"])
+        if not data:
+            logger.error(f"Failed to get issue #{issue_number} body")
+            return False
+
         body = data.get("body", "")
     except Exception as e:
         logger.error(f"Failed to get issue #{issue_number} body: {e}")

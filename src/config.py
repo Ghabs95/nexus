@@ -275,8 +275,7 @@ class _LazyOrchestrator:
 ORCHESTRATOR_CONFIG = _LazyOrchestrator()
 
 # --- NEXUS-CORE FRAMEWORK CONFIGURATION ---
-# Enable nexus-core workflow engine (set to False to use legacy StateManager)
-USE_NEXUS_CORE = os.getenv("USE_NEXUS_CORE", "true").lower() == "true"
+# nexus-core workflow engine is mandatory
 NEXUS_CORE_STORAGE_DIR = os.path.join(DATA_DIR, "nexus-core-workflows")
 WORKFLOW_ID_MAPPING_FILE = os.path.join(DATA_DIR, "workflow_id_mapping.json")
 APPROVAL_STATE_FILE = os.path.join(DATA_DIR, "approval_state.json")
@@ -285,8 +284,6 @@ APPROVAL_STATE_FILE = os.path.join(DATA_DIR, "approval_state.json")
 NEXUS_CORE_STORAGE_BACKEND = os.getenv("NEXUS_CORE_STORAGE", "file")  # Options: file, postgres, redis
 
 # --- PROJECT CONFIGURATION ---
-
-
 def get_github_repo(project: str) -> str:
     """Get GitHub repo for a project from PROJECT_CONFIG.
     

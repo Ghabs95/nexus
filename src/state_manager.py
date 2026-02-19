@@ -1,43 +1,88 @@
 """State management for Nexus - handles persistent storage."""
-import json
 import logging
-import os
 import time
 from typing import Dict, Optional, List
 from datetime import datetime
-from models import WorkflowState, Issue, CompletionMarker
+from models import WorkflowState
 from config import (
     WORKFLOW_STATE_FILE, LAUNCHED_AGENTS_FILE, TRACKED_ISSUES_FILE,
-    AUDIT_LOG_FILE, DATA_DIR, AGENT_RECENT_WINDOW, ensure_data_dir
+    AUDIT_LOG_FILE, DATA_DIR, AGENT_RECENT_WINDOW, ensure_data_dir, ensure_logs_dir
 )
+from plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
+
+
+def _get_state_store_plugin():
+    """Return shared JSON state store plugin instance."""
+    return get_profiled_plugin(
+        "state_store_default",
+        cache_key="state:json-store",
+    )
 
 
 class StateManager:
     """Manages all persistent state for the Nexus system."""
 
     @staticmethod
+    def _load_json_state(path: str, default, ensure_logs: bool = False):
+        """Load JSON state via storage plugin."""
+        if ensure_logs:
+            ensure_logs_dir()
+        else:
+            ensure_data_dir()
+
+        plugin = _get_state_store_plugin()
+        if not plugin:
+            return default
+        return plugin.load_json(path, default=default)
+
+    @staticmethod
+    def _save_json_state(path: str, data, *, context: str, ensure_logs: bool = False) -> None:
+        """Save JSON state via storage plugin."""
+        if ensure_logs:
+            ensure_logs_dir()
+        else:
+            ensure_data_dir()
+
+        plugin = _get_state_store_plugin()
+        if not plugin:
+            logger.error(f"State storage plugin unavailable; cannot save {context}")
+            return
+        plugin.save_json(path, data)
+
+    @staticmethod
+    def _append_line(path: str, line: str, *, context: str) -> bool:
+        """Append line to file via storage plugin."""
+        ensure_logs_dir()
+        plugin = _get_state_store_plugin()
+        if not plugin:
+            logger.error(f"State storage plugin unavailable; cannot write {context}")
+            return False
+        return plugin.append_line(path, line)
+
+    @staticmethod
+    def _read_lines(path: str) -> List[str]:
+        """Read lines from file via storage plugin."""
+        ensure_logs_dir()
+        plugin = _get_state_store_plugin()
+        if not plugin:
+            return []
+        return plugin.read_lines(path)
+
+    @staticmethod
     def load_workflow_state() -> Dict[str, dict]:
         """Load workflow state (paused/stopped issues) from persistent storage."""
-        ensure_data_dir()
-        if os.path.exists(WORKFLOW_STATE_FILE):
-            try:
-                with open(WORKFLOW_STATE_FILE) as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load workflow state: {e}")
-        return {}
+        return StateManager._load_json_state(WORKFLOW_STATE_FILE, default={})
 
     @staticmethod
     def save_workflow_state(data: Dict[str, dict]) -> None:
         """Save workflow state to persistent storage."""
-        ensure_data_dir()
-        try:
-            with open(WORKFLOW_STATE_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save workflow state: {e}")
+        StateManager._save_json_state(
+            WORKFLOW_STATE_FILE,
+            data,
+            context="workflow state",
+        )
 
     @staticmethod
     def set_workflow_state(issue_num: str, state: WorkflowState) -> None:
@@ -68,27 +113,18 @@ class StateManager:
     @staticmethod
     def load_launched_agents() -> Dict[str, dict]:
         """Load recently launched agents from persistent storage."""
-        ensure_data_dir()
-        if os.path.exists(LAUNCHED_AGENTS_FILE):
-            try:
-                with open(LAUNCHED_AGENTS_FILE) as f:
-                    data = json.load(f)
-                    # Clean up entries older than 2-minute window
-                    cutoff = time.time() - AGENT_RECENT_WINDOW
-                    return {k: v for k, v in data.items() if v.get('timestamp', 0) > cutoff}
-            except Exception as e:
-                logger.error(f"Failed to load launched agents: {e}")
-        return {}
+        data = StateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
+        cutoff = time.time() - AGENT_RECENT_WINDOW
+        return {k: v for k, v in data.items() if v.get("timestamp", 0) > cutoff}
 
     @staticmethod
     def save_launched_agents(data: Dict[str, dict]) -> None:
         """Save launched agents to persistent storage."""
-        ensure_data_dir()
-        try:
-            with open(LAUNCHED_AGENTS_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save launched agents: {e}")
+        StateManager._save_json_state(
+            LAUNCHED_AGENTS_FILE,
+            data,
+            context="launched agents",
+        )
 
     @staticmethod
     def register_launched_agent(issue_num: str, agent_name: str, pid: int) -> None:
@@ -114,24 +150,16 @@ class StateManager:
     @staticmethod
     def load_tracked_issues() -> Dict[int, dict]:
         """Load tracked issues from file."""
-        ensure_data_dir()
-        if os.path.exists(TRACKED_ISSUES_FILE):
-            try:
-                with open(TRACKED_ISSUES_FILE) as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load tracked issues: {e}")
-        return {}
+        return StateManager._load_json_state(TRACKED_ISSUES_FILE, default={})
 
     @staticmethod
     def save_tracked_issues(data: Dict[int, dict]) -> None:
         """Save tracked issues to file."""
-        ensure_data_dir()
-        try:
-            with open(TRACKED_ISSUES_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save tracked issues: {e}")
+        StateManager._save_json_state(
+            TRACKED_ISSUES_FILE,
+            data,
+            context="tracked issues",
+        )
 
     @staticmethod
     def add_tracked_issue(issue_num: int, project: str, description: str) -> None:
@@ -157,7 +185,6 @@ class StateManager:
     @staticmethod
     def audit_log(issue_num: int, event: str, details: Optional[str] = None) -> None:
         """Log an audit event for workflow tracking."""
-        ensure_data_dir()
         try:
             timestamp = datetime.now().isoformat()
             log_entry = f"{timestamp} | Issue #{issue_num} | {event}"
@@ -165,8 +192,7 @@ class StateManager:
                 log_entry += f" | {details}"
             log_entry += "\n"
 
-            with open(AUDIT_LOG_FILE, "a") as f:
-                f.write(log_entry)
+            StateManager._append_line(AUDIT_LOG_FILE, log_entry, context="audit log")
             logger.debug(f"Audit: {log_entry.strip()}")
         except Exception as e:
             logger.error(f"Failed to write audit log: {e}")
@@ -174,16 +200,11 @@ class StateManager:
     @staticmethod
     def get_audit_history(issue_num: int, limit: int = 50) -> List[str]:
         """Get recent audit history for an issue."""
-        ensure_data_dir()
-        if not os.path.exists(AUDIT_LOG_FILE):
-            return []
-
         try:
             entries = []
-            with open(AUDIT_LOG_FILE, "r") as f:
-                for line in f:
-                    if f"Issue #{issue_num}" in line:
-                        entries.append(line.strip())
+            for line in StateManager._read_lines(AUDIT_LOG_FILE):
+                if f"Issue #{issue_num}" in line:
+                    entries.append(line.strip())
             return entries[-limit:]  # Return last 'limit' entries
         except Exception as e:
             logger.error(f"Failed to read audit log: {e}")
@@ -194,25 +215,17 @@ class StateManager:
     def load_workflow_mapping() -> Dict[str, str]:
         """Load issue_number -> workflow_id mapping."""
         from config import WORKFLOW_ID_MAPPING_FILE
-        ensure_data_dir()
-        if os.path.exists(WORKFLOW_ID_MAPPING_FILE):
-            try:
-                with open(WORKFLOW_ID_MAPPING_FILE) as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load workflow mapping: {e}")
-        return {}
+        return StateManager._load_json_state(WORKFLOW_ID_MAPPING_FILE, default={})
 
     @staticmethod
     def save_workflow_mapping(data: Dict[str, str]) -> None:
         """Save issue_number -> workflow_id mapping."""
         from config import WORKFLOW_ID_MAPPING_FILE
-        ensure_data_dir()
-        try:
-            with open(WORKFLOW_ID_MAPPING_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save workflow mapping: {e}")
+        StateManager._save_json_state(
+            WORKFLOW_ID_MAPPING_FILE,
+            data,
+            context="workflow mapping",
+        )
 
     @staticmethod
     def map_issue_to_workflow(issue_num: str, workflow_id: str) -> None:
@@ -242,25 +255,17 @@ class StateManager:
     def load_approval_state() -> Dict[str, dict]:
         """Load pending approval state from persistent storage."""
         from config import APPROVAL_STATE_FILE
-        ensure_data_dir()
-        if os.path.exists(APPROVAL_STATE_FILE):
-            try:
-                with open(APPROVAL_STATE_FILE) as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load approval state: {e}")
-        return {}
+        return StateManager._load_json_state(APPROVAL_STATE_FILE, default={})
 
     @staticmethod
     def save_approval_state(data: Dict[str, dict]) -> None:
         """Save approval state to persistent storage."""
         from config import APPROVAL_STATE_FILE
-        ensure_data_dir()
-        try:
-            with open(APPROVAL_STATE_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save approval state: {e}")
+        StateManager._save_json_state(
+            APPROVAL_STATE_FILE,
+            data,
+            context="approval state",
+        )
 
     @staticmethod
     def set_pending_approval(

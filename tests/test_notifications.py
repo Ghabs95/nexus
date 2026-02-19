@@ -79,39 +79,40 @@ class TestInlineKeyboard:
 class TestNotificationFunctions:
     """Tests for notification helper functions."""
     
-    @patch('notifications.requests.post')
+    @patch('notifications._get_notification_plugin')
     @patch('notifications.TELEGRAM_TOKEN', 'test_token')
     @patch('notifications.TELEGRAM_CHAT_ID', '12345')
-    def test_send_notification_success(self, mock_post):
+    def test_send_notification_success(self, mock_get_plugin):
         """Test successful notification send."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_post.return_value = mock_response
+        plugin = MagicMock()
+        plugin.send_message_sync.return_value = True
+        mock_get_plugin.return_value = plugin
         
         result = send_notification("Test message")
         
         assert result is True
-        mock_post.assert_called_once()
-        call_data = mock_post.call_args[1]['json']
-        assert call_data['text'] == "Test message"
-        assert call_data['chat_id'] == '12345'
+        plugin.send_message_sync.assert_called_once_with(
+            message="Test message",
+            parse_mode="Markdown",
+            reply_markup=None,
+        )
     
-    @patch('notifications.requests.post')
+    @patch('notifications._get_notification_plugin')
     @patch('notifications.TELEGRAM_TOKEN', 'test_token')
     @patch('notifications.TELEGRAM_CHAT_ID', '12345')
-    def test_send_notification_with_keyboard(self, mock_post):
+    def test_send_notification_with_keyboard(self, mock_get_plugin):
         """Test notification with inline keyboard."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_post.return_value = mock_response
+        plugin = MagicMock()
+        plugin.send_message_sync.return_value = True
+        mock_get_plugin.return_value = plugin
         
         keyboard = InlineKeyboard().add_button("Test", "test")
         result = send_notification("Message", keyboard=keyboard)
         
         assert result is True
-        call_data = mock_post.call_args[1]['json']
-        assert 'reply_markup' in call_data
-        assert 'inline_keyboard' in call_data['reply_markup']
+        kwargs = plugin.send_message_sync.call_args.kwargs
+        assert 'reply_markup' in kwargs
+        assert 'inline_keyboard' in kwargs['reply_markup']
     
     @patch('notifications.TELEGRAM_TOKEN', None)
     def test_send_notification_no_credentials(self):
@@ -119,14 +120,14 @@ class TestNotificationFunctions:
         result = send_notification("Test")
         assert result is False
     
-    @patch('notifications.requests.post')
+    @patch('notifications._get_notification_plugin')
     @patch('notifications.TELEGRAM_TOKEN', 'test_token')
     @patch('notifications.TELEGRAM_CHAT_ID', '12345')
-    def test_send_notification_api_error(self, mock_post):
-        """Test notification when API returns error."""
-        mock_response = MagicMock()
-        mock_response.status_code = 400
-        mock_post.return_value = mock_response
+    def test_send_notification_plugin_error(self, mock_get_plugin):
+        """Test notification when plugin returns failure."""
+        plugin = MagicMock()
+        plugin.send_message_sync.return_value = False
+        mock_get_plugin.return_value = plugin
         
         result = send_notification("Test")
         assert result is False

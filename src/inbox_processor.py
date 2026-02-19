@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -22,14 +22,20 @@ from config import (
     BASE_DIR, get_github_repo,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
     PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
-    USE_NEXUS_CORE, get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
+    NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
-from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
 from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
 from ai_orchestrator import get_orchestrator
-from nexus_core_helpers import create_workflow_for_issue_sync, get_git_platform, get_workflow_definition_path
+from nexus_core_helpers import get_git_platform, get_workflow_definition_path
+from plugin_runtime import (
+    get_github_workflow_policy_plugin,
+    get_profiled_plugin,
+    get_runtime_ops_plugin,
+    get_workflow_policy_plugin,
+    get_workflow_state_plugin,
+)
 from error_handling import (
     run_command_with_retry,
     RetryExhaustedError
@@ -64,6 +70,28 @@ orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
 alerted_agents = set()
 notified_comments = set()  # Track comment IDs we've already notified about
 auto_chained_agents = {}  # Track issue -> log_file to avoid re-chaining same completion
+POLLING_FAILURE_THRESHOLD = 3
+polling_failure_counts: dict[str, int] = {}
+_WORKFLOW_STATE_PLUGIN_KWARGS = {
+    "storage_dir": NEXUS_CORE_STORAGE_DIR,
+    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
+    "issue_to_workflow_map_setter": StateManager.map_issue_to_workflow,
+    "workflow_definition_path_resolver": get_workflow_definition_path,
+    "github_repo": get_github_repo("nexus"),
+}
+
+
+def _get_github_issue_plugin(repo: str, max_attempts: int = 3, timeout: int = 30):
+    """Create a configured GitHub issue plugin instance for a repo."""
+    return get_profiled_plugin(
+        "github_inbox",
+        overrides={
+            "repo": repo,
+            "max_attempts": max_attempts,
+            "timeout": timeout,
+        },
+        cache_key=f"github:inbox:{repo}:{max_attempts}:{timeout}",
+    )
 
 # Wrapper functions for backward compatibility - these now delegate to StateManager
 def load_launched_agents():
@@ -73,29 +101,6 @@ def load_launched_agents():
 def save_launched_agents(data):
     """Save launched agents to persistent storage."""
     StateManager.save_launched_agents(data)
-
-def load_workflow_state():
-    """Load workflow state (paused/stopped issues) from persistent storage."""
-    return StateManager.load_workflow_state()
-
-def save_workflow_state(data):
-    """Save workflow state to persistent storage."""
-    StateManager.save_workflow_state(data)
-
-def set_workflow_state(issue_num, state):
-    """Set workflow state for an issue (paused, stopped, or active)."""
-    # Convert string to enum if needed
-    if isinstance(state, str):
-        try:
-            state = WorkflowState[state.upper()]
-        except KeyError:
-            state = WorkflowState.ACTIVE
-    StateManager.set_workflow_state(str(issue_num), state)
-
-def get_workflow_state(issue_num):
-    """Get workflow state for an issue. Returns 'active', 'paused', 'stopped', or None."""
-    state = StateManager.get_workflow_state(str(issue_num))
-    return state.value  # Return string value for backward compatibility
 
 # Load persisted state
 launched_agents_tracker = StateManager.load_launched_agents()
@@ -158,6 +163,30 @@ logging.basicConfig(
 logger = logging.getLogger("InboxProcessor")
 
 
+def _record_polling_failure(scope: str, error: Exception) -> None:
+    """Increment polling failure count and alert once threshold is reached."""
+    count = polling_failure_counts.get(scope, 0) + 1
+    polling_failure_counts[scope] = count
+    if count != POLLING_FAILURE_THRESHOLD:
+        return
+
+    try:
+        send_telegram_alert(
+            "⚠️ **Polling Error Threshold Reached**\n\n"
+            f"Scope: `{scope}`\n"
+            f"Consecutive failures: {count}\n"
+            f"Last error: `{error}`"
+        )
+    except Exception as notify_err:
+        logger.error(f"Failed to send polling escalation alert for {scope}: {notify_err}")
+
+
+def _clear_polling_failures(scope: str) -> None:
+    """Reset polling failure count for a scope after a successful attempt."""
+    if scope in polling_failure_counts:
+        polling_failure_counts.pop(scope, None)
+
+
 def slugify(text):
     """Converts text to a branch-friendly slug."""
     text = text.lower()
@@ -194,32 +223,33 @@ def _resolve_repo_for_issue(issue_num: str, default_project: str = "nexus") -> s
 
     Delegates to nexus-core's GitHubPlatform.get_issue() to fetch the body.
     """
-    try:
-        platform = get_git_platform(get_github_repo(default_project))
-        issue = asyncio.run(platform.get_issue(str(issue_num)))
-        if not issue:
-            return get_github_repo(default_project)
+    default_repo = get_github_repo(default_project)
+    project_workspaces = {}
+    project_repos = {}
+    for key, cfg in _iter_project_configs():
+        workspace = cfg.get("workspace")
+        if not workspace:
+            continue
+        project_workspaces[key] = os.path.join(BASE_DIR, workspace)
+        project_repos[key] = get_github_repo(key)
 
-        body = issue.body or ""
-        task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
-        if not task_file_match:
-            logger.debug(f"No task file in issue #{issue_num} body, returning default repo")
-            return get_github_repo(default_project)
+    policy = get_github_workflow_policy_plugin(
+        get_issue=lambda **kwargs: asyncio.run(
+            get_git_platform(kwargs["repo"]).get_issue(str(kwargs["issue_number"]))
+        ),
+        cache_key=None,
+    )
 
-        task_file = task_file_match.group(1)
-        for key, cfg in _iter_project_configs():
-            workspace = cfg.get("workspace")
-            if not workspace:
-                continue
-            workspace_abs = os.path.join(BASE_DIR, workspace)
-            if task_file.startswith(workspace_abs):
-                logger.debug(f"Issue #{issue_num} resolved to project '{key}'")
-                return get_github_repo(key)
-        logger.debug(f"Issue #{issue_num} task file doesn't match any project workspace")
-    except Exception as e:
-        logger.debug(f"Could not resolve repo for issue #{issue_num} (will use default): {e}")
+    resolved_repo = policy.resolve_repo_for_issue(
+        issue_number=str(issue_num),
+        default_repo=default_repo,
+        project_workspaces=project_workspaces,
+        project_repos=project_repos,
+    )
 
-    return get_github_repo(default_project)
+    if resolved_repo != default_repo:
+        logger.debug(f"Issue #{issue_num} resolved to repo '{resolved_repo}'")
+    return resolved_repo
 
 
 def _resolve_git_dir(project_name: str) -> Optional[str]:
@@ -254,60 +284,41 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
     Called when the last agent finishes (next_agent is 'none' or empty).
     Delegates PR creation and issue closing to nexus-core GitHubPlatform.
     """
-    pr_url = None
-
-    # --- Create branch + PR if there are uncommitted changes ---
-    if project_name:
-        git_dir = _resolve_git_dir(project_name)
-        if not git_dir:
-            logger.info(f"No git repo found for {project_name} — skipping PR creation")
-        else:
-            try:
-                platform = get_git_platform(repo)
-                pr_body = (
-                    f"Automated PR for issue #{issue_num}.\n\n"
-                    f"Workflow completed by Nexus agent chain.\n"
-                    f"Last agent: `{last_agent}`"
-                )
-                pr_result = asyncio.run(platform.create_pr_from_changes(
-                    repo_dir=git_dir,
-                    issue_number=str(issue_num),
-                    title=f"fix: resolve #{issue_num}",
-                    body=pr_body,
-                ))
-                if pr_result:
-                    pr_url = pr_result.url
-                    logger.info(f"🔀 Created PR for issue #{issue_num}: {pr_url}")
-                else:
-                    logger.info(f"No code changes for issue #{issue_num} — skipping PR creation")
-            except Exception as e:
-                logger.warning(f"Error creating PR for issue #{issue_num}: {e}")
-
-    # --- Close the issue ---
-    try:
-        platform = get_git_platform(repo)
-        close_comment = (
-            f"✅ Workflow completed. All agent steps finished successfully.\n"
-            f"Last agent: `{last_agent}`"
+    def _create_pr_from_changes(**kwargs):
+        platform = get_git_platform(kwargs["repo"])
+        pr_result = asyncio.run(
+            platform.create_pr_from_changes(
+                repo_dir=kwargs["repo_dir"],
+                issue_number=kwargs["issue_number"],
+                title=kwargs["title"],
+                body=kwargs["body"],
+            )
         )
-        if pr_url:
-            close_comment += f"\nPR: {pr_url}"
+        return pr_result.url if pr_result else None
 
-        asyncio.run(platform.close_issue(str(issue_num), comment=close_comment))
+    def _close_issue(**kwargs):
+        platform = get_git_platform(kwargs["repo"])
+        return bool(asyncio.run(platform.close_issue(kwargs["issue_number"], comment=kwargs["comment"])))
+
+    workflow_policy = get_workflow_policy_plugin(
+        resolve_git_dir=_resolve_git_dir,
+        create_pr_from_changes=_create_pr_from_changes,
+        close_issue=_close_issue,
+        send_notification=send_telegram_alert,
+        cache_key="workflow-policy:inbox",
+    )
+
+    result = workflow_policy.finalize_workflow(
+        issue_number=str(issue_num),
+        repo=repo,
+        last_agent=last_agent,
+        project_name=project_name,
+    )
+
+    if result.get("pr_url"):
+        logger.info(f"🔀 Created PR for issue #{issue_num}: {result['pr_url']}")
+    if result.get("issue_closed"):
         logger.info(f"🔒 Closed issue #{issue_num}")
-    except Exception as e:
-        logger.warning(f"Error closing issue #{issue_num}: {e}")
-
-    # --- Telegram notification ---
-    parts = [
-        f"✅ **Workflow Complete**\n\n"
-        f"Issue: #{issue_num}\n"
-        f"Last agent: `{last_agent}`\n"
-    ]
-    if pr_url:
-        parts.append(f"PR: {pr_url}\n")
-    parts.append(f"\n🔗 https://github.com/{repo}/issues/{issue_num}")
-    send_telegram_alert("".join(parts))
 
 
 def _post_completion_comments_from_logs() -> None:
@@ -329,11 +340,8 @@ def _post_completion_comments_from_logs() -> None:
 
         try:
             # Skip if agent for this issue is still running
-            check_running = subprocess.run(
-                ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
-                text=True, capture_output=True, timeout=5,
-            )
-            if check_running.stdout:
+            runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:inbox")
+            if runtime_ops.is_issue_process_running(issue_num):
                 continue
 
             # Dedup using framework's dedup_key
@@ -382,13 +390,16 @@ def _post_completion_comments_from_logs() -> None:
             workspace_abs = os.path.join(BASE_DIR, workspace)
             issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
+            workflow_policy = get_workflow_policy_plugin(cache_key="workflow-policy:inbox")
+
             # Send transition notification
             send_telegram_alert(
-                f"🔗 **Agent Transition**\n\n"
-                f"Issue: #{issue_num}\n"
-                f"Completed: `{completed_agent}`\n"
-                f"Launching: `{next_agent}`\n\n"
-                f"🔗 https://github.com/{repo}/issues/{issue_num}"
+                workflow_policy.build_transition_message(
+                    issue_number=issue_num,
+                    completed_agent=completed_agent,
+                    next_agent=next_agent,
+                    repo=repo,
+                )
             )
 
             # Validate next_agent against workflow definition
@@ -436,11 +447,12 @@ def _post_completion_comments_from_logs() -> None:
             else:
                 logger.error(f"❌ Failed to auto-chain to {next_agent} for issue #{issue_num}")
                 send_telegram_alert(
-                    f"❌ **Auto-chain Failed**\n\n"
-                    f"Issue: #{issue_num}\n"
-                    f"Completed: `{completed_agent}`\n"
-                    f"Failed to launch: `{next_agent}`\n\n"
-                    f"🔗 https://github.com/{repo}/issues/{issue_num}"
+                    workflow_policy.build_autochain_failed_message(
+                        issue_number=issue_num,
+                        completed_agent=completed_agent,
+                        next_agent=next_agent,
+                        repo=repo,
+                    )
                 )
         except json.JSONDecodeError as e:
             logger.warning(f"Invalid completion_summary.json for issue #{detection.issue_number}: {e}")
@@ -492,6 +504,7 @@ def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "")
 
 def check_stuck_agents():
     """Monitor agent processes and handle timeouts with auto-kill and retry."""
+    scope = "stuck-agents:loop"
     try:
         # Find all copilot log files using configured nexus_dir
         nexus_dir_name = get_nexus_dir_name()
@@ -533,31 +546,49 @@ def check_stuck_agents():
                     # Check if we should retry
                     will_retry = AgentMonitor.should_retry(issue_num, agent_type)
                     notify_agent_timeout(issue_num, agent_type, will_retry, project="nexus")
+
+        _clear_polling_failures(scope)
             
     except Exception as e:
         logger.error(f"Error in check_stuck_agents: {e}")
+        _record_polling_failure(scope, e)
 
 
 def check_agent_comments():
     """Monitor GitHub issues for agent comments requesting input across all projects."""
+    loop_scope = "agent-comments:loop"
     try:
         # Query issues from all project repos
         all_issue_nums = []
         for project_name, _ in _iter_project_configs():
             repo = get_github_repo(project_name)
+            list_scope = f"agent-comments:list-issues:{project_name}"
             try:
-                result = subprocess.run(
-                    ["gh", "issue", "list", "--repo", repo,
-                     "--label", "workflow:full,workflow:shortened,workflow:fast-track",
-                     "--state", "open", "--json", "number", "--jq", ".[].number"],
-                    text=True, capture_output=True, timeout=10
+                issue_plugin = _get_github_issue_plugin(repo, max_attempts=3, timeout=10)
+                monitor_policy = get_github_workflow_policy_plugin(
+                    list_issues=lambda **kwargs: issue_plugin.list_issues(
+                        state=kwargs["state"],
+                        limit=kwargs["limit"],
+                        fields=kwargs["fields"],
+                    ),
+                    cache_key=None,
                 )
-                
-                if result.stdout:
-                    issue_numbers = result.stdout.strip().split("\n")
-                    all_issue_nums.extend([(num, project_name, repo) for num in issue_numbers if num])
-            except subprocess.TimeoutExpired:
-                logger.warning(f"GitHub issue list timed out for project {project_name}")
+                workflow_labels = {
+                    "workflow:full",
+                    "workflow:shortened",
+                    "workflow:fast-track",
+                }
+                issue_numbers = monitor_policy.list_workflow_issue_numbers(
+                    repo=repo,
+                    workflow_labels=workflow_labels,
+                    limit=100,
+                )
+                for issue_number in issue_numbers:
+                    all_issue_nums.append((issue_number, project_name, repo))
+                _clear_polling_failures(list_scope)
+            except Exception as e:
+                logger.warning(f"GitHub issue list failed for project {project_name}: {e}")
+                _record_polling_failure(list_scope, e)
                 continue
         
         if not all_issue_nums:
@@ -568,13 +599,23 @@ def check_agent_comments():
                 continue
                 
             # Get issue comments via framework
+            comments_scope = f"agent-comments:get-comments:{project_name}"
             try:
-                platform = get_git_platform(repo)
-                comments = asyncio.run(platform.get_comments(str(issue_num)))
-                # Filter to only the bot owner's comments
-                bot_comments = [c for c in comments if c.author == "Ghabs95"]
+                monitor_policy = get_github_workflow_policy_plugin(
+                    get_comments=lambda **kwargs: asyncio.run(
+                        get_git_platform(kwargs["repo"]).get_comments(str(kwargs["issue_number"]))
+                    ),
+                    cache_key=None,
+                )
+                bot_comments = monitor_policy.get_bot_comments(
+                    repo=repo,
+                    issue_number=str(issue_num),
+                    bot_author="Ghabs95",
+                )
+                _clear_polling_failures(comments_scope)
             except Exception as e:
                 logger.warning(f"Failed to fetch comments for issue #{issue_num}: {e}")
+                _record_polling_failure(comments_scope, e)
                 continue
 
             if not bot_comments:
@@ -615,9 +656,12 @@ def check_agent_comments():
                 
                 except Exception as e:
                     logger.error(f"Error processing comment for issue #{issue_num}: {e}")
+
+        _clear_polling_failures(loop_scope)
                     
     except Exception as e:
         logger.error(f"Error in check_agent_comments: {e}")
+        _record_polling_failure(loop_scope, e)
 
 
 def check_and_notify_pr(issue_num, project):
@@ -632,12 +676,14 @@ def check_and_notify_pr(issue_num, project):
     """
     try:
         repo = get_github_repo(project)
-        platform = get_git_platform(repo)
-        prs = asyncio.run(platform.search_linked_prs(str(issue_num)))
-
-        open_prs = [pr for pr in prs if pr.state == "open"]
-        if open_prs:
-            pr = open_prs[0]
+        monitor_policy = get_github_workflow_policy_plugin(
+            search_linked_prs=lambda **kwargs: asyncio.run(
+                get_git_platform(kwargs["repo"]).search_linked_prs(str(kwargs["issue_number"]))
+            ),
+            cache_key=None,
+        )
+        pr = monitor_policy.find_open_linked_pr(repo=repo, issue_number=str(issue_num))
+        if pr:
             logger.info(f"✅ Found PR #{pr.number} for issue #{issue_num}")
             notify_workflow_completed(
                 issue_num, project, pr_number=str(pr.number), pr_url=pr.url,
@@ -656,12 +702,9 @@ def check_and_notify_pr(issue_num, project):
 def check_completed_agents():
     """Monitor for completed agent steps and auto-chain to next agent.
 
-    With USE_NEXUS_CORE enabled, delegates to _post_completion_comments_from_logs()
+    Delegates to _post_completion_comments_from_logs()
     which uses the nexus-core framework for completion scanning and auto-chaining.
     """
-    if not USE_NEXUS_CORE:
-        logger.warning("Legacy check_completed_agents path removed — set USE_NEXUS_CORE=true")
-        return
     _post_completion_comments_from_logs()
 
 
@@ -733,26 +776,23 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
     """Creates a GitHub Issue in the specified repo with SOP checklist."""
     type_label = f"type:{task_type}"
     project_label = f"project:{project}"
+    labels = [project_label, type_label, workflow_label]
 
-    cmd = [
-        "gh", "issue", "create",
-        "--repo", github_repo,
-        "--title", title,
-        "--body", body,
-        "--label", f"{project_label},{type_label},{workflow_label}"
-    ]
+    creator = _get_github_issue_plugin(github_repo, max_attempts=3, timeout=30)
 
     try:
-        result = run_command_with_retry(cmd, max_attempts=3, timeout=30)
-        issue_url = result.stdout.strip()
-        logger.info(f"📋 Issue created: {issue_url}")
-        return issue_url
-    except RetryExhaustedError as e:
-        logger.error(f"Failed to create issue after retries: {e}")
-        return None
+        issue_url = creator.create_issue(
+            title=title,
+            body=body,
+            labels=labels,
+        )
+        if issue_url:
+            logger.info("📋 Issue created via plugin")
+            return issue_url
+
+        raise RuntimeError("GitHub issue plugin returned no issue URL")
     except Exception as e:
-        logger.error(f"Unexpected error creating issue: {e}")
-        return None
+        raise RuntimeError(f"GitHub issue plugin create failed: {e}") from e
 
 
 def generate_issue_name(content, project_name):
@@ -978,25 +1018,29 @@ def process_file(filepath):
             except Exception as e:
                 logger.error(f"Failed to append issue URL: {e}")
             
-            # Create nexus-core workflow if enabled
-            if USE_NEXUS_CORE:
-                # Extract issue number from URL
-                issue_num = issue_url.split('/')[-1]
-                workflow_id = create_workflow_for_issue_sync(
+            # Create nexus-core workflow
+            issue_num = issue_url.split('/')[-1]
+            workflow_plugin = get_workflow_state_plugin(
+                **_WORKFLOW_STATE_PLUGIN_KWARGS,
+                cache_key="workflow:state-engine",
+            )
+            workflow_id = asyncio.run(
+                workflow_plugin.create_workflow_for_issue(
                     issue_number=issue_num,
                     issue_title=slug,
                     project_name=project_name,
                     tier_name=tier_name,
                     task_type=task_type,
-                    description=content
+                    description=content,
                 )
-                if workflow_id:
-                    logger.info(f"✅ Created nexus-core workflow: {workflow_id}")
-                    try:
-                        with open(new_filepath, 'a') as f:
-                            f.write(f"**Workflow ID:** {workflow_id}\n")
-                    except Exception as e:
-                        logger.error(f"Failed to append workflow ID: {e}")
+            )
+            if workflow_id:
+                logger.info(f"✅ Created nexus-core workflow: {workflow_id}")
+                try:
+                    with open(new_filepath, 'a') as f:
+                        f.write(f"**Workflow ID:** {workflow_id}\n")
+                except Exception as e:
+                    logger.error(f"Failed to append workflow ID: {e}")
 
         # Invoke Copilot CLI agent (if agents_dir is configured)
         agents_dir_val = config["agents_dir"]

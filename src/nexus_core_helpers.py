@@ -4,7 +4,6 @@ Nexus-Core Framework Integration Helpers.
 This module provides integration between the original Nexus bot
 and the nexus-core workflow framework.
 """
-import asyncio
 import logging
 import os
 from typing import Optional, Dict, List
@@ -13,13 +12,13 @@ from config import (
     get_github_repo,
     _get_project_config,
     NEXUS_CORE_STORAGE_DIR,
-    USE_NEXUS_CORE,
     BASE_DIR,
 )
 from state_manager import StateManager
+from plugin_runtime import get_workflow_state_plugin
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
-from nexus.core.workflow import WorkflowDefinition, WorkflowEngine
+from nexus.core.workflow import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +72,19 @@ def get_workflow_definition_path(project_name: str) -> Optional[str]:
     return None
 
 
+_WORKFLOW_STATE_PLUGIN_BASE_KWARGS = {
+    "storage_dir": NEXUS_CORE_STORAGE_DIR,
+    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
+    "issue_to_workflow_map_setter": StateManager.map_issue_to_workflow,
+    "workflow_definition_path_resolver": get_workflow_definition_path,
+    "github_repo": get_github_repo("nexus"),
+    "set_pending_approval": StateManager.set_pending_approval,
+    "clear_pending_approval": StateManager.clear_pending_approval,
+    "audit_log": StateManager.audit_log,
+}
+_WORKFLOW_STATE_PLUGIN_CACHE_KEY = "workflow:state-engine"
+
+
 async def create_workflow_for_issue(
     issue_number: str,
     issue_title: str,
@@ -95,73 +107,41 @@ async def create_workflow_for_issue(
     Returns:
         workflow_id if successful, None otherwise
     """
-    if not USE_NEXUS_CORE:
-        logger.info("nexus-core disabled, skipping workflow creation")
-        return None
-    
-    try:
-        engine = get_workflow_engine()
-        
-        # Map tier to workflow chain
-        workflow_type = _tier_to_workflow_type(tier_name)
-        workflow_id = f"{project_name}-{issue_number}-{tier_name}"
-        workflow_name = f"{project_name}/{issue_title}"
-        workflow_description = description or f"Workflow for issue #{issue_number}"
-        
-        # Get workflow definition path (required)
-        workflow_definition_path = get_workflow_definition_path(project_name)
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
+    )
 
-        if not workflow_definition_path:
-            msg = (
-                f"No workflow_definition_path configured for project '{project_name}'. "
-                "Cannot create workflow without a YAML definition."
-            )
-            logger.error(msg)
-            from notifications import send_telegram_alert
-            send_telegram_alert(f"\u274c {msg}")
-            return None
+    workflow_id = await workflow_plugin.create_workflow_for_issue(
+        issue_number=issue_number,
+        issue_title=issue_title,
+        project_name=project_name,
+        tier_name=tier_name,
+        task_type=task_type,
+        description=description,
+    )
 
-        if not os.path.exists(workflow_definition_path):
-            msg = (
-                f"Workflow definition not found at: {workflow_definition_path} "
-                f"(project: {project_name})"
-            )
-            logger.error(msg)
-            from notifications import send_telegram_alert
-            send_telegram_alert(f"\u274c {msg}")
-            return None
-
-        metadata = {
-            "issue_number": issue_number,
-            "project": project_name,
-            "tier": tier_name,
-            "task_type": task_type,
-            "github_issue_url": f"https://github.com/{get_github_repo('nexus')}/issues/{issue_number}",
-            "workflow_type": workflow_type,
-            "workflow_definition_path": workflow_definition_path,
-        }
-
-        workflow = WorkflowDefinition.from_yaml(
-            workflow_definition_path,
-            workflow_id=workflow_id,
-            name_override=workflow_name,
-            description_override=workflow_description,
-            metadata=metadata,
-            workflow_type=workflow_type,
-        )
-        
-        # Persist workflow
-        await engine.create_workflow(workflow)
-        
-        # Map issue to workflow
-        StateManager.map_issue_to_workflow(issue_number, workflow_id)
-        
-        logger.info(f"Created nexus-core workflow {workflow_id} for issue #{issue_number}")
+    if workflow_id:
         return workflow_id
-        
-    except Exception as e:
-        logger.error(f"Failed to create nexus-core workflow for issue #{issue_number}: {e}")
-        return None
+
+    workflow_definition_path = get_workflow_definition_path(project_name)
+    if not workflow_definition_path:
+        msg = (
+            f"No workflow_definition_path configured for project '{project_name}'. "
+            "Cannot create workflow without a YAML definition."
+        )
+        logger.error(msg)
+        from notifications import send_telegram_alert
+        send_telegram_alert(f"❌ {msg}")
+    elif not os.path.exists(workflow_definition_path):
+        msg = (
+            f"Workflow definition not found at: {workflow_definition_path} "
+            f"(project: {project_name})"
+        )
+        logger.error(msg)
+        from notifications import send_telegram_alert
+        send_telegram_alert(f"❌ {msg}")
+    return None
 
 
 async def start_workflow(workflow_id: str, issue_number: str = None) -> bool:
@@ -175,27 +155,15 @@ async def start_workflow(workflow_id: str, issue_number: str = None) -> bool:
     Returns:
         True if successful
     """
-    if not USE_NEXUS_CORE:
-        return False
-    
-    try:
-        engine = get_workflow_engine()
-        workflow = await engine.start_workflow(workflow_id)
-        
-        logger.info(f"Started workflow {workflow_id} (state: {workflow.state.value})")
-        
-        # Optionally add GitHub comment
-        if issue_number:
-            git_platform = get_git_platform()
-            current_step = workflow.steps[workflow.current_step]
-            # Note: This would actually call GitHub API in production
-            logger.info(f"Would add comment to issue #{issue_number}: Workflow started at step {current_step.name}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to start workflow {workflow_id}: {e}")
-        return False
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
+    )
+
+    success = await workflow_plugin.start_workflow(workflow_id)
+    if success and issue_number:
+        logger.info(f"Started workflow {workflow_id} for issue #{issue_number}")
+    return success
 
 
 async def pause_workflow(issue_number: str, reason: str = "User requested") -> bool:
@@ -209,24 +177,11 @@ async def pause_workflow(issue_number: str, reason: str = "User requested") -> b
     Returns:
         True if successful
     """
-    if not USE_NEXUS_CORE:
-        return False
-    
-    workflow_id = StateManager.get_workflow_id_for_issue(issue_number)
-    if not workflow_id:
-        logger.warning(f"No workflow found for issue #{issue_number}")
-        return False
-    
-    try:
-        engine = get_workflow_engine()
-        await engine.pause_workflow(workflow_id)
-        
-        logger.info(f"Paused workflow {workflow_id} for issue #{issue_number}: {reason}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to pause workflow for issue #{issue_number}: {e}")
-        return False
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
+    )
+    return await workflow_plugin.pause_workflow(issue_number, reason=reason)
 
 
 async def resume_workflow(issue_number: str) -> bool:
@@ -239,24 +194,11 @@ async def resume_workflow(issue_number: str) -> bool:
     Returns:
         True if successful
     """
-    if not USE_NEXUS_CORE:
-        return False
-    
-    workflow_id = StateManager.get_workflow_id_for_issue(issue_number)
-    if not workflow_id:
-        logger.warning(f"No workflow found for issue #{issue_number}")
-        return False
-    
-    try:
-        engine = get_workflow_engine()
-        await engine.resume_workflow(workflow_id)
-        
-        logger.info(f"Resumed workflow {workflow_id} for issue #{issue_number}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to resume workflow for issue #{issue_number}: {e}")
-        return False
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
+    )
+    return await workflow_plugin.resume_workflow(issue_number)
 
 
 async def get_workflow_status(issue_number: str) -> Optional[Dict]:
@@ -269,46 +211,11 @@ async def get_workflow_status(issue_number: str) -> Optional[Dict]:
     Returns:
         Dict with workflow status or None
     """
-    if not USE_NEXUS_CORE:
-        return None
-    
-    workflow_id = StateManager.get_workflow_id_for_issue(issue_number)
-    if not workflow_id:
-        return None
-    
-    try:
-        engine = get_workflow_engine()
-        workflow = await engine.get_workflow(workflow_id)
-        
-        if not workflow:
-            return None
-        
-        current_step = workflow.steps[workflow.current_step]
-        
-        return {
-            "workflow_id": workflow.id,
-            "name": workflow.name,
-            "state": workflow.state.value,
-            "current_step": workflow.current_step + 1,
-            "total_steps": len(workflow.steps),
-            "current_step_name": current_step.name,
-            "current_agent": current_step.agent.display_name,
-            "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
-            "updated_at": workflow.updated_at.isoformat() if workflow.updated_at else None,
-            "metadata": workflow.metadata
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get workflow status for issue #{issue_number}: {e}")
-        return None
-
-
-def _tier_to_workflow_type(tier_name: str) -> str:
-    """Map tier name to workflow type.
-
-    Delegates to nexus-core's WorkflowDefinition.normalize_workflow_type().
-    """
-    return WorkflowDefinition.normalize_workflow_type(tier_name)
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
+    )
+    return await workflow_plugin.get_workflow_status(issue_number)
 
 
 async def handle_approval_gate(
@@ -335,61 +242,29 @@ async def handle_approval_gate(
         approval_timeout: Timeout in seconds
         project: Project name
     """
-    StateManager.set_pending_approval(
-        issue_num=issue_number,
-        step_num=step_num,
-        step_name=step_name,
-        approvers=approvers,
-        approval_timeout=approval_timeout,
-    )
-    StateManager.audit_log(
-        int(issue_number),
-        "APPROVAL_REQUESTED",
-        f"step {step_num} ({step_name}), approvers={approvers}",
+    def _notify_approval_required(**kwargs):
+        from notifications import notify_approval_required
+
+        notify_approval_required(**kwargs)
+
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        notify_approval_required=_notify_approval_required,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
     )
 
-    from notifications import notify_approval_required
-    notify_approval_required(
+    await workflow_plugin.request_approval_gate(
+        workflow_id=workflow_id,
         issue_number=issue_number,
         step_num=step_num,
         step_name=step_name,
-        agent=agent_name,
+        agent_name=agent_name,
         approvers=approvers,
+        approval_timeout=approval_timeout,
         project=project,
     )
 
     logger.info(
         f"Approval gate triggered for issue #{issue_number} "
-        f"step {step_num} ({step_name}). Notified approvers: {approvers}"
+        f"step {step_num} ({step_name})."
     )
-
-
-def handle_approval_gate_sync(*args, **kwargs) -> None:
-    """Synchronous wrapper for handle_approval_gate."""
-    asyncio.run(handle_approval_gate(*args, **kwargs))
-
-
-# Sync wrappers for use in non-async code
-def create_workflow_for_issue_sync(*args, **kwargs) -> Optional[str]:
-    """Synchronous wrapper for create_workflow_for_issue."""
-    return asyncio.run(create_workflow_for_issue(*args, **kwargs))
-
-
-def start_workflow_sync(*args, **kwargs) -> bool:
-    """Synchronous wrapper for start_workflow."""
-    return asyncio.run(start_workflow(*args, **kwargs))
-
-
-def pause_workflow_sync(*args, **kwargs) -> bool:
-    """Synchronous wrapper for pause_workflow."""
-    return asyncio.run(pause_workflow(*args, **kwargs))
-
-
-def resume_workflow_sync(*args, **kwargs) -> bool:
-    """Synchronous wrapper for resume_workflow."""
-    return asyncio.run(resume_workflow(*args, **kwargs))
-
-
-def get_workflow_status_sync(*args, **kwargs) -> Optional[Dict]:
-    """Synchronous wrapper for get_workflow_status."""
-    return asyncio.run(get_workflow_status(*args, **kwargs))

@@ -195,7 +195,7 @@ class TestWorkflowEngineWithApprovalGates:
         storage = _make_storage(wf)
         engine = WorkflowEngine(storage=storage)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             engine.complete_step("wf-approval", step_num=1, outputs={})
         )
 
@@ -219,7 +219,7 @@ class TestWorkflowEngineWithApprovalGates:
         storage = _make_storage(wf)
         engine = WorkflowEngine(storage=storage)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             engine.complete_step("wf-no-gates", step_num=1, outputs={})
         )
 
@@ -242,7 +242,7 @@ class TestWorkflowEngineWithApprovalGates:
         storage = _make_storage(wf)
         engine = WorkflowEngine(storage=storage)
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             engine.complete_step("wf-audit", step_num=1, outputs={})
         )
 

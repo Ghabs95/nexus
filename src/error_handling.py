@@ -52,9 +52,18 @@ def retry_with_backoff(
                 try:
                     return func(*args, **kwargs)
                 except exceptions as e:
+                    extra_context = ""
+                    if isinstance(e, subprocess.CalledProcessError):
+                        stderr = (e.stderr or "").strip()
+                        stdout = (e.output or "").strip()
+                        if stderr:
+                            extra_context = f" stderr={stderr[:300]}"
+                        elif stdout:
+                            extra_context = f" stdout={stdout[:300]}"
+
                     if attempt == max_attempts:
                         logger.error(
-                            f"{func.__name__} failed after {max_attempts} attempts: {e}",
+                            f"{func.__name__} failed after {max_attempts} attempts: {e}.{extra_context}",
                             exc_info=True
                         )
                         raise RetryExhaustedError(
@@ -65,7 +74,7 @@ def retry_with_backoff(
                     delay = min(base_delay * (exponential_base ** (attempt - 1)), max_delay)
                     
                     logger.warning(
-                        f"{func.__name__} attempt {attempt}/{max_attempts} failed: {e}. "
+                        f"{func.__name__} attempt {attempt}/{max_attempts} failed: {e}.{extra_context} "
                         f"Retrying in {delay:.1f}s..."
                     )
                     

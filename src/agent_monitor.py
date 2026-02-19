@@ -1,12 +1,12 @@
 """Agent monitoring and recovery - handles timeouts, retries, and failures."""
 import logging
-import subprocess
 import time
 import os
 from typing import Optional, Tuple
 from datetime import datetime
 from state_manager import StateManager
 from config import STUCK_AGENT_THRESHOLD
+from plugin_runtime import get_runtime_ops_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +32,9 @@ class AgentMonitor:
 
             if time_since_update > STUCK_AGENT_THRESHOLD:
                 # Check if process is still running
-                result = subprocess.run(
-                    ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
-                    text=True, capture_output=True, timeout=5
-                )
-
-                if result.stdout:
-                    # Extract PID
-                    import re
-                    pid_match = re.search(r"^(\d+)", result.stdout)
-                    pid = int(pid_match.group(1)) if pid_match else None
+                runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:monitor")
+                pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None
+                if pid:
                     logger.warning(
                         f"Issue #{issue_num}: Agent timeout detected "
                         f"(no activity for {int(time_since_update/60)} min, PID: {pid})"
@@ -56,7 +49,10 @@ class AgentMonitor:
     def kill_agent(pid: int, issue_num: str) -> bool:
         """Kill a stuck agent process."""
         try:
-            subprocess.run(["kill", "-9", str(pid)], check=True, timeout=5)
+            runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:monitor")
+            if not runtime_ops or not runtime_ops.kill_process(pid, force=True):
+                logger.error(f"Failed to kill agent PID {pid}")
+                return False
             logger.warning(f"Killed stuck agent PID {pid} for issue #{issue_num}")
             StateManager.audit_log(
                 int(issue_num),

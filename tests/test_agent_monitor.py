@@ -1,8 +1,6 @@
 """Unit tests for agent_monitor module."""
 
 import pytest
-import os
-import time
 from unittest.mock import patch, MagicMock
 from agent_monitor import AgentMonitor, WorkflowRouter
 
@@ -54,48 +52,57 @@ class TestAgentMonitor:
         AgentMonitor.mark_failed("42", "@Copilot", "Test failure")
         assert "42_@Copilot" not in AgentMonitor.retry_counters
     
-    @patch('subprocess.run')
-    def test_kill_agent_success(self, mock_run):
-        """Test kill_agent successfully terminates a process."""
-        mock_run.return_value = MagicMock(returncode=0)
+    @patch('agent_monitor.get_runtime_ops_plugin')
+    def test_kill_agent_success(self, mock_get_runtime_ops):
+        """Test kill_agent successfully terminates via runtime-ops plugin."""
+        runtime_ops = MagicMock()
+        runtime_ops.kill_process.return_value = True
+        mock_get_runtime_ops.return_value = runtime_ops
         
         result = AgentMonitor.kill_agent(12345, "42")
         assert result is True
-        mock_run.assert_called_once_with(["kill", "-9", "12345"], check=True, timeout=5)
+        runtime_ops.kill_process.assert_called_once_with(12345, force=True)
     
-    @patch('subprocess.run')
-    def test_kill_agent_failure(self, mock_run):
-        """Test kill_agent handles failure gracefully."""
-        mock_run.side_effect = Exception("Process not found")
+    @patch('agent_monitor.get_runtime_ops_plugin')
+    def test_kill_agent_failure(self, mock_get_runtime_ops):
+        """Test kill_agent handles plugin kill failures gracefully."""
+        runtime_ops = MagicMock()
+        runtime_ops.kill_process.return_value = False
+        mock_get_runtime_ops.return_value = runtime_ops
         
         result = AgentMonitor.kill_agent(12345, "42")
         assert result is False
     
-    @patch('subprocess.run')
+    @patch('agent_monitor.get_runtime_ops_plugin')
     @patch('os.path.getmtime')
     @patch('time.time')
-    def test_check_timeout_detected(self, mock_time, mock_getmtime, mock_run):
-        """Test check_timeout detects a timed-out agent."""
+    def test_check_timeout_detected(self, mock_time, mock_getmtime, mock_get_runtime_ops):
+        """Test check_timeout detects timeout when plugin reports active PID."""
         # Mock current time and file modification time (16 minutes ago)
         mock_time.return_value = 1000.0
         mock_getmtime.return_value = 1000.0 - (16 * 60)  # 16 minutes ago
         
-        # Mock pgrep finding the process
-        mock_run.return_value = MagicMock(stdout="12345 copilot issues/42")
+        runtime_ops = MagicMock()
+        runtime_ops.find_agent_pid_for_issue.return_value = 12345
+        mock_get_runtime_ops.return_value = runtime_ops
         
         timed_out, pid = AgentMonitor.check_timeout("42", "/tmp/test.log")
         
         assert timed_out is True
         assert pid == 12345
     
-    @patch('subprocess.run')
+    @patch('agent_monitor.get_runtime_ops_plugin')
     @patch('os.path.getmtime')
     @patch('time.time')
-    def test_check_timeout_not_detected(self, mock_time, mock_getmtime, mock_run):
+    def test_check_timeout_not_detected(self, mock_time, mock_getmtime, mock_get_runtime_ops):
         """Test check_timeout when no timeout has occurred."""
         # Mock current time and recent file modification (1 minute ago)
         mock_time.return_value = 1000.0
         mock_getmtime.return_value = 1000.0 - 60  # 1 minute ago
+
+        runtime_ops = MagicMock()
+        runtime_ops.find_agent_pid_for_issue.return_value = None
+        mock_get_runtime_ops.return_value = runtime_ops
         
         timed_out, pid = AgentMonitor.check_timeout("42", "/tmp/test.log")
         

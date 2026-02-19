@@ -19,7 +19,8 @@ from config import (
     TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
     DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
-    get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
+    get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name,
+    NEXUS_CORE_STORAGE_DIR,
 )
 from state_manager import StateManager
 from models import WorkflowState
@@ -31,6 +32,7 @@ from commands.workflow import (
 from agent_launcher import invoke_copilot_agent
 from inbox_processor import get_sop_tier
 from ai_orchestrator import get_orchestrator
+from plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 from error_handling import format_error_for_user, run_command_with_retry
 from analytics import get_stats_report
 from rate_limiter import get_rate_limiter, RateLimit
@@ -60,6 +62,23 @@ user_manager = get_user_manager()
 
 # Legacy alias for compatibility
 GITHUB_REPO = get_github_repo("nexus")
+_WORKFLOW_STATE_PLUGIN_KWARGS = {
+    "storage_dir": NEXUS_CORE_STORAGE_DIR,
+    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
+    "clear_pending_approval": StateManager.clear_pending_approval,
+    "audit_log": StateManager.audit_log,
+}
+
+
+def _get_direct_issue_plugin(repo: str):
+    """Return GitHub issue plugin for direct Telegram operations."""
+    return get_profiled_plugin(
+        "github_telegram",
+        overrides={
+            "repo": repo,
+        },
+        cache_key=f"github:telegram:{repo}",
+    )
 
 
 # --- RATE LIMITING DECORATOR ---
@@ -113,12 +132,13 @@ def get_issue_details(issue_num, repo: str = None):
     """Query GitHub API for issue details."""
     try:
         repo = repo or GITHUB_REPO
-        result = subprocess.run(
-            ["gh", "issue", "view", str(issue_num), "--repo", repo, "--json",
-             "number,title,state,labels,body,updatedAt"],
-            check=True, text=True, capture_output=True
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin:
+            return None
+        return plugin.get_issue(
+            str(issue_num),
+            ["number", "title", "state", "labels", "body", "updatedAt"],
         )
-        return json.loads(result.stdout)
     except Exception as e:
         logger.error(f"Failed to fetch issue {issue_num}: {e}")
         return None
@@ -382,15 +402,10 @@ def _list_project_issues(project_key: str, state: str = "open", limit: int = 10)
     if not repo:
         return []
     try:
-        result = subprocess.run(
-            [
-                "gh", "issue", "list", "--repo", repo,
-                "--state", state, "--limit", str(limit),
-                "--json", "number,title,state",
-            ],
-            check=True, text=True, capture_output=True,
-        )
-        return json.loads(result.stdout)
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin:
+            return []
+        return plugin.list_issues(state=state, limit=limit, fields=["number", "title", "state"])
     except Exception as e:
         logger.error(f"Failed to list issues for {project_key}: {e}")
         return []
@@ -403,20 +418,35 @@ async def _prompt_issue_selection(
     project_key: str,
     *,
     edit_message: bool = False,
+    issue_state: str = "open",
 ) -> None:
-    """Show a list of open issues for the user to pick from."""
-    issues = _list_project_issues(project_key)
+    """Show a list of issues for the user to pick from."""
+    issues = _list_project_issues(project_key, state=issue_state)
+    state_label = "open" if issue_state == "open" else "closed"
+
     if not issues:
+        # No issues in current state — still offer toggle + manual entry
+        keyboard = []
+        if issue_state == "open":
+            keyboard.append([InlineKeyboardButton(
+                "📦 Closed issues",
+                callback_data=f"pickissue_state:closed:{command}:{project_key}",
+            )])
+        else:
+            keyboard.append([InlineKeyboardButton(
+                "🔓 Open issues",
+                callback_data=f"pickissue_state:open:{command}:{project_key}",
+            )])
+        keyboard.append([InlineKeyboardButton("✏️ Enter manually", callback_data=f"pickissue_manual:{command}:{project_key}")])
+        keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
+
         text = (
-            f"No open issues found for {_get_project_label(project_key)}.\n"
-            f"Send the issue number manually."
+            f"No {state_label} issues found for {_get_project_label(project_key)}."
         )
         if edit_message and update.callback_query:
-            await update.callback_query.edit_message_text(text)
+            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            await update.effective_message.reply_text(text)
-        context.user_data["pending_command"] = command
-        context.user_data["pending_project"] = project_key
+            await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
     keyboard = []
@@ -429,10 +459,24 @@ async def _prompt_issue_selection(
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"pickissue:{command}:{project_key}:{num}")]
         )
+
+    # Toggle button: show closed when viewing open, and vice versa
+    if issue_state == "open":
+        keyboard.append([InlineKeyboardButton(
+            "📦 Closed issues",
+            callback_data=f"pickissue_state:closed:{command}:{project_key}",
+        )])
+    else:
+        keyboard.append([InlineKeyboardButton(
+            "🔓 Open issues",
+            callback_data=f"pickissue_state:open:{command}:{project_key}",
+        )])
+
     keyboard.append([InlineKeyboardButton("✏️ Enter manually", callback_data=f"pickissue_manual:{command}:{project_key}")])
     keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
 
-    text = f"Select an issue for /{command} ({_get_project_label(project_key)}):"
+    emoji = "📋" if issue_state == "open" else "📦"
+    text = f"{emoji} {state_label.capitalize()} issues for /{command} ({_get_project_label(project_key)}):"
     if edit_message and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
@@ -607,6 +651,15 @@ async def issue_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["pending_project"] = project_key
         await query.edit_message_text(
             f"Selected {_get_project_label(project_key)}. Send the issue number."
+        )
+        return
+
+    if query.data.startswith("pickissue_state:"):
+        # Toggle between open/closed issue lists
+        _, issue_state, command, project_key = query.data.split(":", 3)
+        await _prompt_issue_selection(
+            update, context, command, project_key,
+            edit_message=True, issue_state=issue_state,
         )
         return
 
@@ -1268,16 +1321,19 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             assignee = raw_assignee
     
-    # Assign using gh CLI
+    # Assign using plugin
     msg = await update.effective_message.reply_text(f"🔄 Assigning issue #{issue_number}...")
     
     try:
-        result = subprocess.run(
-            ["gh", "issue", "edit", issue_number, "--repo", repo, "--add-assignee", assignee],
-            check=True,
-            text=True,
-            capture_output=True
-        )
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin or not plugin.add_assignee(issue_number, assignee):
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to assign issue #{issue_number}"
+            )
+            return
+
         display_assignee = assignee
         if display_assignee == "@me":
             display_assignee = "you (@me)"
@@ -1287,18 +1343,11 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"✅ Issue #{issue_number} assigned to {display_assignee}!\n\nhttps://github.com/{repo}/issues/{issue_number}",
             parse_mode='Markdown'
         )
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr if e.stderr else "Unknown error"
+    except Exception as e:
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text=f"❌ Failed to assign issue #{issue_number}\n\nError: {error_msg}"
-        )
-    except FileNotFoundError:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
-            text="❌ Error: `gh` CLI not found on server."
+            text=f"❌ Failed to assign issue #{issue_number}\n\nError: {e}"
         )
 
 
@@ -1327,11 +1376,27 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"🔔 Requesting Copilot implementation for issue #{issue_number}...")
 
     try:
-        # Create the label if missing (ignore errors)
-        subprocess.run(["gh", "label", "create", "agent:requested", "--repo", repo, "--color", "E6E6FA", "--description", "Requested Copilot implementation"], check=False, text=True, capture_output=True)
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text="❌ Failed to initialize GitHub issue plugin"
+            )
+            return
 
-        # Add the request label
-        subprocess.run(["gh", "issue", "edit", issue_number, "--repo", repo, "--add-label", "agent:requested"], check=True, text=True, capture_output=True)
+        plugin.ensure_label(
+            "agent:requested",
+            "E6E6FA",
+            "Requested Copilot implementation",
+        )
+        if not plugin.add_label(issue_number, "agent:requested"):
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to request implementation for issue #{issue_number}."
+            )
+            return
 
         comment = (
             f"@ProjectLead — Copilot implementation has been requested via Telegram.\n\n"
@@ -1339,7 +1404,13 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Issue: https://github.com/{repo}/issues/{issue_number}"
         )
 
-        subprocess.run(["gh", "issue", "comment", issue_number, "--repo", repo, "--body", comment], check=True, text=True, capture_output=True)
+        if not plugin.add_comment(issue_number, comment):
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to request implementation for issue #{issue_number}."
+            )
+            return
 
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -1347,18 +1418,11 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"✅ Requested implementation for issue #{issue_number}. ProjectLead has been notified.\n\nhttps://github.com/{repo}/issues/{issue_number}",
             parse_mode='Markdown'
         )
-    except subprocess.CalledProcessError as e:
-        err = e.stderr if e.stderr else str(e)
+    except Exception as e:
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text=f"❌ Failed to request implementation for issue #{issue_number}.\n\nError: {err}"
-        )
-    except FileNotFoundError:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
-            text="❌ Error: `gh` CLI not found on server."
+            text=f"❌ Failed to request implementation for issue #{issue_number}.\n\nError: {e}"
         )
 
 
@@ -1382,9 +1446,23 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"🔧 Preparing issue #{issue_number} for Copilot...")
 
     try:
-        # Fetch current issue body and title
-        result = subprocess.run(["gh", "issue", "view", issue_number, "--repo", repo, "--json", "body,title"], check=True, text=True, capture_output=True)
-        data = json.loads(result.stdout)
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text="❌ Failed to initialize GitHub issue plugin"
+            )
+            return
+
+        data = plugin.get_issue(issue_number, ["body", "title"])
+        if not data:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to prepare issue #{issue_number}."
+            )
+            return
         body = data.get("body", "")
         title = data.get("title", "")
 
@@ -1410,8 +1488,13 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         new_body = body + "\n\n---\n\n" + copilot_block
 
-        # Update the issue body
-        subprocess.run(["gh", "issue", "edit", issue_number, "--repo", repo, "--body", new_body], check=True, text=True, capture_output=True)
+        if not plugin.update_issue_body(issue_number, new_body):
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to prepare issue #{issue_number}."
+            )
+            return
 
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -1419,18 +1502,11 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"✅ Prepared issue #{issue_number} for Copilot. You can now click 'Code with agent mode' in GitHub or ask ProjectLead to approve.\n\nhttps://github.com/{repo}/issues/{issue_number}",
             parse_mode='Markdown'
         )
-    except subprocess.CalledProcessError as e:
-        err = e.stderr if e.stderr else str(e)
+    except Exception as e:
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=msg.message_id,
-            text=f"❌ Failed to prepare issue #{issue_number}.\n\nError: {err}"
-        )
-    except FileNotFoundError:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
-            text="❌ Error: `gh` CLI not found on server."
+            text=f"❌ Failed to prepare issue #{issue_number}.\n\nError: {e}"
         )
 
 
@@ -2124,26 +2200,6 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def find_agent_pid_for_issue(issue_num):
-    """Find the PID of the running Copilot agent for an issue."""
-    try:
-        # Search for copilot processes with the issue reference
-        result = subprocess.run(
-            ["pgrep", "-af", f"copilot.*issues/{issue_num}[^0-9]|copilot.*issues/{issue_num}$"],
-            text=True, capture_output=True
-        )
-        if result.stdout:
-            lines = result.stdout.strip().split("\n")
-            for line in lines:
-                parts = line.split(None, 1)
-                if parts:
-                    return int(parts[0])
-        return None
-    except Exception as e:
-        logger.error(f"Failed to find agent PID: {e}")
-        return None
-
-
 async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Continue/resume agent processing for an issue with a continuation prompt."""
     logger.info(f"Continue requested by user: {update.effective_user.id}")
@@ -2162,7 +2218,8 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     continuation_prompt = " ".join(rest) if rest else "Please continue with the next step."
 
     # Check if agent is already running
-    pid = find_agent_pid_for_issue(issue_num)
+    runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:telegram")
+    pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None
     if pid:
         await update.effective_message.reply_text(
             f"⚠️ Agent is already running for issue #{issue_num} (PID: {pid}).\n\n"
@@ -2274,7 +2331,8 @@ async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not project_key:
         return
 
-    pid = find_agent_pid_for_issue(issue_num)
+    runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:telegram")
+    pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None
     
     if not pid:
         await update.effective_message.reply_text(f"⚠️ No running agent found for issue #{issue_num}.")
@@ -2283,13 +2341,15 @@ async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text(f"🔪 Killing agent for issue #{issue_num} (PID: {pid})...")
 
     try:
-        subprocess.run(["kill", str(pid)], check=True, timeout=5)
+        if not runtime_ops or not runtime_ops.kill_process(pid, force=False):
+            raise RuntimeError(f"Failed to stop process {pid}")
         # Wait a moment and verify it's gone
         time.sleep(1)
-        new_pid = find_agent_pid_for_issue(issue_num)
+        new_pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None
         if new_pid:
             # Try harder
-            subprocess.run(["kill", "-9", str(pid)], check=True, timeout=5)
+            if not runtime_ops or not runtime_ops.kill_process(pid, force=True):
+                raise RuntimeError(f"Failed to force kill process {pid}")
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
@@ -2492,25 +2552,32 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ---
 *Created via /direct command - invoke {agent} immediately*"""
         
-        result = subprocess.run(
-            ["gh", "issue", "create", "--repo", GITHUB_REPO,
-             "--title", title,
-             "--body", body,
-             "--no-editor", "--label", "workflow:fast-track"],
-            text=True, capture_output=True, timeout=15
-        )
-        
-        if result.returncode != 0:
+        repo = get_github_repo(project)
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
-                text=f"❌ Failed to create issue"
+                text="❌ Failed to initialize GitHub issue plugin"
+            )
+            return
+
+        issue_url = plugin.create_issue(
+            title=title,
+            body=body,
+            labels=["workflow:fast-track"],
+        )
+        if not issue_url:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text="❌ Failed to create issue"
             )
             return
         
         # Extract issue number
         import re as re_module
-        match = re_module.search(r'#(\d+)', result.stderr + result.stdout)
+        match = re_module.search(r"/issues/(\d+)$", issue_url)
         if not match:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
@@ -2520,14 +2587,9 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         issue_num = match.group(1)
-        issue_url = f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
-        
         # Post a completion marker comment to trigger immediate auto-chain to this agent
         comment_body = f"🎯 Direct request from @Ghabs\n\nReady for `@{agent}`"
-        subprocess.run(
-            ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO, "--body", comment_body],
-            check=False, text=True, capture_output=True, timeout=10
-        )
+        plugin.add_comment(issue_num, comment_body)
         
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -2567,15 +2629,23 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text(f"💬 Fetching comments for issue #{issue_num}...")
 
     try:
-        # Fetch issue comments
-        result = subprocess.run(
-            ["gh", "issue", "view", issue_num, "--repo", repo, 
-             "--json", "comments,title", "--jq", 
-             '{title: .title, comments: [.comments[] | {author: .author.login, created: .createdAt, body: .body}]}'],
-            check=True, text=True, capture_output=True, timeout=15
-        )
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to fetch comments for issue #{issue_num}"
+            )
+            return
 
-        data = json.loads(result.stdout)
+        data = plugin.get_issue(issue_num, ["comments", "title"])
+        if not data:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to fetch comments for issue #{issue_num}"
+            )
+            return
         title = data.get("title", "Unknown")
         comments = data.get("comments", [])
 
@@ -2599,8 +2669,12 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Show last 5 comments
         recent_comments = comments[-5:]
         for i, comment in enumerate(recent_comments, 1):
-            author = comment.get("author", "unknown")
-            created = comment.get("created", "")
+            author_data = comment.get("author")
+            if isinstance(author_data, dict):
+                author = author_data.get("login", "unknown")
+            else:
+                author = author_data or "unknown"
+            created = comment.get("created") or comment.get("createdAt", "")
             body = comment.get("body", "")
             
             # Format timestamp
@@ -2647,19 +2721,6 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     disable_web_page_preview=True
                 )
 
-    except subprocess.TimeoutExpired:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
-            text=f"❌ Timeout fetching comments for issue #{issue_num}"
-        )
-    except subprocess.CalledProcessError as e:
-        error = e.stderr if e.stderr else str(e)
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
-            text=f"❌ Failed to fetch comments: {error}"
-        )
     except Exception as e:
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -2718,11 +2779,14 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         repo = config.get("github_repo", GITHUB_REPO)
 
-        result = subprocess.run(
-            ["gh", "issue", "comment", issue_num, "--repo", repo, 
-             "--body", response_text],
-            check=True, text=True, capture_output=True, timeout=15
-        )
+        plugin = _get_direct_issue_plugin(repo)
+        if not plugin or not plugin.add_comment(issue_num, response_text):
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Failed to post response to issue #{issue_num}."
+            )
+            return
 
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -2855,11 +2919,13 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"✅ Approving implementation for issue #{issue_num}...")
         
         try:
-            subprocess.run(
-                ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO,
-                 "--body", "✅ Implementation approved by @Ghabs. Please proceed."],
-                check=True, timeout=10
-            )
+            plugin = _get_direct_issue_plugin(GITHUB_REPO)
+            if not plugin or not plugin.add_comment(
+                issue_num,
+                "✅ Implementation approved by @Ghabs. Please proceed.",
+            ):
+                await query.edit_message_text(f"❌ Error approving issue #{issue_num}")
+                return
             await query.edit_message_text(
                 f"✅ Implementation approved for issue #{issue_num}\\n\\n"
                 f"Agent will continue automatically.",
@@ -2873,11 +2939,13 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"❌ Rejecting implementation for issue #{issue_num}...")
         
         try:
-            subprocess.run(
-                ["gh", "issue", "comment", issue_num, "--repo", GITHUB_REPO,
-                 "--body", "❌ Implementation rejected by @Ghabs. Please revise."],
-                check=True, timeout=10
-            )
+            plugin = _get_direct_issue_plugin(GITHUB_REPO)
+            if not plugin or not plugin.add_comment(
+                issue_num,
+                "❌ Implementation rejected by @Ghabs. Please revise.",
+            ):
+                await query.edit_message_text(f"❌ Error rejecting issue #{issue_num}")
+                return
             await query.edit_message_text(
                 f"❌ Implementation rejected for issue #{issue_num}\\n\\n"
                 f"Agent has been notified.",
@@ -2894,20 +2962,16 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
             f"✅ Approving workflow step {step_num} for issue #{real_issue}..."
         )
         try:
-            from nexus_core_helpers import get_workflow_engine
-            from state_manager import StateManager
-            workflow_id = StateManager.get_workflow_id_for_issue(real_issue)
-            if not workflow_id:
+            workflow_plugin = get_workflow_state_plugin(
+                **_WORKFLOW_STATE_PLUGIN_KWARGS,
+                cache_key="workflow:state-engine",
+            )
+            approved_by = update.effective_user.username or str(update.effective_user.id)
+            if not workflow_plugin or not await workflow_plugin.approve_step(real_issue, approved_by):
                 await query.edit_message_text(
                     f"❌ No workflow found for issue #{real_issue}"
                 )
                 return
-            import asyncio
-            engine = get_workflow_engine()
-            approved_by = update.effective_user.username or str(update.effective_user.id)
-            await engine.approve_step(workflow_id, approved_by=approved_by)
-            StateManager.clear_pending_approval(real_issue)
-            StateManager.audit_log(int(real_issue), "APPROVAL_GRANTED", f"by {approved_by}")
             await query.edit_message_text(
                 f"✅ Step {step_num} approved for issue #{real_issue}\\n\\n"
                 f"Workflow will continue automatically.",
@@ -2924,19 +2988,20 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
             f"❌ Denying workflow step {step_num} for issue #{real_issue}..."
         )
         try:
-            from nexus_core_helpers import get_workflow_engine
-            from state_manager import StateManager
-            workflow_id = StateManager.get_workflow_id_for_issue(real_issue)
-            if not workflow_id:
+            workflow_plugin = get_workflow_state_plugin(
+                **_WORKFLOW_STATE_PLUGIN_KWARGS,
+                cache_key="workflow:state-engine",
+            )
+            denied_by = update.effective_user.username or str(update.effective_user.id)
+            if not workflow_plugin or not await workflow_plugin.deny_step(
+                real_issue,
+                denied_by,
+                reason="Denied via Telegram",
+            ):
                 await query.edit_message_text(
                     f"❌ No workflow found for issue #{real_issue}"
                 )
                 return
-            engine = get_workflow_engine()
-            denied_by = update.effective_user.username or str(update.effective_user.id)
-            await engine.deny_step(workflow_id, denied_by=denied_by, reason="Denied via Telegram")
-            StateManager.clear_pending_approval(real_issue)
-            StateManager.audit_log(int(real_issue), "APPROVAL_DENIED", f"by {denied_by}")
             await query.edit_message_text(
                 f"❌ Step {step_num} denied for issue #{real_issue}\\n\\n"
                 f"Workflow has been stopped.",

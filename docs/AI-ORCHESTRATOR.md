@@ -77,6 +77,8 @@ COPILOT_CLI_PATH="copilot"            # Path to copilot-cli
 AI_FALLBACK_ENABLED="true"            # Enable fallback support
 AI_RATE_LIMIT_TTL="3600"              # Rate limit timeout (seconds)
 AI_MAX_RETRIES="2"                    # Max retries before marking unavailable
+AI_ANALYSIS_TIMEOUT="30"              # Default Copilot analysis timeout (seconds)
+AI_REFINE_DESCRIPTION_TIMEOUT="90"    # Timeout for refine_description task (seconds)
 ```
 
 ### config.py Settings
@@ -96,6 +98,8 @@ ORCHESTRATOR_CONFIG = {
     "fallback_enabled": True,
     "rate_limit_ttl": 3600,
     "max_retries": 2,
+   "analysis_timeout": int(os.getenv("AI_ANALYSIS_TIMEOUT", "30")),
+   "refine_description_timeout": int(os.getenv("AI_REFINE_DESCRIPTION_TIMEOUT", "90")),
 }
 ```
 

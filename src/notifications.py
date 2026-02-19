@@ -3,11 +3,23 @@
 Provides rich Telegram notifications with interactive buttons for quick actions.
 """
 import logging
-import requests
 from typing import Dict, List, Optional
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, get_github_repo
+from plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
+
+
+def _get_notification_plugin():
+    """Return shared Telegram notification plugin instance."""
+    return get_profiled_plugin(
+        "notification_telegram",
+        overrides={
+            "bot_token": TELEGRAM_TOKEN,
+            "chat_id": TELEGRAM_CHAT_ID,
+        },
+        cache_key="notification:telegram-default",
+    )
 
 
 class InlineKeyboard:
@@ -74,24 +86,28 @@ def send_notification(
     Returns:
         True if sent successfully
     """
+    plugin = _get_notification_plugin()
+    reply_markup = keyboard.build() if keyboard else None
+
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram credentials not configured, skipping notification")
         return False
-    
+    if not plugin:
+        logger.error("Telegram notification plugin unavailable")
+        return False
+
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": parse_mode
-        }
-        
-        if keyboard:
-            data["reply_markup"] = keyboard.build()
-        
-        response = requests.post(url, json=data, timeout=10)
-        return response.status_code == 200
-    
+        if not hasattr(plugin, "send_message_sync"):
+            logger.error("Telegram notification plugin missing send_message_sync")
+            return False
+
+        return bool(
+            plugin.send_message_sync(
+                message=message,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+        )
     except Exception as e:
         logger.error(f"Failed to send notification: {e}")
         return False
@@ -397,4 +413,13 @@ def send_telegram_alert(message: str) -> bool:
     Returns:
         True if sent successfully
     """
-    return send_notification(message, parse_mode="Markdown")
+    plugin = _get_notification_plugin()
+    if plugin:
+        try:
+            if hasattr(plugin, "send_alert_sync"):
+                return bool(plugin.send_alert_sync(message, severity="info"))
+        except Exception as exc:
+            logger.warning(f"Telegram plugin alert failed: {exc}")
+
+    logger.warning("Telegram notification plugin unavailable, skipping alert")
+    return False

@@ -1,14 +1,10 @@
 """Workflow control commands: pause, resume, stop, continue, new."""
 import logging
-import subprocess
 from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
-from models import WorkflowState
-from config import ALLOWED_USER_ID, USE_NEXUS_CORE, PROJECT_CONFIG
-from nexus_core_helpers import (
-    pause_workflow_sync, resume_workflow_sync, get_workflow_status_sync
-)
+from config import ALLOWED_USER_ID, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
+from plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +13,11 @@ PROJECT_ALIASES = {
     "wlbl": "wallible",
     "bm": "biome",
     "nexus": "nexus",
+}
+_issue_plugin_cache = {}
+_WORKFLOW_STATE_PLUGIN_KWARGS = {
+    "storage_dir": NEXUS_CORE_STORAGE_DIR,
+    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
 }
 
 
@@ -29,6 +30,23 @@ def _get_project_repo(project_key: str) -> str:
     if isinstance(cfg, dict) and cfg.get("github_repo"):
         return cfg["github_repo"]
     raise ValueError(f"Unknown project '{project_key}'")
+
+
+def _get_issue_plugin(repo: str):
+    """Return a configured GitHub issue plugin for the repo."""
+    if repo in _issue_plugin_cache:
+        return _issue_plugin_cache[repo]
+
+    plugin = get_profiled_plugin(
+        "github_workflow",
+        overrides={
+            "repo": repo,
+        },
+        cache_key=f"github:workflow:{repo}",
+    )
+    if plugin:
+        _issue_plugin_cache[repo] = plugin
+    return plugin
 
 
 async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,34 +70,30 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
 
-    # Try nexus-core first if enabled
-    if USE_NEXUS_CORE:
-        success = pause_workflow_sync(issue_num, reason="User requested via Telegram")
-        if success:
-            # Also update legacy StateManager for compatibility
-            StateManager.set_workflow_state(issue_num, WorkflowState.PAUSED)
-            StateManager.audit_log(int(issue_num), "WORKFLOW_PAUSED", "via nexus-core")
-            
-            # Get workflow status for richer feedback
-            status = get_workflow_status_sync(issue_num)
-            status_text = ""
-            if status:
-                status_text = (f"\n\n**Workflow:** {status['name']}\n"
-                             f"**Step:** {status['current_step']}/{status['total_steps']} - {status['current_step_name']}")
-            
-            await update.effective_message.reply_text(
-                f"⏸️ **Workflow paused for issue #{issue_num}**{status_text}\n\n"
-                f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
-                f"Use /resume {project_key} {issue_num} to re-enable auto-chaining."
-            )
-            return
-    
-    # Fallback to legacy StateManager
-    StateManager.set_workflow_state(issue_num, WorkflowState.PAUSED)
-    StateManager.audit_log(int(issue_num), "WORKFLOW_PAUSED")
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_KWARGS,
+        cache_key="workflow:state-engine",
+    )
+    success = await workflow_plugin.pause_workflow(
+        issue_num,
+        reason="User requested via Telegram",
+    )
+    if not success:
+        await update.effective_message.reply_text(
+            f"⚠️ Unable to pause workflow for issue #{issue_num}."
+        )
+        return
+
+    StateManager.audit_log(int(issue_num), "WORKFLOW_PAUSED", "via nexus-core")
+
+    status = await workflow_plugin.get_workflow_status(issue_num)
+    status_text = ""
+    if status:
+        status_text = (f"\n\n**Workflow:** {status['name']}\n"
+                     f"**Step:** {status['current_step']}/{status['total_steps']} - {status['current_step_name']}")
 
     await update.effective_message.reply_text(
-        f"⏸️ **Workflow paused for issue #{issue_num}**\n\n"
+        f"⏸️ **Workflow paused for issue #{issue_num}**{status_text}\n\n"
         f"Auto-chaining is disabled. Agents can still complete work, but the next agent won't be launched automatically.\n\n"
         f"Use /resume {project_key} {issue_num} to re-enable auto-chaining."
     )
@@ -106,34 +120,27 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("❌ Invalid issue number.")
         return
 
-    # Try nexus-core first if enabled
-    if USE_NEXUS_CORE:
-        success = resume_workflow_sync(issue_num)
-        if success:
-            # Also update legacy StateManager for compatibility
-            StateManager.set_workflow_state(issue_num, WorkflowState.ACTIVE)
-            StateManager.audit_log(int(issue_num), "WORKFLOW_RESUMED", "via nexus-core")
-            
-            # Get workflow status for richer feedback
-            status = get_workflow_status_sync(issue_num)
-            status_text = ""
-            if status:
-                status_text = (f"\n\n**Workflow:** {status['name']}\n"
-                             f"**Step:** {status['current_step']}/{status['total_steps']} - {status['current_step_name']}")
-            
-            await update.effective_message.reply_text(
-                f"▶️ **Workflow resumed for issue #{issue_num}**{status_text}\n\n"
-                f"Auto-chaining is re-enabled. The next agent will be launched when the current step completes.\n"
-                f"Check /active to see current progress."
-            )
-            return
-    
-    # Fallback to legacy StateManager
-    StateManager.set_workflow_state(issue_num, WorkflowState.ACTIVE)
-    StateManager.audit_log(int(issue_num), "WORKFLOW_RESUMED")
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_KWARGS,
+        cache_key="workflow:state-engine",
+    )
+    success = await workflow_plugin.resume_workflow(issue_num)
+    if not success:
+        await update.effective_message.reply_text(
+            f"⚠️ Unable to resume workflow for issue #{issue_num}."
+        )
+        return
+
+    StateManager.audit_log(int(issue_num), "WORKFLOW_RESUMED", "via nexus-core")
+
+    status = await workflow_plugin.get_workflow_status(issue_num)
+    status_text = ""
+    if status:
+        status_text = (f"\n\n**Workflow:** {status['name']}\n"
+                     f"**Step:** {status['current_step']}/{status['total_steps']} - {status['current_step_name']}")
 
     await update.effective_message.reply_text(
-        f"▶️ **Workflow resumed for issue #{issue_num}**\n\n"
+        f"▶️ **Workflow resumed for issue #{issue_num}**{status_text}\n\n"
         f"Auto-chaining is re-enabled. The next agent will be launched when the current step completes.\n"
         f"Check /active to see current progress."
     )
@@ -161,26 +168,33 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Kill any running agent first
-    from inbox_processor import find_agent_pid_for_issue  # Import here to avoid circular dependency
-    pid = find_agent_pid_for_issue(issue_num)
-    if pid:
-        try:
-            subprocess.run(["kill", "-9", str(pid)], check=True, timeout=5)
+    runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:workflow")
+    pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None
+    if pid and runtime_ops:
+        if runtime_ops.kill_process(pid, force=True):
             logger.info(f"Killed agent PID {pid} for issue #{issue_num}")
-        except Exception as e:
-            logger.error(f"Failed to kill agent: {e}")
+        else:
+            logger.error(f"Failed to kill agent PID {pid} for issue #{issue_num}")
 
-    # Mark workflow as stopped
-    StateManager.set_workflow_state(issue_num, WorkflowState.STOPPED)
+    # Prevent further auto-chaining by pausing workflow in nexus-core
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_KWARGS,
+        cache_key="workflow:state-engine",
+    )
+    paused_for_stop = await workflow_plugin.pause_workflow(
+        issue_num,
+        reason="Workflow stopped by user",
+    )
+    if not paused_for_stop:
+        logger.warning(f"Could not pause workflow for issue #{issue_num} before closing")
     StateManager.audit_log(int(issue_num), "WORKFLOW_STOPPED")
 
     # Close the GitHub issue
     try:
         repo = _get_project_repo(project_key)
-        subprocess.run(
-            ["gh", "issue", "close", issue_num, "--repo", repo],
-            check=True, timeout=10
-        )
+        plugin = _get_issue_plugin(repo)
+        if not plugin or not plugin.close_issue(issue_num):
+            raise RuntimeError("issue close failed")
         logger.info(f"Closed issue #{issue_num}")
     except Exception as e:
         logger.error(f"Failed to close issue: {e}")

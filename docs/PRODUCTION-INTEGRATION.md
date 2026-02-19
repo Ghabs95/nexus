@@ -13,7 +13,6 @@ All production source code has been updated to use the nexus-core framework.
 
 ### 1. `/src/config.py` ✅
 **Added:**
-- `USE_NEXUS_CORE` flag (default: `true`)
 - `NEXUS_CORE_STORAGE_DIR` path configuration
 - `WORKFLOW_ID_MAPPING_FILE` path
 - `NEXUS_CORE_STORAGE_BACKEND` option (file/postgres/redis)
@@ -52,8 +51,7 @@ All production source code has been updated to use the nexus-core framework.
 
 ### 4. `/src/inbox_processor.py` ✅
 **Changes:**
-- Added import: `USE_NEXUS_CORE` and `create_workflow_for_issue_sync`
-- After creating GitHub issue, now creates nexus-core workflow if enabled
+- After creating GitHub issue, creates nexus-core workflow
 - Writes workflow_id to task file for tracking
 
 **Lines changed:** ~20 lines added  
@@ -61,23 +59,20 @@ All production source code has been updated to use the nexus-core framework.
 
 **Behavior:**
 ```python
-if USE_NEXUS_CORE:
-    issue_num = issue_url.split('/')[-1]
-    workflow_id = create_workflow_for_issue_sync(...)
-    # Write workflow_id to task file
+issue_num = issue_url.split('/')[-1]
+workflow_id = create_workflow_for_issue_sync(...)
+# Write workflow_id to task file
 ```
 
 ### 5. `/src/commands/workflow.py` ✅
 **Updated handlers:**
-- `pause_handler()` - Now tries nexus-core first, falls back to StateManager
-- `resume_handler()` - Now tries nexus-core first, falls back to StateManager
+- `pause_handler()` - Uses nexus-core workflow-state plugin
+- `resume_handler()` - Uses nexus-core workflow-state plugin
 
 **Lines changed:** ~45 lines modified  
 **Behavior:**
-- If `USE_NEXUS_CORE=true`, uses nexus-core pause/resume
-- Also updates legacy StateManager for compatibility
+- Uses nexus-core pause/resume operations
 - Shows richer status feedback (workflow name, current step)
-- Falls back gracefully if nexus-core disabled
 
 ## How It Works
 
@@ -109,12 +104,8 @@ if USE_NEXUS_CORE:
 ```
 1. User sends /pause 123
 2. commands/workflow.py:pause_handler() called
-3. Checks USE_NEXUS_CORE flag
-4. If true:
-   a. Calls nexus_core_helpers.pause_workflow_sync(123)
-   b. Also updates StateManager for compatibility
-   c. Returns rich status (workflow name, current step)
-5. If false: Falls back to StateManager.set_workflow_state()
+3. Calls nexus_core_helpers.pause_workflow_sync(123)
+4. Returns rich status (workflow name, current step)
 ```
 
 **Result:**
@@ -131,16 +122,13 @@ if USE_NEXUS_CORE:
 
 ## Configuration
 
-### Enable/Disable Nexus-Core
+### Nexus-Core Workflow Engine
 
 **File:** `vars.secret` or environment
 
 ```bash
-# Enable nexus-core (default)
-USE_NEXUS_CORE=true
-
-# Disable nexus-core (use legacy StateManager only)
-USE_NEXUS_CORE=false
+# Nexus-core workflow integration is mandatory
+# (no runtime feature flag)
 ```
 
 ### Project Config (YAML) - Required
@@ -258,25 +246,22 @@ Examples:
 
 ## Compatibility
 
-### Dual System Support
+### Core-First Support
 
-Both systems work in parallel:
-- Legacy workflows continue using StateManager
-- New workflows use nexus-core (if enabled)
-- `/pause` and `/resume` work with both systems
-- No breaking changes to existing workflows
+Workflow orchestration is nexus-core based:
+- Workflow creation, pause/resume, and status use nexus-core
+- `/pause` and `/resume` use workflow-state plugin operations
+- StateManager remains for non-workflow app state (tracked issues, approvals, audit)
 
 ### Migration Path
 
-**Phase 1 (Current):** Parallel operation
-- `USE_NEXUS_CORE=true`
-- New issues → nexus-core workflows
-- Old issues → continue with StateManager
+**Phase 1 (Current):** Core-authoritative workflows
+- All workflow operations use nexus-core
+- Legacy workflow-state fallbacks removed
 
-**Phase 2 (Future):** Full migration
-- All issues use nexus-core
-- Deprecate StateManager workflow methods
-- Keep StateManager for other state (tracked issues, etc.)
+**Phase 2 (Future):** StateManager reduction
+- Remove deprecated workflow-state methods from StateManager
+- Keep or migrate non-workflow app state by domain
 
 **Phase 3 (Later):** Enhanced features
 - PostgreSQL storage backend
@@ -328,22 +313,16 @@ python examples/nexus_core_integration.py
 
 ## Rollback Plan
 
-If issues arise, rollback is simple:
-
-```bash
-# In vars.secret or environment
-USE_NEXUS_CORE=false
-```
-
-All code falls back to legacy StateManager. No data loss.
+If issues arise, rollback requires deploying a prior commit that still includes
+legacy workflow fallbacks.
 
 ## Summary
 
 **Files changed:** 5  
 **Files added:** 1 (nexus_core_helpers.py)  
 **Lines added:** ~415 total  
-**Breaking changes:** None  
-**Backward compatible:** Yes  
+**Breaking changes:** Removed runtime fallback toggle for workflow orchestration  
+**Backward compatible:** Partially (app-state compatibility remains)  
 **Status:** ✅ Ready for testing  
 
-The integration is **complete** and **production-ready**. All modified files pass syntax validation. The system works with both legacy StateManager and new nexus-core framework simultaneously.
+The integration is **complete** and **production-ready**. All modified files pass syntax validation. The system now runs with a nexus-core authoritative workflow path.
