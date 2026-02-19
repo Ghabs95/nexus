@@ -97,6 +97,11 @@ _PLUGIN_PROFILES: Dict[str, Dict[str, Any]] = {
         "name": "github-workflow-policy",
         "config": {},
     },
+    "github_webhook_policy": {
+        "kind": "INPUT_ADAPTER",
+        "name": "github-webhook-policy",
+        "config": {},
+    },
     "workflow_policy": {
         "kind": "INPUT_ADAPTER",
         "name": "workflow-policy",
@@ -113,6 +118,7 @@ _BUILTIN_REGISTER_MODULES = (
     "nexus.plugins.builtin.runtime_ops_plugin",
     "nexus.plugins.builtin.workflow_policy_plugin",
     "nexus.plugins.builtin.github_workflow_policy_plugin",
+    "nexus.plugins.builtin.github_webhook_policy_plugin",
     "nexus.plugins.builtin.workflow_state_engine_plugin",
 )
 
@@ -324,5 +330,16 @@ def get_workflow_policy_plugin(
     return get_profiled_plugin(
         "workflow_policy",
         overrides=overrides,
+        cache_key=cache_key,
+    )
+
+
+def get_github_webhook_policy_plugin(
+    *,
+    cache_key: Optional[str] = "github-webhook-policy:default",
+):
+    """Create a configured GitHub webhook policy plugin instance."""
+    return get_profiled_plugin(
+        "github_webhook_policy",
         cache_key=cache_key,
     )

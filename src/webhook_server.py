@@ -25,12 +25,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
     BASE_DIR, 
+    PROJECT_CONFIG,
     WEBHOOK_PORT,
     WEBHOOK_SECRET,
     LOGS_DIR
 )
 from agent_launcher import launch_next_agent
+from plugin_runtime import get_github_webhook_policy_plugin
 from notifications import (
+    send_notification,
     notify_workflow_completed,
     send_telegram_alert
 )
@@ -50,6 +53,42 @@ app = Flask(__name__)
 
 # Track processed events to avoid duplicates
 processed_events = set()
+
+
+def _get_webhook_policy():
+    """Get framework webhook policy plugin (best effort)."""
+    try:
+        return get_github_webhook_policy_plugin(cache_key="github-webhook-policy:webhook")
+    except Exception as exc:
+        logger.warning("Webhook policy plugin unavailable, using inline parsing: %s", exc)
+        return None
+
+
+def _repo_to_project_key(repo_name: str) -> str:
+    """Best-effort mapping from repository full_name to configured project key."""
+    for project_key, project_cfg in PROJECT_CONFIG.items():
+        if isinstance(project_cfg, dict) and project_cfg.get("github_repo") == repo_name:
+            return project_key
+    return "nexus"
+
+
+def _effective_merge_policy(repo_name: str) -> str:
+    """Resolve effective merge policy for a repo.
+
+    Returns one of: always, workflow-based, never.
+    """
+    project_key = _repo_to_project_key(repo_name)
+    project_cfg = PROJECT_CONFIG.get(project_key, {})
+    if isinstance(project_cfg, dict) and project_cfg.get("require_human_merge_approval"):
+        return str(project_cfg.get("require_human_merge_approval"))
+    return str(PROJECT_CONFIG.get("require_human_merge_approval", "always"))
+
+
+def _notify_lifecycle(message: str) -> bool:
+    """Send lifecycle notification via abstract notifier, fallback to Telegram alert."""
+    if send_notification(message):
+        return True
+    return send_telegram_alert(message)
 
 
 def verify_signature(payload_body, signature_header):
@@ -98,21 +137,46 @@ def handle_issue_opened(payload):
     
     The actual agent implementing each type is defined in the workflow YAML.
     """
-    action = payload.get("action")
-    issue = payload.get("issue", {})
-    repository = payload.get("repository", {})
-    
-    issue_number = str(issue.get("number", ""))
-    issue_title = issue.get("title", "")
-    issue_body = issue.get("body", "")
-    issue_author = issue.get("user", {}).get("login", "")
-    issue_url = issue.get("html_url", "")
-    issue_labels = [l.get("name") for l in issue.get("labels", [])]
-    repo_name = repository.get("full_name", "unknown")
+    policy = _get_webhook_policy()
+    if policy and hasattr(policy, "parse_issue_event"):
+        event = policy.parse_issue_event(payload)
+        action = event.get("action")
+        issue_number = event.get("number", "")
+        issue_title = event.get("title", "")
+        issue_body = event.get("body", "")
+        issue_author = event.get("author", "")
+        issue_url = event.get("url", "")
+        issue_labels = event.get("labels", [])
+        repo_name = event.get("repo", "unknown")
+        closed_by = event.get("closed_by", "unknown")
+    else:
+        action = payload.get("action")
+        issue = payload.get("issue", {})
+        repository = payload.get("repository", {})
+        issue_number = str(issue.get("number", ""))
+        issue_title = issue.get("title", "")
+        issue_body = issue.get("body", "")
+        issue_author = issue.get("user", {}).get("login", "")
+        issue_url = issue.get("html_url", "")
+        issue_labels = [l.get("name") for l in issue.get("labels", [])]
+        repo_name = repository.get("full_name", "unknown")
+        closed_by = payload.get("sender", {}).get("login", "unknown")
     
     logger.info(f"📋 New issue: #{issue_number} - {issue_title} by {issue_author}")
     
-    # Only process open actions
+    # Handle issue close notifications
+    if action == "closed":
+        _notify_lifecycle(
+            "🔒 **Issue Closed**\n\n"
+            f"Issue: #{issue_number}\n"
+            f"Title: {issue_title}\n"
+            f"Repository: {repo_name}\n"
+            f"Closed by: @{closed_by}\n\n"
+            f"🔗 {issue_url}"
+        )
+        return {"status": "issue_closed_notified", "issue": issue_number}
+
+    # Only process open actions for task creation
     if action != "opened":
         return {"status": "ignored", "reason": f"action is {action}, not opened"}
     
@@ -223,6 +287,16 @@ The actual agent assignment depends on the current project's workflow configurat
         # Write to file
         task_file.write_text(task_content)
         logger.info(f"✅ Created task file: {task_file} (agent_type: {agent_type})")
+
+        _notify_lifecycle(
+            "📥 **Issue Created**\n\n"
+            f"Issue: #{issue_number}\n"
+            f"Title: {issue_title}\n"
+            f"Repository: {repo_name}\n"
+            f"Author: @{issue_author}\n"
+            f"Routed to: `{agent_type}`\n\n"
+            f"🔗 {issue_url}"
+        )
         
         return {
             "status": "task_created",
@@ -339,14 +413,83 @@ def handle_issue_comment(payload):
 
 def handle_pull_request(payload):
     """Handle pull_request events (opened, synchronized, etc.)."""
-    action = payload.get("action")
-    pr = payload.get("pull_request", {})
-    
-    pr_number = pr.get("number")
-    pr_title = pr.get("title", "")
-    pr_author = pr.get("user", {}).get("login", "")
+    policy = _get_webhook_policy()
+    if policy and hasattr(policy, "parse_pull_request_event"):
+        event = policy.parse_pull_request_event(payload)
+        action = event.get("action")
+        pr_number = event.get("number")
+        pr_title = event.get("title", "")
+        pr_author = event.get("author", "")
+        pr_url = event.get("url", "")
+        repo_name = event.get("repo", "unknown")
+        merged = bool(event.get("merged"))
+        merged_by = event.get("merged_by", "unknown")
+    else:
+        action = payload.get("action")
+        pr = payload.get("pull_request", {})
+        repository = payload.get("repository", {})
+        pr_number = pr.get("number")
+        pr_title = pr.get("title", "")
+        pr_author = pr.get("user", {}).get("login", "")
+        pr_url = pr.get("html_url", "")
+        repo_name = repository.get("full_name", "unknown")
+        merged = bool(pr.get("merged"))
+        merged_by = pr.get("merged_by", {}).get("login", "unknown")
     
     logger.info(f"🔀 Pull request #{pr_number}: {action} by {pr_author}")
+
+    if action == "opened":
+        _notify_lifecycle(
+            "🔀 **PR Created**\n\n"
+            f"PR: #{pr_number}\n"
+            f"Title: {pr_title}\n"
+            f"Repository: {repo_name}\n"
+            f"Author: @{pr_author}\n\n"
+            f"🔗 {pr_url}"
+        )
+        return {
+            "status": "pr_opened_notified",
+            "pr": pr_number,
+            "action": action,
+        }
+
+    if action == "closed" and merged:
+        merge_policy = _effective_merge_policy(repo_name)
+
+        # Notify merge only when manual merge approval is not enforced.
+        should_notify = (
+            policy.should_notify_pr_merged(merge_policy)
+            if policy and hasattr(policy, "should_notify_pr_merged")
+            else (merge_policy != "always")
+        )
+        if should_notify:
+            _notify_lifecycle(
+                "✅ **PR Merged**\n\n"
+                f"PR: #{pr_number}\n"
+                f"Title: {pr_title}\n"
+                f"Repository: {repo_name}\n"
+                f"Merged by: @{merged_by}\n"
+                f"Policy: `{merge_policy}`\n\n"
+                f"🔗 {pr_url}"
+            )
+            return {
+                "status": "pr_merged_notified",
+                "pr": pr_number,
+                "action": action,
+                "merge_policy": merge_policy,
+            }
+
+        logger.info(
+            "Skipping PR merged notification for #%s due to manual merge policy '%s'",
+            pr_number,
+            merge_policy,
+        )
+        return {
+            "status": "pr_merged_skipped_manual_review",
+            "pr": pr_number,
+            "action": action,
+            "merge_policy": merge_policy,
+        }
     
     # For now, just log - can add PR notifications later
     return {
