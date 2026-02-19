@@ -335,14 +335,14 @@ PROJECTS = {
     "nexus": "Nexus Core"
 }
 TYPES = {
-    "feature": "✨ Feature (9-step workflow)",
-    "feature-simple": "✨ Simple Feature (4-step fast-track)",
-    "bug": "🩹 Bug Fix (6-step workflow)",
-    "hotfix": "🔥 Hotfix (4-step fast-track)",
-    "release": "📦 Release (9-step workflow)",
-    "chore": "🧹 Chore (4-step fast-track)",
-    "improvement": "🚀 Improvement (9-step workflow)",
-    "improvement-simple": "🚀 Simple Improvement (4-step fast-track)"
+    "feature": "✨ Feature (full)",
+    "feature-simple": "✨ Simple Feature (fast-track)",
+    "bug": "🩹 Bug Fix (shortened)",
+    "hotfix": "🔥 Hotfix (fast-track)",
+    "release": "📦 Release (full)",
+    "chore": "🧹 Chore (fast-track)",
+    "improvement": "🚀 Improvement (full)",
+    "improvement-simple": "🚀 Simple Improvement (fast-track)"
 }
 
 PROJECT_ALIASES = {
@@ -700,10 +700,10 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send a **Voice Note** or **Text Message** directly. "
         "The bot will transcribe, route, and save the task.\n\n"
         "📋 **Workflow Tiers:**\n"
-        "• 🔥 Hotfix/Chore → 4-step fast-track (quick fixes)\n"
-        "• 🩹 Bug → 6-step shortened (triage → fix → deploy)\n"
-        "• ✨ Feature → 9-step full (design → implement → deploy)\n"
-        "• ✨ Simple Feature → 4-step fast-track (skip design for easy features)\n\n"
+        "• 🔥 Hotfix/Chore → fast-track (triage → implement → verify → deploy)\n"
+        "• 🩹 Bug → shortened (triage → debug → fix → verify → deploy → close)\n"
+        "• ✨ Feature → full (triage → design → develop → review → compliance → deploy → close)\n"
+        "• ✨ Simple Feature → fast-track (skip design)\n\n"
         "📊 **Monitoring & Tracking:**\n"
         "/status - View pending tasks in inbox\n"
         "/active - View tasks currently being worked on\n"

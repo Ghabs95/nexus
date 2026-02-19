@@ -986,12 +986,12 @@ def get_sop_tier(task_type, title=None, body=None):
     Now integrates WorkflowRouter for intelligent routing based on issue content.
     
     Workflow mapping:
-    - hotfix, chore, feature-simple, improvement-simple → fast-track (4 steps): 
-        Triage, Implementation, Verify, Deploy
-    - bug → shortened (6 steps): 
-        Triage, RCA, Fix, Verify, Deploy, Doc
-    - feature, improvement, release → full (9 steps): 
-        Vision, Feasibility, Architecture, UX, Implementation, QA, Compliance, Deploy, Doc
+    - hotfix, chore, feature-simple, improvement-simple → fast-track:
+        Triage → Develop → Review → Deploy
+    - bug → shortened:
+        Triage → Debug → Develop → Review → Deploy → Close
+    - feature, improvement, release → full:
+        Triage → Design → Develop → Review → Compliance → Deploy → Close
     """
     # Try intelligent routing if title and body provided
     if title or body:
