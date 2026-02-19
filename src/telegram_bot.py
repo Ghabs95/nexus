@@ -357,6 +357,75 @@ def _get_project_logs_dir(project_key: str) -> Optional[str]:
     return logs_dir if os.path.isdir(logs_dir) else None
 
 
+def _list_project_issues(project_key: str, state: str = "open", limit: int = 10) -> List[dict]:
+    """Fetch recent issues from a project's GitHub repo.
+
+    Returns a list of dicts with 'number', 'title', and 'state' keys.
+    """
+    config = PROJECT_CONFIG.get(project_key, {})
+    if not isinstance(config, dict):
+        return []
+    repo = config.get("github_repo")
+    if not repo:
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "list", "--repo", repo,
+                "--state", state, "--limit", str(limit),
+                "--json", "number,title,state",
+            ],
+            check=True, text=True, capture_output=True,
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        logger.error(f"Failed to list issues for {project_key}: {e}")
+        return []
+
+
+async def _prompt_issue_selection(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    command: str,
+    project_key: str,
+    *,
+    edit_message: bool = False,
+) -> None:
+    """Show a list of open issues for the user to pick from."""
+    issues = _list_project_issues(project_key)
+    if not issues:
+        text = (
+            f"No open issues found for {_get_project_label(project_key)}.\n"
+            f"Send the issue number manually."
+        )
+        if edit_message and update.callback_query:
+            await update.callback_query.edit_message_text(text)
+        else:
+            await update.effective_message.reply_text(text)
+        context.user_data["pending_command"] = command
+        context.user_data["pending_project"] = project_key
+        return
+
+    keyboard = []
+    for issue in issues:
+        num = issue["number"]
+        title = issue["title"]
+        label = f"#{num} — {title}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        keyboard.append(
+            [InlineKeyboardButton(label, callback_data=f"pickissue:{command}:{project_key}:{num}")]
+        )
+    keyboard.append([InlineKeyboardButton("✏️ Enter manually", callback_data=f"pickissue_manual:{command}:{project_key}")])
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
+
+    text = f"Select an issue for /{command} ({_get_project_label(project_key)}):"
+    if edit_message and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def _prompt_project_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> None:
     keyboard = [
         [InlineKeyboardButton(_get_project_label(key), callback_data=f"pickcmd:{command}:{key}")]
@@ -383,10 +452,23 @@ async def _ensure_project_issue(update: Update, context: ContextTypes.DEFAULT_TY
     project_key, issue_num, rest = _parse_project_issue_args(context.args)
     if not project_key or not issue_num:
         if len(context.args) == 1:
-            maybe_issue = context.args[0].lstrip("#")
+            arg = context.args[0]
+            maybe_issue = arg.lstrip("#")
             if maybe_issue.isdigit():
+                # Just an issue number — still need project selection
                 context.user_data["pending_issue"] = maybe_issue
-        await _prompt_project_selection(update, context, command)
+                await _prompt_project_selection(update, context, command)
+            else:
+                # Might be a project key — show issue list for that project
+                normalized = _normalize_project_key(arg)
+                if normalized and normalized in _iter_project_keys():
+                    context.user_data["pending_command"] = command
+                    context.user_data["pending_project"] = normalized
+                    await _prompt_issue_selection(update, context, command, normalized)
+                else:
+                    await _prompt_project_selection(update, context, command)
+        else:
+            await _prompt_project_selection(update, context, command)
         return None, None, []
     if project_key not in _iter_project_keys():
         await update.effective_message.reply_text(
@@ -493,9 +575,34 @@ async def project_picker_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    await query.edit_message_text(
-        f"Selected {_get_project_label(project_key)}. Send the issue number."
-    )
+    # Show issue list instead of asking for raw text input
+    await _prompt_issue_selection(update, context, command, project_key, edit_message=True)
+
+
+async def issue_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle issue selection from the inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data:
+        return
+
+    if query.data.startswith("pickissue_manual:"):
+        # User wants to enter issue number manually
+        _, command, project_key = query.data.split(":", 2)
+        context.user_data["pending_command"] = command
+        context.user_data["pending_project"] = project_key
+        await query.edit_message_text(
+            f"Selected {_get_project_label(project_key)}. Send the issue number."
+        )
+        return
+
+    if not query.data.startswith("pickissue:"):
+        return
+
+    _, command, project_key, issue_num = query.data.split(":", 3)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await _dispatch_command(update, context, command, project_key, issue_num)
 
 
 async def close_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2819,6 +2926,7 @@ if __name__ == '__main__':
     # Menu navigation callbacks
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r'^menu:'))
     app.add_handler(CallbackQueryHandler(project_picker_handler, pattern=r'^pickcmd:'))
+    app.add_handler(CallbackQueryHandler(issue_picker_handler, pattern=r'^pickissue'))
     app.add_handler(CallbackQueryHandler(close_flow_handler, pattern=r'^flow:close$'))
     # Inline keyboard callback handler (must be before ConversationHandler callbacks)
     app.add_handler(CallbackQueryHandler(inline_keyboard_handler, pattern=r'^(logs|logsfull|status|pause|resume|stop|audit|reprocess|respond|approve|reject)_'))

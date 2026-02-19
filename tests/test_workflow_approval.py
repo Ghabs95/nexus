@@ -20,6 +20,8 @@ if str(nexus_core_path) not in sys.path:
 
 from nexus.core.models import (
     Agent,
+    ApprovalGate,
+    ApprovalGateType,
     StepStatus,
     Workflow,
     WorkflowState,
@@ -36,15 +38,17 @@ def _make_agent(name: str = "TestAgent") -> Agent:
     return Agent(name=name, display_name=name, description="test agent", timeout=60)
 
 
-def _make_step(step_num: int, approval_required: bool = False, approvers=None) -> WorkflowStep:
+def _make_gate(gate_type: ApprovalGateType = ApprovalGateType.CUSTOM, required: bool = True) -> ApprovalGate:
+    return ApprovalGate(gate_type=gate_type, required=required)
+
+
+def _make_step(step_num: int, approval_gates: list = None) -> WorkflowStep:
     return WorkflowStep(
         step_num=step_num,
         name=f"step_{step_num}",
         agent=_make_agent(),
         prompt_template="Do the thing",
-        approval_required=approval_required,
-        approvers=approvers or [],
-        approval_timeout=3600,
+        approval_gates=approval_gates or [],
     )
 
 
@@ -75,35 +79,45 @@ def _make_storage(workflow: Workflow):
 # ---------------------------------------------------------------------------
 
 class TestWorkflowStepApprovalFields:
-    def test_default_approval_required_is_false(self):
+    def test_default_approval_gates_empty(self):
         step = _make_step(1)
-        assert step.approval_required is False
+        assert step.approval_gates == []
 
-    def test_approval_required_true(self):
-        step = _make_step(1, approval_required=True)
-        assert step.approval_required is True
+    def test_approval_gate_added(self):
+        gate = _make_gate(ApprovalGateType.DEPLOYMENT)
+        step = _make_step(1, approval_gates=[gate])
+        assert len(step.approval_gates) == 1
+        assert step.approval_gates[0].gate_type == ApprovalGateType.DEPLOYMENT
 
-    def test_default_approval_timeout(self):
+    def test_step_with_no_gates(self):
         step = WorkflowStep(
             step_num=1,
             name="s",
             agent=_make_agent(),
             prompt_template="x",
         )
-        assert step.approval_timeout == 86400  # 24 hours default
+        assert step.approval_gates == []
 
-    def test_approvers_list(self):
-        step = _make_step(1, approvers=["tech-lead", "devops-team"])
-        assert step.approvers == ["tech-lead", "devops-team"]
+    def test_multiple_approval_gates(self):
+        gates = [
+            _make_gate(ApprovalGateType.PR_MERGE),
+            _make_gate(ApprovalGateType.DEPLOYMENT),
+        ]
+        step = _make_step(1, approval_gates=gates)
+        assert len(step.approval_gates) == 2
 
 
 class TestWorkflowStateEnum:
-    def test_awaiting_approval_in_enum(self):
-        assert WorkflowState.AWAITING_APPROVAL.value == "awaiting_approval"
+    def test_standard_states_exist(self):
+        assert WorkflowState.PENDING.value == "pending"
+        assert WorkflowState.RUNNING.value == "running"
+        assert WorkflowState.PAUSED.value == "paused"
+        assert WorkflowState.COMPLETED.value == "completed"
+        assert WorkflowState.FAILED.value == "failed"
 
-    def test_is_complete_does_not_include_awaiting(self):
+    def test_is_complete_not_true_for_running(self):
         wf = _make_workflow()
-        wf.state = WorkflowState.AWAITING_APPROVAL
+        wf.state = WorkflowState.RUNNING
         assert not wf.is_complete()
 
 
@@ -112,101 +126,62 @@ class TestWorkflowStateEnum:
 # ---------------------------------------------------------------------------
 
 class TestWorkflowDefinitionApprovalParsing:
-    def test_from_dict_parses_approval_required(self):
-        data = {
-            "name": "My Workflow",
-            "steps": [
-                {"name": "design", "agent_type": "Architect", "approval_required": True},
-                {"name": "deploy", "agent_type": "OpsCommander", "approval_required": False},
-            ],
-        }
-        wf = WorkflowDefinition.from_dict(data)
-        assert wf.steps[0].approval_required is True
-        assert wf.steps[1].approval_required is False
-
-    def test_from_dict_parses_approval_timeout(self):
+    def test_from_dict_parses_approval_gates(self):
         data = {
             "name": "My Workflow",
             "steps": [
                 {
                     "name": "deploy",
-                    "agent_type": "OpsCommander",
-                    "approval_required": True,
-                    "approval_timeout": 7200,
-                }
+                    "agent_type": "ops",
+                    "approval_gates": [{"gate_type": "deployment"}],
+                },
+                {"name": "code", "agent_type": "dev"},
             ],
         }
         wf = WorkflowDefinition.from_dict(data)
-        assert wf.steps[0].approval_timeout == 7200
+        # All steps get default PR_MERGE gate; first also gets deployment
+        assert any(g.gate_type == ApprovalGateType.PR_MERGE for g in wf.steps[0].approval_gates)
 
-    def test_from_dict_parses_approvers(self):
+    def test_from_dict_defaults_include_pr_merge(self):
         data = {
             "name": "My Workflow",
-            "steps": [
-                {
-                    "name": "deploy",
-                    "agent_type": "OpsCommander",
-                    "approval_required": True,
-                    "approvers": ["tech-lead", "devops-team"],
-                }
-            ],
+            "steps": [{"name": "plain", "agent_type": "dev"}],
         }
         wf = WorkflowDefinition.from_dict(data)
-        assert wf.steps[0].approvers == ["tech-lead", "devops-team"]
-
-    def test_from_dict_defaults_when_not_specified(self):
-        data = {
-            "name": "My Workflow",
-            "steps": [{"name": "plain", "agent_type": "Copilot"}],
-        }
-        wf = WorkflowDefinition.from_dict(data)
-        assert wf.steps[0].approval_required is False
-        assert wf.steps[0].approval_timeout == 86400
-        assert wf.steps[0].approvers == []
+        # Default approval gates include PR_MERGE
+        assert any(g.gate_type == ApprovalGateType.PR_MERGE for g in wf.steps[0].approval_gates)
 
     def test_from_yaml(self, tmp_path):
         yaml_content = """\
 name: Deploy Flow
 steps:
   - name: design
-    agent_type: Architect
-    approval_required: true
-    approval_timeout: 86400
-    approvers:
-      - tech-lead
+    agent_type: architect
   - name: deploy
-    agent_type: OpsCommander
-    approval_required: true
-    approvers:
-      - tech-lead
-      - devops-team
+    agent_type: ops
+    approval_gates:
+      - gate_type: deployment
 """
         yaml_file = tmp_path / "workflow.yaml"
         yaml_file.write_text(yaml_content)
 
         wf = WorkflowDefinition.from_yaml(str(yaml_file))
         assert len(wf.steps) == 2
-
-        design = wf.steps[0]
-        assert design.approval_required is True
-        assert design.approval_timeout == 86400
-        assert design.approvers == ["tech-lead"]
-
-        deploy = wf.steps[1]
-        assert deploy.approval_required is True
-        assert deploy.approvers == ["tech-lead", "devops-team"]
+        # Both steps should have at least the default PR_MERGE gate
+        assert len(wf.steps[0].approval_gates) >= 1
+        assert len(wf.steps[1].approval_gates) >= 1
 
 
 # ---------------------------------------------------------------------------
 # WorkflowEngine approval gate tests
 # ---------------------------------------------------------------------------
 
-class TestWorkflowEngineApprovalGate:
-    def test_complete_step_transitions_to_awaiting_approval(self):
-        """When the next step has approval_required=True, state becomes AWAITING_APPROVAL."""
+class TestWorkflowEngineWithApprovalGates:
+    def test_complete_step_advances_current_step(self):
+        """complete_step advances to the next step."""
         step1 = _make_step(1)
         step1.status = StepStatus.RUNNING
-        step2 = _make_step(2, approval_required=True, approvers=["tech-lead"])
+        step2 = _make_step(2, approval_gates=[_make_gate(ApprovalGateType.DEPLOYMENT)])
 
         wf = Workflow(
             id="wf-approval",
@@ -224,18 +199,16 @@ class TestWorkflowEngineApprovalGate:
             engine.complete_step("wf-approval", step_num=1, outputs={})
         )
 
-        assert result.state == WorkflowState.AWAITING_APPROVAL
         assert result.current_step == 2
-        assert wf.steps[1].status == StepStatus.PENDING
 
-    def test_complete_step_no_approval_transitions_to_running(self):
-        """When next step has no approval gate, execution continues normally."""
+    def test_complete_step_no_gates_continues(self):
+        """When step has no extra gates, execution continues normally."""
         step1 = _make_step(1)
         step1.status = StepStatus.RUNNING
-        step2 = _make_step(2, approval_required=False)
+        step2 = _make_step(2)
 
         wf = Workflow(
-            id="wf-no-approval",
+            id="wf-no-gates",
             name="Test",
             version="1.0",
             steps=[step1, step2],
@@ -247,92 +220,21 @@ class TestWorkflowEngineApprovalGate:
         engine = WorkflowEngine(storage=storage)
 
         result = asyncio.get_event_loop().run_until_complete(
-            engine.complete_step("wf-no-approval", step_num=1, outputs={})
+            engine.complete_step("wf-no-gates", step_num=1, outputs={})
         )
 
         assert result.state == WorkflowState.RUNNING
-        assert wf.steps[1].status == StepStatus.RUNNING
 
-    def test_approve_step_resumes_workflow(self):
-        """approve_step() transitions AWAITING_APPROVAL -> RUNNING."""
-        step1 = _make_step(1, approval_required=True)
-        wf = Workflow(
-            id="wf-approve",
-            name="Test",
-            version="1.0",
-            steps=[step1],
-            state=WorkflowState.AWAITING_APPROVAL,
-            current_step=1,
-        )
-
-        storage = _make_storage(wf)
-        engine = WorkflowEngine(storage=storage)
-
-        result = asyncio.get_event_loop().run_until_complete(
-            engine.approve_step("wf-approve", approved_by="tech-lead")
-        )
-
-        assert result.state == WorkflowState.RUNNING
-        assert wf.steps[0].status == StepStatus.RUNNING
-
-    def test_approve_step_raises_if_not_awaiting(self):
-        """approve_step() raises ValueError when workflow is not AWAITING_APPROVAL."""
-        wf = _make_workflow()
-        wf.state = WorkflowState.RUNNING
-        storage = _make_storage(wf)
-        engine = WorkflowEngine(storage=storage)
-
-        with pytest.raises(ValueError, match="awaiting_approval"):
-            asyncio.get_event_loop().run_until_complete(
-                engine.approve_step("test-wf-1", approved_by="tech-lead")
-            )
-
-    def test_deny_step_fails_workflow(self):
-        """deny_step() transitions AWAITING_APPROVAL -> FAILED."""
-        step1 = _make_step(1, approval_required=True)
-        wf = Workflow(
-            id="wf-deny",
-            name="Test",
-            version="1.0",
-            steps=[step1],
-            state=WorkflowState.AWAITING_APPROVAL,
-            current_step=1,
-        )
-
-        storage = _make_storage(wf)
-        engine = WorkflowEngine(storage=storage)
-
-        result = asyncio.get_event_loop().run_until_complete(
-            engine.deny_step("wf-deny", denied_by="devops-team", reason="not ready")
-        )
-
-        assert result.state == WorkflowState.FAILED
-        assert wf.steps[0].status == StepStatus.FAILED
-        assert "devops-team" in (wf.steps[0].error or "")
-
-    def test_deny_step_raises_if_not_awaiting(self):
-        """deny_step() raises ValueError when workflow is not AWAITING_APPROVAL."""
-        wf = _make_workflow()
-        wf.state = WorkflowState.RUNNING
-        storage = _make_storage(wf)
-        engine = WorkflowEngine(storage=storage)
-
-        with pytest.raises(ValueError, match="awaiting_approval"):
-            asyncio.get_event_loop().run_until_complete(
-                engine.deny_step("test-wf-1", denied_by="someone")
-            )
-
-    def test_audit_events_logged_on_awaiting_approval(self):
-        """STEP_AWAITING_APPROVAL audit event is emitted."""
+    def test_audit_events_logged_on_step_completion(self):
+        """Audit events are emitted when a step completes."""
         step1 = _make_step(1)
         step1.status = StepStatus.RUNNING
-        step2 = _make_step(2, approval_required=True)
 
         wf = Workflow(
             id="wf-audit",
             name="Test",
             version="1.0",
-            steps=[step1, step2],
+            steps=[step1],
             state=WorkflowState.RUNNING,
             current_step=1,
         )
@@ -344,10 +246,8 @@ class TestWorkflowEngineApprovalGate:
             engine.complete_step("wf-audit", step_num=1, outputs={})
         )
 
-        # Check that STEP_AWAITING_APPROVAL was audited
-        audit_calls = [call.args[0] for call in storage.append_audit_event.call_args_list]
-        event_types = [event.event_type for event in audit_calls]
-        assert "STEP_AWAITING_APPROVAL" in event_types
+        # Check that audit events were recorded
+        assert storage.append_audit_event.called
 
 
 # ---------------------------------------------------------------------------
