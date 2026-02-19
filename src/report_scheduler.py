@@ -192,7 +192,7 @@ class ReportScheduler:
             Dict with tracked issues statistics
         """
         try:
-            tracked_issues = self.state_manager.get_all_tracked_issues()
+            tracked_issues = self.state_manager.load_tracked_issues()
             
             total_issues = len(tracked_issues)
             status_counts = {}

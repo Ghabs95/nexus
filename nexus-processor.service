@@ -14,6 +14,7 @@ Restart=always
 RestartSec=10
 # Environment variables can be loaded from file or set here
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/vars.secret
+Environment="PYTHONUNBUFFERED=1"
 # Required configuration (in vars.secret):
 #   - PROJECT_CONFIG_PATH: Path to project config YAML (e.g., config/project_config.yaml)
 #   - TELEGRAM_TOKEN: Telegram bot token for alerts

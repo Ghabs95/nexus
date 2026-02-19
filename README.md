@@ -526,6 +526,35 @@ Core configuration is centralized in [src/config.py](src/config.py):
 
 Workflow orchestration is defined in YAML files (see `ghabs_org_workflow.yaml` in agents repo).
 
+### PR Merge Approval Policy
+
+The system enforces human review before @OpsCommander can merge pull requests. This prevents accidental auto-merges and ensures proper oversight.
+
+**Configuration**: [config/project_config.yaml](config/project_config.yaml)
+
+```yaml
+require_human_merge_approval: always  # Enforce human review for all projects
+```
+
+**Policy Options**:
+- `always` - **Recommended**: Human approval REQUIRED for all PRs (overrides workflow settings)
+- `workflow-based` - Workflow YAML controls per-workflow/per-step merge behavior  
+- `never` - Allow auto-merge (NOT recommended for production)
+
+**Workflow-Level Control**: [agents/workflows/ghabs_org_workflow.yaml](agents/workflows/ghabs_org_workflow.yaml)
+
+```yaml
+monitoring:
+  require_human_merge_approval: true  # Only applies when project policy is 'workflow-based'
+```
+
+**Agent Behavior**: @OpsCommander will:
+- NEVER merge PRs automatically when policy is `always`
+- Post comment: 🚀 Deployment ready. PR requires human review before merge
+- Wait for explicit human approval before merging
+
+See [OpsCommander skill documentation](agents/wlbl-agents/.agent/skills/ops_commander/SKILL.md) for details.
+
 ### Persistent State
 
 The system maintains state in `data/` directory:

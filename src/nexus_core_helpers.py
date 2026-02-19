@@ -14,14 +14,12 @@ from config import (
     _get_project_config,
     NEXUS_CORE_STORAGE_DIR,
     USE_NEXUS_CORE,
-    WORKFLOW_CHAIN,
-    FINAL_AGENTS,
+    BASE_DIR,
 )
 from state_manager import StateManager
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
 from nexus.core.workflow import WorkflowDefinition, WorkflowEngine
-from nexus.core.models import Workflow, WorkflowStep, Agent, WorkflowState
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +41,13 @@ def get_workflow_definition_path(project_name: str) -> Optional[str]:
     Priority:
     1. Project-specific override in PROJECT_CONFIG
     2. Global workflow_definition_path in PROJECT_CONFIG
-    3. None (use WORKFLOW_CHAIN fallback)
+    3. None (caller must abort)
     
     Args:
         project_name: Project name (e.g., 'nexus', 'casit-agents')
         
     Returns:
-        Path to workflow YAML file, or None if not configured
+        Absolute path to workflow YAML file, or None if not configured
     """
     config = _get_project_config()
     
@@ -57,11 +55,19 @@ def get_workflow_definition_path(project_name: str) -> Optional[str]:
     if project_name in config:
         project_config = config[project_name]
         if isinstance(project_config, dict) and "workflow_definition_path" in project_config:
-            return project_config["workflow_definition_path"]
+            path = project_config["workflow_definition_path"]
+            # Resolve relative paths to absolute
+            if path and not os.path.isabs(path):
+                path = os.path.join(BASE_DIR, path)
+            return path
     
     # Check global workflow_definition_path
     if "workflow_definition_path" in config:
-        return config["workflow_definition_path"]
+        path = config["workflow_definition_path"]
+        # Resolve relative paths to absolute  
+        if path and not os.path.isabs(path):
+            path = os.path.join(BASE_DIR, path)
+        return path
     
     # No workflow definition found
     return None
@@ -102,8 +108,28 @@ async def create_workflow_for_issue(
         workflow_name = f"{project_name}/{issue_title}"
         workflow_description = description or f"Workflow for issue #{issue_number}"
         
-        # Get workflow definition path (with fallback logic)
+        # Get workflow definition path (required)
         workflow_definition_path = get_workflow_definition_path(project_name)
+
+        if not workflow_definition_path:
+            msg = (
+                f"No workflow_definition_path configured for project '{project_name}'. "
+                "Cannot create workflow without a YAML definition."
+            )
+            logger.error(msg)
+            from notifications import send_telegram_alert
+            send_telegram_alert(f"\u274c {msg}")
+            return None
+
+        if not os.path.exists(workflow_definition_path):
+            msg = (
+                f"Workflow definition not found at: {workflow_definition_path} "
+                f"(project: {project_name})"
+            )
+            logger.error(msg)
+            from notifications import send_telegram_alert
+            send_telegram_alert(f"\u274c {msg}")
+            return None
 
         metadata = {
             "issue_number": issue_number,
@@ -115,51 +141,14 @@ async def create_workflow_for_issue(
             "workflow_definition_path": workflow_definition_path,
         }
 
-        if workflow_definition_path and os.path.exists(workflow_definition_path):
-            workflow = WorkflowDefinition.from_yaml(
-                workflow_definition_path,
-                workflow_id=workflow_id,
-                name_override=workflow_name,
-                description_override=workflow_description,
-                metadata=metadata,
-            )
-        else:
-            if workflow_definition_path:
-                logger.warning(
-                    f"Workflow path not found: {workflow_definition_path}. "
-                    "Falling back to WORKFLOW_CHAIN."
-                )
-
-            chain = WORKFLOW_CHAIN.get(workflow_type, WORKFLOW_CHAIN["shortened"])
-
-            # Create workflow steps from chain
-            steps = []
-            for step_num, (agent_name, step_name) in enumerate(chain, start=1):
-                agent = Agent(
-                    name=f"{agent_name}Agent",
-                    display_name=agent_name,
-                    description=f"Step {step_num}: {step_name}",
-                    timeout=3600,
-                    max_retries=2,
-                )
-
-                step = WorkflowStep(
-                    step_num=step_num,
-                    name=step_name.lower().replace(" ", "_"),
-                    agent=agent,
-                    prompt_template=f"{step_name}: {{description}}",
-                )
-                steps.append(step)
-
-            # Create workflow object
-            workflow = Workflow(
-                id=workflow_id,
-                name=workflow_name,
-                version="1.0",
-                description=workflow_description,
-                steps=steps,
-                metadata=metadata,
-            )
+        workflow = WorkflowDefinition.from_yaml(
+            workflow_definition_path,
+            workflow_id=workflow_id,
+            name_override=workflow_name,
+            description_override=workflow_description,
+            metadata=metadata,
+            workflow_type=workflow_type,
+        )
         
         # Persist workflow
         await engine.create_workflow(workflow)
@@ -315,14 +304,11 @@ async def get_workflow_status(issue_number: str) -> Optional[Dict]:
 
 
 def _tier_to_workflow_type(tier_name: str) -> str:
-    """Map tier name to workflow type."""
-    tier_mapping = {
-        "tier-1-simple": "fast-track",
-        "tier-2-standard": "shortened",
-        "tier-3-complex": "full",
-        "tier-4-critical": "full"
-    }
-    return tier_mapping.get(tier_name, "shortened")
+    """Map tier name to workflow type.
+
+    Delegates to nexus-core's WorkflowDefinition.normalize_workflow_type().
+    """
+    return WorkflowDefinition.normalize_workflow_type(tier_name)
 
 
 async def handle_approval_gate(

@@ -1,20 +1,89 @@
 # Global workflow definition path (YAML workflow file - single source of truth)
-workflow_definition_path: /home/ubuntu/git/ghabs/agents/workflows/ghabs_org_workflow.yaml
+workflow_definition_path: ghabs/agents/workflows/ghabs_org_workflow.yaml
 
-# Global AI tool preferences (which AI tool each agent uses)
+# Shared agent YAML definitions (org-level agents used across all projects)
+# Searched as fallback when agent_type is not found in project-specific agents_dir
+shared_agents_dir: ghabs/agents/workflows/agents
+
+# VCS-agnostic inbox/tasks directory (can be .nexus, .gitlab, .gitea, etc.)
+# Relative to project workspace root
+nexus_dir: .nexus
+
+# PR Merge Policy (project-level enforcement)
+# Controls whether @OpsCommander can auto-merge PRs or must wait for human approval
+# Options:
+#   - always: Human approval REQUIRED for all PRs (overrides workflow settings)
+#   - workflow-based: Workflow YAML controls per-workflow/per-step merge behavior
+#   - never: Auto-merge allowed (NOT recommended for production)
+require_human_merge_approval: always  # Enforce human review for all projects
+
+# GitHub Issue Triage Configuration
+# Maps incoming GitHub issues to agent types (not specific agents)
+# 
+# Agent types are abstract roles that workflows implement:
+#   - triage: Initial issue analysis and classification
+#   - escalation: High-priority/urgent issues (escalate to senior agent)
+#   - debug: Bug analysis and root cause
+#
+# Each project's workflow defines which actual agent implements each type.
+# Example:
+#   - nexus uses development_workflow.yaml: triage → @triage, escalation → @triage (with priority flag)
+#   - ghabs org uses ghabs_org_workflow.yaml: triage → @ProjectLead, escalation → @Atlas
+github_issue_triage:
+  # Default agent type when no specific mapping applies
+  # Routes to whatever agent is configured for this type in the current workflow
+  default_agent_type: "triage"
+  
+  # Per-repository agent type override (if different from default)
+  per_repo:
+    "Ghabs95/nexus-core": "triage"      # Nexus core issues use triage workflow
+    "Ghabs95/agents": "triage"  # Agent workflow issues use triage
+  
+  # Label-based routing to agent types
+  label_based:
+    "docs": "triage"              # Documentation issues → triage agent
+    "good first issue": "triage"  # Beginner issues → triage agent
+    "bug": "debug"                # Bugs → debug agent (root cause analysis)
+    "urgent": "escalation"        # Urgent → escalation agent (senior review)
+    "critical": "escalation"      # Critical → escalation agent
+
+# Global AI tool preferences (which AI tool each AGENT TYPE uses)
+# Maps AGENT TYPES (not individual agents) to AI providers
+#
+# Architecture:
+# 1. Agent YAML files define: spec.agent_type (e.g., "triage", "debug", "escalation")
+# 2. Tasks are routed to agent types (not specific agent names)
+# 3. The first available agent with that type handles the task
+# 4. This config maps type → AI tool, so all agents of that type use the same tool
+#
+# Example agent YAML:
+#   spec:
+#     agent_type: "triage"       # This agent handles type: triage
+#     provider_preference: null  # Will use value from ai_tool_preferences
 ai_tool_preferences:
-  ProjectLead: copilot
-  Atlas: copilot
-  Architect: copilot
-  Tier2Lead: copilot
-  ProductDesigner: gemini
-  QAGuard: gemini
-  Scribe: gemini
-  OpsCommander: gemini
-  Privacy: gemini
-  FrontendLead: copilot
-  BackendLead: copilot
-  MobileLead: copilot
+  # Abstract agent types (used by nexus-core example workflows)
+  triage: copilot          # Initial issue analysis
+  debug: copilot           # Bug root cause analysis
+  escalation: copilot      # Urgent issues (escalate to senior agent)
+  design: copilot          # Architecture and design proposals
+  reviewer: copilot        # PR reviews
+  developer: copilot       # Code implementation
+  docs: gemini             # Documentation updates (faster)
+  summarizer: gemini       # Workflow summaries (faster)
+
+  # Ghabs org agent types (used by ghabs_org_workflow.yaml)
+  ceo: copilot               # Ghabs — vision & scope
+  cto: copilot               # Atlas — technical feasibility
+  business-advisor: copilot  # Business — strategic advisor
+  architect: copilot         # Architect — architecture design
+  product-designer: copilot  # ProductDesigner — UX design
+  project-lead: copilot      # ProjectLead — triage & orchestration
+  execution-lead: copilot    # ExecutionLead — implementation & bug fixing
+  qa: copilot                # QAGuard — quality gate & verification
+  privacy-advisor: copilot   # Privacy — compliance review
+  ops: copilot               # OpsCommander — deployment & ops
+  scribe: gemini             # Scribe — documentation (faster)
+  developer: copilot         # Developer — fast-track implementation
 
 # Project configurations
 case_italia:
@@ -34,12 +103,16 @@ biome:
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
-  workspace: ghabs/nexus-core
+  workspace: ghabs
   github_repo: Ghabs95/nexus-core
-  # Uncomment to use a different workflow definition for this project
-  workflow_definition_path: /home/ubuntu/git/ghabs/nexus-core/examples/workflows/development_workflow.yaml
-  ai_tool_preferences: # Override global AI tool preferences
-    Copilot: copilot
-    Architect: copilot
-    QAGuard: copilot
-    OpsCommander: gemini
+  # Uses nexus-core example workflow (different from org workflow)
+  workflow_definition_path: ghabs/nexus-core/examples/workflows/development_workflow.yaml
+  # AI tool preferences for nexus-core example agents
+  ai_tool_preferences:
+    triage: copilot          # Triage agent - issue classification
+    design: copilot          # Design agent - technical proposals
+    debug: copilot           # Debug agent - root cause analysis
+    reviewer: copilot        # Reviewer agent - PR reviews
+    developer: copilot       # Developer agent - code implementation
+    docs: gemini             # Docs agent - documentation updates
+    summarizer: gemini       # Summarizer agent - workflow summaries
