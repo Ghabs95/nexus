@@ -754,8 +754,6 @@ def _check_dead_agents() -> None:
         if alert_key in _dead_agent_alerted:
             continue  # Already alerted for this specific launch
 
-        _dead_agent_alerted.add(alert_key)
-
         logger.warning(
             f"💀 Dead agent detected: issue #{issue_num} "
             f"({agent_type}, PID {pid}, tier {tier}, age {age_seconds/60:.0f}min)"
@@ -774,18 +772,26 @@ def _check_dead_agents() -> None:
 
         will_retry = AgentMonitor.should_retry(issue_num, agent_type)
         if will_retry:
-            send_telegram_alert(
+            alert_sent = send_telegram_alert(
                 f"💀 **Agent Crashed → Retrying**\n\n"
                 f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
                 f"Agent: {agent_type} (PID {pid})\n"
                 f"Tier: {tier}\n"
                 f"Status: Process exited without completion, retry scheduled"
             )
+            if not alert_sent:
+                logger.warning(
+                    f"Failed to send dead-agent alert for issue #{issue_num}; "
+                    "will retry notification on next poll"
+                )
+                continue
+
+            _dead_agent_alerted.add(alert_key)
             # Remove from tracker so the retry can write a fresh entry
             del launched_agents[issue_num]
             dirty = True
         else:
-            send_telegram_alert(
+            alert_sent = send_telegram_alert(
                 f"💀 **Agent Crashed → Manual Intervention**\n\n"
                 f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
                 f"Agent: {agent_type} (PID {pid})\n"
@@ -793,6 +799,14 @@ def _check_dead_agents() -> None:
                 f"Status: Process exited without completion, max retries reached\n\n"
                 f"Use /reprocess nexus {issue_num} to retry"
             )
+            if not alert_sent:
+                logger.warning(
+                    f"Failed to send dead-agent alert for issue #{issue_num}; "
+                    "will retry notification on next poll"
+                )
+                continue
+
+            _dead_agent_alerted.add(alert_key)
             AgentMonitor.mark_failed(issue_num, agent_type, "Agent process exited without completion")
             del launched_agents[issue_num]
             dirty = True

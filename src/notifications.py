@@ -426,10 +426,19 @@ def send_telegram_alert(message: str) -> bool:
         True if sent successfully
     """
     plugin = _get_notification_plugin()
+    normalized_message = _normalize_telegram_markdown(message, "Markdown")
     if plugin:
         try:
             if hasattr(plugin, "send_alert_sync"):
-                return bool(plugin.send_alert_sync(message, severity="info"))
+                sent = bool(plugin.send_alert_sync(normalized_message, severity="info"))
+                if not sent:
+                    logger.warning("Telegram send_alert_sync returned False")
+                return sent
+            if hasattr(plugin, "send_message_sync"):
+                sent = bool(plugin.send_message_sync(normalized_message, parse_mode="Markdown"))
+                if not sent:
+                    logger.warning("Telegram send_message_sync returned False in alert fallback")
+                return sent
         except Exception as exc:
             logger.warning(f"Telegram plugin alert failed: {exc}")
 

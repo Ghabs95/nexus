@@ -185,6 +185,39 @@ class TestCheckDeadAgents:
         assert "Manual Intervention" in alert_text
         assert "/reprocess" in alert_text
 
+    @patch("inbox_processor.save_launched_agents")
+    @patch("inbox_processor.send_telegram_alert", return_value=False)
+    @patch("inbox_processor._is_pid_alive", return_value=False)
+    @patch("inbox_processor.load_launched_agents")
+    @patch("inbox_processor.get_github_repo", return_value="test/repo")
+    @patch("inbox_processor._resolve_project_for_issue", return_value="nexus")
+    def test_alert_send_failure_retries_next_poll(
+        self, mock_resolve, mock_repo, mock_load, mock_alive, mock_alert, mock_save
+    ):
+        """If Telegram send fails, keep tracker entry and retry alert next poll."""
+        from inbox_processor import _check_dead_agents, _dead_agent_alerted
+
+        _dead_agent_alerted.clear()
+
+        mock_load.return_value = {
+            "41": {
+                "timestamp": time.time() - 300,
+                "pid": 55555,
+                "tier": "shortened",
+                "agent_type": "reviewer",
+            }
+        }
+
+        with patch("inbox_processor.AgentMonitor") as MockMonitor:
+            MockMonitor.should_retry.return_value = True
+
+            _check_dead_agents()
+            _check_dead_agents()
+
+        assert mock_alert.call_count == 2
+        mock_save.assert_not_called()
+        assert "41:55555" not in _dead_agent_alerted
+
 
 class TestDeadAgentSkipsStoppedWorkflows:
     """Dead agent detection should NOT alert for stopped/paused workflows."""
