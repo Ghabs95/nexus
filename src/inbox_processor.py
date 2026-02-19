@@ -20,7 +20,8 @@ from config import (
     BASE_DIR, get_github_repo,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
     PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
-    NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
+    NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir,
+    get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
 from models import WorkflowState
@@ -400,6 +401,82 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
         logger.info(f"🔀 Created PR for issue #{issue_num}: {result['pr_url']}")
     if result.get("issue_closed"):
         logger.info(f"🔒 Closed issue #{issue_num}")
+        archived = _archive_closed_task_files(issue_num, project_name)
+        if archived:
+            logger.info(f"📦 Archived {archived} task file(s) for closed issue #{issue_num}")
+
+
+def _archive_closed_task_files(issue_num: str, project_name: str = "") -> int:
+    """Archive active task files for a closed issue into tasks/closed.
+
+    Matches files by either:
+    1) filename pattern ``issue_<issue_num>.md``
+    2) issue URL metadata inside the file body
+    """
+    projects_to_scan = []
+    if project_name and project_name in PROJECT_CONFIG:
+        projects_to_scan.append(project_name)
+
+    projects_to_scan.extend(
+        key for key in PROJECT_CONFIG.keys()
+        if key not in {"workflow_definition_path", "shared_agents_dir", "nexus_dir", "require_human_merge_approval", "github_issue_triage", "ai_tool_preferences"}
+        and key not in projects_to_scan
+    )
+
+    archived_count = 0
+    issue_pattern = re.compile(r"\*\*Issue:\*\*\s*https?://github\.com/[^/]+/[^/]+/issues/(\d+)")
+
+    for project_key in projects_to_scan:
+        project_cfg = PROJECT_CONFIG.get(project_key, {})
+        if not isinstance(project_cfg, dict):
+            continue
+
+        workspace_rel = project_cfg.get("workspace")
+        if not workspace_rel:
+            continue
+
+        project_root = os.path.join(BASE_DIR, workspace_rel)
+        active_dir = get_tasks_active_dir(project_root)
+        if not os.path.isdir(active_dir):
+            continue
+
+        closed_dir = get_tasks_closed_dir(project_root)
+
+        for filename in os.listdir(active_dir):
+            if not filename.endswith(".md"):
+                continue
+
+            source_path = os.path.join(active_dir, filename)
+            matched = False
+
+            if filename == f"issue_{issue_num}.md":
+                matched = True
+            else:
+                try:
+                    with open(source_path, "r") as f:
+                        content = f.read()
+                    match = issue_pattern.search(content)
+                    matched = bool(match and match.group(1) == str(issue_num))
+                except Exception as exc:
+                    logger.warning(f"Could not inspect active task file {source_path}: {exc}")
+                    continue
+
+            if not matched:
+                continue
+
+            target_path = os.path.join(closed_dir, filename)
+            if os.path.exists(target_path):
+                stem, ext = os.path.splitext(filename)
+                target_path = os.path.join(closed_dir, f"{stem}_{int(time.time())}{ext}")
+
+            try:
+                os.makedirs(closed_dir, exist_ok=True)
+                os.replace(source_path, target_path)
+                archived_count += 1
+            except Exception as exc:
+                logger.warning(f"Failed to archive task file {source_path}: {exc}")
+
+    return archived_count
 
 
 def _post_completion_comments_from_logs() -> None:
