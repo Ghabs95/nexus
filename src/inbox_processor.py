@@ -23,6 +23,7 @@ from config import (
     NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
+from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
 from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
 from ai_orchestrator import get_orchestrator
@@ -735,6 +736,15 @@ def _check_dead_agents() -> None:
         # Check if process is still alive
         if _is_pid_alive(pid):
             continue  # Still running — Strategy 1 handles timeout kills
+
+        # Skip if workflow was stopped/paused (e.g. via /stop command)
+        wf_state = StateManager.get_workflow_state(str(issue_num))
+        if wf_state in (WorkflowState.STOPPED, WorkflowState.PAUSED):
+            logger.debug(
+                f"Skipping dead agent check for issue #{issue_num}: "
+                f"workflow state is {wf_state.value}"
+            )
+            continue
 
         # Process is dead. Check if completion scanner already handled it
         # (it would have removed from launched_agents or the dedup would fire).

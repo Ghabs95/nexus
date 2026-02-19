@@ -189,6 +189,13 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Could not pause workflow for issue #{issue_num} before closing")
     StateManager.audit_log(int(issue_num), "WORKFLOW_STOPPED")
 
+    # Remove from launched_agents tracker to prevent false dead-agent alerts
+    launched = StateManager.load_launched_agents()
+    if str(issue_num) in launched:
+        del launched[str(issue_num)]
+        StateManager.save_launched_agents(launched)
+        logger.info(f"Removed issue #{issue_num} from launched_agents tracker")
+
     # Close the GitHub issue
     try:
         repo = _get_project_repo(project_key)

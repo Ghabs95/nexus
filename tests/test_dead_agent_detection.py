@@ -184,3 +184,61 @@ class TestCheckDeadAgents:
         alert_text = mock_alert.call_args[0][0]
         assert "Manual Intervention" in alert_text
         assert "/reprocess" in alert_text
+
+
+class TestDeadAgentSkipsStoppedWorkflows:
+    """Dead agent detection should NOT alert for stopped/paused workflows."""
+
+    @patch("inbox_processor.save_launched_agents")
+    @patch("inbox_processor.send_telegram_alert")
+    @patch("inbox_processor._is_pid_alive", return_value=False)
+    @patch("inbox_processor.load_launched_agents")
+    def test_stopped_workflow_skipped(self, mock_load, mock_alive, mock_alert, mock_save):
+        """Dead agent on a STOPPED workflow should not trigger alert."""
+        from inbox_processor import _check_dead_agents, _dead_agent_alerted
+        from models import WorkflowState
+
+        _dead_agent_alerted.clear()
+
+        mock_load.return_value = {
+            "41": {
+                "timestamp": time.time() - 300,
+                "pid": 77777,
+                "tier": "fast-track",
+                "agent_type": "triage",
+            }
+        }
+
+        with patch("inbox_processor.StateManager") as MockSM:
+            MockSM.get_workflow_state.return_value = WorkflowState.STOPPED
+            _check_dead_agents()
+
+        mock_alert.assert_not_called()
+        mock_save.assert_not_called()
+
+    @patch("inbox_processor.save_launched_agents")
+    @patch("inbox_processor.send_telegram_alert")
+    @patch("inbox_processor._is_pid_alive", return_value=False)
+    @patch("inbox_processor.load_launched_agents")
+    def test_paused_workflow_skipped(self, mock_load, mock_alive, mock_alert, mock_save):
+        """Dead agent on a PAUSED workflow should not trigger alert."""
+        from inbox_processor import _check_dead_agents, _dead_agent_alerted
+        from models import WorkflowState
+
+        _dead_agent_alerted.clear()
+
+        mock_load.return_value = {
+            "42": {
+                "timestamp": time.time() - 300,
+                "pid": 66666,
+                "tier": "shortened",
+                "agent_type": "developer",
+            }
+        }
+
+        with patch("inbox_processor.StateManager") as MockSM:
+            MockSM.get_workflow_state.return_value = WorkflowState.PAUSED
+            _check_dead_agents()
+
+        mock_alert.assert_not_called()
+        mock_save.assert_not_called()
