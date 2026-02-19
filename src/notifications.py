@@ -3,11 +3,22 @@
 Provides rich Telegram notifications with interactive buttons for quick actions.
 """
 import logging
+import re
 from typing import Dict, List, Optional
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, get_github_repo
 from plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_telegram_markdown(message: str, parse_mode: str) -> str:
+    """Normalize markdown for Telegram legacy Markdown mode.
+
+    Telegram's legacy Markdown expects *bold* rather than **bold**.
+    """
+    if parse_mode != "Markdown" or not message:
+        return message
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", message)
 
 
 def _get_notification_plugin():
@@ -87,6 +98,7 @@ def send_notification(
         True if sent successfully
     """
     plugin = _get_notification_plugin()
+    message = _normalize_telegram_markdown(message, parse_mode)
     reply_markup = keyboard.build() if keyboard else None
 
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
