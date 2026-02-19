@@ -64,6 +64,9 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# Nexus runtime state (created by agents)
+.nexus/
+
 # Misc
 .cache/
 *.pid
