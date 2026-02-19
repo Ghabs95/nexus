@@ -15,14 +15,13 @@ from config import (
     NEXUS_CORE_STORAGE_DIR,
     USE_NEXUS_CORE,
     WORKFLOW_CHAIN,
-    FINAL_AGENTS,
     BASE_DIR,
 )
 from state_manager import StateManager
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
 from nexus.core.workflow import WorkflowDefinition, WorkflowEngine
-from nexus.core.models import Workflow, WorkflowStep, Agent, WorkflowState
+from nexus.core.models import Workflow, WorkflowStep, Agent
 
 logger = logging.getLogger(__name__)
 

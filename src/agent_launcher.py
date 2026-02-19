@@ -15,28 +15,93 @@ import subprocess
 import time
 import yaml
 
+# Nexus Core framework imports
+from nexus.core.completion import generate_completion_instructions
+from nexus.core.guards import LaunchGuard
+from nexus.core.workflow import WorkflowDefinition
+
 from config import (
     BASE_DIR,
     get_github_repo,
     PROJECT_CONFIG,
-    WORKFLOW_CHAIN,
     ORCHESTRATOR_CONFIG,
     get_nexus_dir_name
 )
 from state_manager import StateManager
 from error_handling import run_command_with_retry
-from notifications import notify_agent_completed, notify_workflow_started, send_telegram_alert
+from notifications import notify_agent_completed, send_telegram_alert
 from ai_orchestrator import get_orchestrator, ToolUnavailableError
 
 logger = logging.getLogger(__name__)
 
 
+def _pgrep_and_logfile_guard(issue_id: str, agent_type: str) -> bool:
+    """Custom guard: returns True (allow) if no running process AND no recent log.
+
+    Check 1: pgrep for running Copilot process on this issue
+    Check 2: recent log files (within last 2 minutes)
+    """
+    # Check 1: Running processes
+    try:
+        check_result = subprocess.run(
+            ["pgrep", "-af",
+             f"copilot.*issues/{issue_id}[^0-9]|copilot.*issues/{issue_id}$"],
+            text=True, capture_output=True, timeout=5,
+        )
+        if check_result.stdout:
+            logger.info(f"⏭️ Agent already running for issue #{issue_id} (PID found)")
+            return False
+    except Exception:
+        pass
+
+    # Check 2: Recent log files (within last 2 minutes)
+    nexus_dir_name = get_nexus_dir_name()
+    recent_logs = glob.glob(
+        os.path.join(
+            BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**",
+            f"copilot_{issue_id}_*.log",
+        ),
+        recursive=True,
+    )
+    if recent_logs:
+        recent_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        latest_log_age = time.time() - os.path.getmtime(recent_logs[0])
+        if latest_log_age < 120:
+            logger.info(
+                f"⏭️ Recent log file for issue #{issue_id} ({latest_log_age:.0f}s old)"
+            )
+            return False
+
+    return True  # allow launch
+
+
+# Module-level singleton — LaunchGuard with 120s cooldown + pgrep/logfile custom guard.
+_launch_guard = LaunchGuard(
+    cooldown_seconds=120,
+    custom_guard=_pgrep_and_logfile_guard,
+)
+
+
+def is_recent_launch(issue_number: str) -> bool:
+    """Check if an agent was recently launched for this issue.
+
+    Delegates to nexus-core's LaunchGuard (cooldown + pgrep + logfile checks).
+    Returns True if launched within cooldown window.
+    """
+    # Use wildcard agent_type since callers don't differentiate
+    return not _launch_guard.can_launch(str(issue_number), agent_type="*")
+
+
+def record_agent_launch(issue_number: str, pid: int = None) -> None:
+    """Record a successful agent launch in the LaunchGuard."""
+    _launch_guard.record_launch(str(issue_number), agent_type="*", pid=pid)
+
+
 def _get_workflow_steps_for_prompt(project_name: str = None) -> str:
     """Read the configured workflow YAML and return a formatted checklist
     of steps with agent_type names for embedding in agent prompts.
-    
-    This ensures agents use the correct agent type names from the workflow
-    definition, not old hardcoded names from other workflow files.
+
+    Delegates to nexus-core's WorkflowDefinition.to_prompt_context().
     """
     # Resolve workflow path from project config
     workflow_path = ""
@@ -54,95 +119,26 @@ def _get_workflow_steps_for_prompt(project_name: str = None) -> str:
     if not workflow_path or not os.path.exists(workflow_path):
         return ""
 
-    try:
-        with open(workflow_path, "r") as f:
-            wf = yaml.safe_load(f)
-
-        steps = wf.get("steps", [])
-        if not steps:
-            return ""
-
-        lines = [f"**Workflow Steps (from {os.path.basename(workflow_path)}):**\n"]
-        for i, step in enumerate(steps, 1):
-            agent_type = step.get("agent_type", "unknown")
-            name = step.get("name", step.get("id", f"Step {i}"))
-            desc = step.get("description", "")
-            # Skip router steps
-            if agent_type == "router":
-                continue
-            lines.append(f"- {i}. **{name}** — `{agent_type}` : {desc}")
-
-        lines.append(
-            "\n**CRITICAL:** Use ONLY the agent_type names listed above "
-            "(e.g., `triage`, `design`, `debug`, `code_reviewer`, `docs`, `summarizer`).\n"
-            "DO NOT use old agent names like ProjectLead, Atlas, QAGuard, OpsCommander, Architect, Scribe.\n"
-            "DO NOT read or reference any other workflow YAML files in the workspace."
-        )
-        return "\n".join(lines)
-    except Exception as e:
-        logger.warning(f"Could not read workflow YAML for prompt: {e}")
-        return ""
+    return WorkflowDefinition.to_prompt_context(workflow_path)
 
 
 def _get_comment_and_summary_instructions(issue_url: str, agent_type: str, project_name: str = None) -> str:
     """Return prompt instructions telling the agent to post a structured GitHub comment
     and write a completion_summary JSON file when done.
-    
-    This is the key mechanism that ensures agents produce git-native output:
-    structured GitHub comments (like the old auto-chain system) and machine-readable
-    completion data for workflow progression.
+
+    Delegates to nexus-core's generate_completion_instructions().
     """
     issue_match = re.search(r"/issues/(\d+)", issue_url or "")
     issue_num = issue_match.group(1) if issue_match else "UNKNOWN"
 
     workflow_steps = _get_workflow_steps_for_prompt(project_name)
+    nexus_dir = get_nexus_dir_name()
 
-    return (
-        f"**WHEN YOU FINISH — TWO MANDATORY DELIVERABLES:**\n\n"
-        f"{workflow_steps}\n\n"
-        f"## Deliverable 1: Post a structured GitHub comment\n\n"
-        f"Use `gh issue comment {issue_num} --repo <REPO> --body '<comment>'` to post a **structured** comment.\n"
-        f"The comment MUST follow this format (adapt sections to your work):\n\n"
-        f"```\n"
-        f"## 🔍 <Step Name> Complete — <agent_type>\n\n"
-        f"**Severity:** <Critical|High|Medium|Low>\n"
-        f"**Target Sub-Repo:** `<repo-name>`\n"
-        f"**Workflow:** <workflow type>\n\n"
-        f"### Findings\n\n"
-        f"<Describe what you analyzed/discovered. Use bullet points for key findings:>\n"
-        f"- Finding 1\n"
-        f"- Finding 2\n"
-        f"- Finding 3\n\n"
-        f"### SOP Checklist\n\n"
-        f"Use the workflow steps above to build the checklist. Example:\n"
-        f"- [x] 1. Triage Issue — `triage` : Severity + routing ✅\n"
-        f"- [ ] 2. Create Design Proposal — `design`\n"
-        f"- [ ] 3. Summarize & Close — `summarizer`\n\n"
-        f"Ready for **@<next_agent_type>**\n"
-        f"```\n\n"
-        f"**IMPORTANT:** The comment must contain real findings from YOUR analysis, not placeholder text.\n"
-        f"Adapt the template to your role ({agent_type}). Include concrete details.\n\n"
-        f"## Deliverable 2: Write completion summary JSON\n\n"
-        f"Write a JSON file with your structured results. Use this exact command:\n\n"
-        f"```bash\n"
-        f"LOG_DIR=$(find . -path '*/.nexus/tasks/logs' -type d 2>/dev/null | head -1)\n"
-        f"if [ -z \"$LOG_DIR\" ]; then LOG_DIR=\".nexus/tasks/logs\"; mkdir -p \"$LOG_DIR\"; fi\n"
-        f"cat > \"$LOG_DIR/completion_summary_{issue_num}.json\" << 'NEXUS_EOF'\n"
-        f"{{\n"
-        f"  \"status\": \"complete\",\n"
-        f"  \"agent_type\": \"{agent_type}\",\n"
-        f"  \"summary\": \"<one-line summary of what you did>\",\n"
-        f"  \"key_findings\": [\n"
-        f"    \"<finding 1>\",\n"
-        f"    \"<finding 2>\"\n"
-        f"  ],\n"
-        f"  \"next_agent\": \"<agent_type from workflow steps above>\"\n"
-        f"}}\n"
-        f"NEXUS_EOF\n"
-        f"```\n\n"
-        f"Replace the `<placeholder>` values with real data from your analysis.\n\n"
-        f"After posting the comment and writing the JSON, **EXIT immediately**.\n"
-        f"DO NOT attempt to invoke or launch any other agent."
+    return generate_completion_instructions(
+        issue_number=issue_num,
+        agent_type=agent_type,
+        workflow_steps_text=workflow_steps,
+        nexus_dir=nexus_dir,
     )
 
 
@@ -307,55 +303,6 @@ def get_workflow_name(tier_name):
 
 
 
-
-
-def is_recent_launch(issue_number):
-    """Check if an agent was recently launched for this issue.
-    
-    Returns: True if launched within last 2 minutes
-    """
-    # Check 1: Running processes
-    check_result = subprocess.run(
-        ["pgrep", "-af", f"copilot.*issues/{issue_number}[^0-9]|copilot.*issues/{issue_number}$"],
-        text=True, capture_output=True
-    )
-    if check_result.stdout:
-        logger.info(f"⏭️ Agent already running for issue #{issue_number} (PID found)")
-        return True
-    
-    # Check 2: Recently launched (persistent tracker)
-    launched_agents_tracker = StateManager.load_launched_agents()
-    if str(issue_number) in launched_agents_tracker:
-        last_launch = launched_agents_tracker[str(issue_number)]
-        age = time.time() - last_launch.get('timestamp', 0)
-        if age < 120:  # Within last 2 minutes
-            logger.info(f"⏭️ Agent recently launched for issue #{issue_number} ({age:.0f}s ago)")
-            return True
-    
-    # Check 3: Recent log files (within last 2 minutes)
-    nexus_dir_name = get_nexus_dir_name()
-    recent_logs = glob.glob(
-        os.path.join(
-            BASE_DIR,
-            "**",
-            nexus_dir_name,
-            "tasks",
-            "logs",
-            "**",
-            f"copilot_{issue_number}_*.log"
-        ),
-        recursive=True
-    )
-    if recent_logs:
-        recent_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        latest_log_age = time.time() - os.path.getmtime(recent_logs[0])
-        if latest_log_age < 120:  # Within last 2 minutes
-            logger.info(f"⏭️ Recent log file for issue #{issue_number} ({latest_log_age:.0f}s old)")
-            return True
-    
-    return False
-
-
 def invoke_copilot_agent(
     agents_dir,
     workspace_dir,
@@ -494,6 +441,9 @@ def invoke_copilot_agent(
                 'agent_type': agent_type
             }
             StateManager.save_launched_agents(launched_agents)
+            
+            # Record in LaunchGuard for dedup
+            record_agent_launch(issue_num, pid=pid)
             
             # Audit log
             StateManager.audit_log(
