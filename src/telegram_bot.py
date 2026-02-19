@@ -1258,6 +1258,10 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     active_text = "🚀 Active Tasks (In Progress)\n\n"
     total_active = 0
+    total_skipped_stale = 0
+
+    # Cache GitHub issue states to avoid duplicate API calls in one command run.
+    issue_state_cache = {}
 
     # Check project workspace active folders
     for project_key in _iter_project_keys():
@@ -1270,27 +1274,57 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             files = [f for f in os.listdir(active_dir) if f.endswith(".md")]
             if files:
                 repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
-                active_text += f"{display_name}: {len(files)} task(s)\n"
-                total_active += len(files)
-                for f in files[:3]:
-                    task_type = f.split('_')[0]
-                    emoji = TYPES.get(task_type, "📝")
+                open_files = []
+                stale_count = 0
+
+                for f in files:
                     file_path = os.path.join(active_dir, f)
                     issue_number = extract_issue_number_from_file(file_path)
-                    if issue_number:
-                        issue_link = f"https://github.com/{repo}/issues/{issue_number}"
-                        issue_suffix = f" [#{issue_number}]({issue_link})"
+                    if not issue_number:
+                        filename_match = re.search(r"issue_(\d+)\.md$", f)
+                        issue_number = filename_match.group(1) if filename_match else None
+
+                    if not issue_number:
+                        stale_count += 1
+                        continue
+
+                    cache_key = f"{repo}:{issue_number}"
+                    if cache_key not in issue_state_cache:
+                        details = get_issue_details(issue_number, repo=repo)
+                        issue_state_cache[cache_key] = (
+                            details.get("state", "") if details else "unknown"
+                        )
+
+                    if issue_state_cache[cache_key] == "open":
+                        open_files.append((f, issue_number))
                     else:
-                        issue_suffix = " (issue ?)"
+                        stale_count += 1
+
+                if not open_files:
+                    total_skipped_stale += stale_count
+                    continue
+
+                active_text += f"{display_name}: {len(open_files)} task(s)\n"
+                total_active += len(open_files)
+                total_skipped_stale += stale_count
+
+                for f, issue_number in open_files[:3]:
+                    task_type = f.split('_')[0]
+                    emoji = TYPES.get(task_type, "📝")
+                    issue_link = f"https://github.com/{repo}/issues/{issue_number}"
+                    issue_suffix = f" [#{issue_number}]({issue_link})"
                     active_text += f"  • {emoji} `{f}`{issue_suffix}\n"
-                if len(files) > 3:
-                    active_text += f"  ... +{len(files) - 3} more\n"
+                if len(open_files) > 3:
+                    active_text += f"  ... +{len(open_files) - 3} more\n"
                 active_text += "\n"
 
     if total_active == 0:
         active_text += "💤 No active tasks at the moment.\n"
     else:
         active_text += f"Total: {total_active} active task(s)"
+
+    if total_skipped_stale:
+        active_text += f"\n\nℹ️ Skipped {total_skipped_stale} stale task file(s) (closed/unknown issue)."
 
     await update.message.reply_text(active_text, parse_mode='Markdown', disable_web_page_preview=True)
 
