@@ -12,8 +12,6 @@ Event handlers:
 - pull_request_review.submitted: Notify about PR reviews
 """
 
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -66,6 +64,10 @@ def _get_webhook_policy():
 
 def _repo_to_project_key(repo_name: str) -> str:
     """Best-effort mapping from repository full_name to configured project key."""
+    policy = _get_webhook_policy()
+    if policy and hasattr(policy, "resolve_project_key"):
+        return policy.resolve_project_key(repo_name, PROJECT_CONFIG, default_project="nexus")
+
     for project_key, project_cfg in PROJECT_CONFIG.items():
         if isinstance(project_cfg, dict) and project_cfg.get("github_repo") == repo_name:
             return project_key
@@ -77,6 +79,10 @@ def _effective_merge_policy(repo_name: str) -> str:
 
     Returns one of: always, workflow-based, never.
     """
+    policy = _get_webhook_policy()
+    if policy and hasattr(policy, "resolve_merge_policy"):
+        return policy.resolve_merge_policy(repo_name, PROJECT_CONFIG, default_policy="always")
+
     project_key = _repo_to_project_key(repo_name)
     project_cfg = PROJECT_CONFIG.get(project_key, {})
     if isinstance(project_cfg, dict) and project_cfg.get("require_human_merge_approval"):
@@ -93,6 +99,15 @@ def _notify_lifecycle(message: str) -> bool:
 
 def verify_signature(payload_body, signature_header):
     """Verify GitHub webhook signature."""
+    policy = _get_webhook_policy()
+    if policy and hasattr(policy, "verify_signature"):
+        verified = bool(policy.verify_signature(payload_body, signature_header, WEBHOOK_SECRET))
+        if not WEBHOOK_SECRET and verified:
+            logger.warning("⚠️ WEBHOOK_SECRET not configured - accepting all requests (INSECURE!)")
+        if not verified:
+            logger.error("❌ Signature verification failed")
+        return verified
+
     if not WEBHOOK_SECRET:
         logger.warning("⚠️ WEBHOOK_SECRET not configured - accepting all requests (INSECURE!)")
         return True
@@ -166,14 +181,24 @@ def handle_issue_opened(payload):
     
     # Handle issue close notifications
     if action == "closed":
-        _notify_lifecycle(
-            "🔒 **Issue Closed**\n\n"
-            f"Issue: #{issue_number}\n"
-            f"Title: {issue_title}\n"
-            f"Repository: {repo_name}\n"
-            f"Closed by: @{closed_by}\n\n"
-            f"🔗 {issue_url}"
-        )
+        if policy and hasattr(policy, "build_issue_closed_message"):
+            message = policy.build_issue_closed_message(event if 'event' in locals() else {
+                "number": issue_number,
+                "title": issue_title,
+                "repo": repo_name,
+                "closed_by": closed_by,
+                "url": issue_url,
+            })
+        else:
+            message = (
+                "🔒 **Issue Closed**\n\n"
+                f"Issue: #{issue_number}\n"
+                f"Title: {issue_title}\n"
+                f"Repository: {repo_name}\n"
+                f"Closed by: @{closed_by}\n\n"
+                f"🔗 {issue_url}"
+            )
+        _notify_lifecycle(message)
         return {"status": "issue_closed_notified", "issue": issue_number}
 
     # Only process open actions for task creation
@@ -288,15 +313,28 @@ The actual agent assignment depends on the current project's workflow configurat
         task_file.write_text(task_content)
         logger.info(f"✅ Created task file: {task_file} (agent_type: {agent_type})")
 
-        _notify_lifecycle(
-            "📥 **Issue Created**\n\n"
-            f"Issue: #{issue_number}\n"
-            f"Title: {issue_title}\n"
-            f"Repository: {repo_name}\n"
-            f"Author: @{issue_author}\n"
-            f"Routed to: `{agent_type}`\n\n"
-            f"🔗 {issue_url}"
-        )
+        if policy and hasattr(policy, "build_issue_created_message"):
+            message = policy.build_issue_created_message(
+                event if 'event' in locals() else {
+                    "number": issue_number,
+                    "title": issue_title,
+                    "repo": repo_name,
+                    "author": issue_author,
+                    "url": issue_url,
+                },
+                agent_type,
+            )
+        else:
+            message = (
+                "📥 **Issue Created**\n\n"
+                f"Issue: #{issue_number}\n"
+                f"Title: {issue_title}\n"
+                f"Repository: {repo_name}\n"
+                f"Author: @{issue_author}\n"
+                f"Routed to: `{agent_type}`\n\n"
+                f"🔗 {issue_url}"
+            )
+        _notify_lifecycle(message)
         
         return {
             "status": "task_created",
@@ -439,14 +477,24 @@ def handle_pull_request(payload):
     logger.info(f"🔀 Pull request #{pr_number}: {action} by {pr_author}")
 
     if action == "opened":
-        _notify_lifecycle(
-            "🔀 **PR Created**\n\n"
-            f"PR: #{pr_number}\n"
-            f"Title: {pr_title}\n"
-            f"Repository: {repo_name}\n"
-            f"Author: @{pr_author}\n\n"
-            f"🔗 {pr_url}"
-        )
+        if policy and hasattr(policy, "build_pr_created_message"):
+            message = policy.build_pr_created_message(event if 'event' in locals() else {
+                "number": pr_number,
+                "title": pr_title,
+                "repo": repo_name,
+                "author": pr_author,
+                "url": pr_url,
+            })
+        else:
+            message = (
+                "🔀 **PR Created**\n\n"
+                f"PR: #{pr_number}\n"
+                f"Title: {pr_title}\n"
+                f"Repository: {repo_name}\n"
+                f"Author: @{pr_author}\n\n"
+                f"🔗 {pr_url}"
+            )
+        _notify_lifecycle(message)
         return {
             "status": "pr_opened_notified",
             "pr": pr_number,
@@ -463,15 +511,28 @@ def handle_pull_request(payload):
             else (merge_policy != "always")
         )
         if should_notify:
-            _notify_lifecycle(
-                "✅ **PR Merged**\n\n"
-                f"PR: #{pr_number}\n"
-                f"Title: {pr_title}\n"
-                f"Repository: {repo_name}\n"
-                f"Merged by: @{merged_by}\n"
-                f"Policy: `{merge_policy}`\n\n"
-                f"🔗 {pr_url}"
-            )
+            if policy and hasattr(policy, "build_pr_merged_message"):
+                message = policy.build_pr_merged_message(
+                    event if 'event' in locals() else {
+                        "number": pr_number,
+                        "title": pr_title,
+                        "repo": repo_name,
+                        "merged_by": merged_by,
+                        "url": pr_url,
+                    },
+                    merge_policy,
+                )
+            else:
+                message = (
+                    "✅ **PR Merged**\n\n"
+                    f"PR: #{pr_number}\n"
+                    f"Title: {pr_title}\n"
+                    f"Repository: {repo_name}\n"
+                    f"Merged by: @{merged_by}\n"
+                    f"Policy: `{merge_policy}`\n\n"
+                    f"🔗 {pr_url}"
+                )
+            _notify_lifecycle(message)
             return {
                 "status": "pr_merged_notified",
                 "pr": pr_number,
