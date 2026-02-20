@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram import Bot
 from state_manager import StateManager
+from audit_store import AuditStore
 from user_manager import get_user_manager
 from config import DATA_DIR
 
@@ -150,7 +151,7 @@ class ReportScheduler:
             Dict with activity statistics
         """
         try:
-            events = StateManager.read_all_audit_events(since_hours=hours)
+            events = AuditStore.read_all_audit_events(since_hours=hours)
             if not events:
                 return {"total_events": 0, "event_types": {}, "time_window_hours": hours}
 

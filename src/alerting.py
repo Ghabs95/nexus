@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
+from audit_store import AuditStore
 from state_manager import StateManager
 from config import LOGS_DIR
 
@@ -165,7 +166,7 @@ class AlertingSystem:
         """
         try:
             error_events = {'AGENT_FAILED', 'AGENT_TIMEOUT_KILL', 'ERROR', 'WORKFLOW_ERROR'}
-            events = StateManager.read_all_audit_events(since_hours=hours)
+            events = AuditStore.read_all_audit_events(since_hours=hours)
             return sum(1 for e in events if e.get("event_type") in error_events)
         except Exception as e:
             logger.error(f"Error counting recent errors: {e}")
@@ -228,7 +229,7 @@ class AlertingSystem:
         """
         try:
             failure_events = {'AGENT_FAILED', 'AGENT_TIMEOUT_KILL'}
-            events = StateManager.read_all_audit_events(since_hours=hours)
+            events = AuditStore.read_all_audit_events(since_hours=hours)
             return sum(1 for e in events if e.get("event_type") in failure_events)
         except Exception as e:
             logger.error(f"Error counting agent failures: {e}")

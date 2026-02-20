@@ -4,7 +4,7 @@ import time
 import os
 from typing import Optional, Tuple
 from datetime import datetime
-from state_manager import StateManager
+from audit_store import AuditStore
 from config import STUCK_AGENT_THRESHOLD
 from plugin_runtime import get_runtime_ops_plugin
 
@@ -54,7 +54,7 @@ class AgentMonitor:
                 logger.error(f"Failed to kill agent PID {pid}")
                 return False
             logger.warning(f"Killed stuck agent PID {pid} for issue #{issue_num}")
-            StateManager.audit_log(
+            AuditStore.audit_log(
                 int(issue_num),
                 "AGENT_TIMEOUT_KILL",
                 f"Killed agent process PID {pid} after timeout"
@@ -73,7 +73,7 @@ class AgentMonitor:
         if retry_count < AgentMonitor.MAX_RETRIES:
             AgentMonitor.retry_counters[key] = retry_count + 1
             logger.info(f"Retry #{retry_count + 1} for {agent_name} on issue #{issue_num}")
-            StateManager.audit_log(
+            AuditStore.audit_log(
                 int(issue_num),
                 "AGENT_RETRY",
                 f"Retrying {agent_name} (attempt {retry_count + 1}/{AgentMonitor.MAX_RETRIES})"
@@ -81,7 +81,7 @@ class AgentMonitor:
             return True
         else:
             logger.error(f"Max retries reached for {agent_name} on issue #{issue_num}")
-            StateManager.audit_log(
+            AuditStore.audit_log(
                 int(issue_num),
                 "AGENT_FAILED",
                 f"Agent {agent_name} failed after {AgentMonitor.MAX_RETRIES} retries"
@@ -91,7 +91,7 @@ class AgentMonitor:
     @staticmethod
     def mark_failed(issue_num: str, agent_name: str, reason: str) -> None:
         """Mark an agent as permanently failed."""
-        StateManager.audit_log(int(issue_num), "AGENT_FAILED", reason)
+        AuditStore.audit_log(int(issue_num), "AGENT_FAILED", reason)
         key = f"{issue_num}_{agent_name}"
         AgentMonitor.retry_counters.pop(key, None)
 

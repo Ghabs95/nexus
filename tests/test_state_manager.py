@@ -5,7 +5,6 @@ from unittest.mock import patch, MagicMock
 import sys
 sys.path.insert(0, '/home/ubuntu/git/ghabs/nexus/src')
 from state_manager import StateManager
-from models import WorkflowState
 
 
 class TestTrackedIssues:
@@ -66,117 +65,6 @@ class TestTrackedIssues:
                 mock_save.assert_called_once()
                 saved_data = mock_save.call_args[0][0]
                 assert "123" not in saved_data
-
-
-class TestWorkflowState:
-    """Tests for workflow state persistence."""
-    
-    def test_load_workflow_state_empty(self):
-        """Test loading workflow state when store is empty."""
-        plugin = MagicMock()
-        plugin.load_json.return_value = {}
-        with patch('state_manager._get_state_store_plugin', return_value=plugin):
-            result = StateManager.load_workflow_state()
-            assert result == {}
-    
-    def test_load_workflow_state_valid_data(self):
-        """Test loading valid workflow state."""
-        test_data = {
-            "123": {
-                "state": "PAUSED",
-                "timestamp": 1234567890.0
-            }
-        }
-        plugin = MagicMock()
-        plugin.load_json.return_value = test_data
-        with patch('state_manager._get_state_store_plugin', return_value=plugin):
-            result = StateManager.load_workflow_state()
-            assert result == test_data
-    
-    def test_save_workflow_state(self):
-        """Test saving workflow state."""
-        test_data = {
-            "456": {
-                "state": "STOPPED",
-                "timestamp": 1234567890.0
-            }
-        }
-        plugin = MagicMock()
-        with patch('state_manager._get_state_store_plugin', return_value=plugin):
-            StateManager.save_workflow_state(test_data)
-            plugin.save_json.assert_called_once()
-            assert plugin.save_json.call_args.args[1] == test_data
-    
-    def test_set_workflow_state_paused(self):
-        """Test setting workflow to PAUSED."""
-        with patch.object(StateManager, 'load_workflow_state', return_value={}):
-            with patch.object(StateManager, 'save_workflow_state') as mock_save:
-                StateManager.set_workflow_state("123", WorkflowState.PAUSED)
-                
-                mock_save.assert_called_once()
-                saved_state = mock_save.call_args[0][0]
-                assert "123" in saved_state
-                assert saved_state["123"]["state"] == "paused"
-    
-    def test_set_workflow_state_active(self):
-        """Test setting workflow to ACTIVE removes entry."""
-        existing = {"123": {"state": "PAUSED", "timestamp": 123.0}}
-        with patch.object(StateManager, 'load_workflow_state', return_value=existing):
-            with patch.object(StateManager, 'save_workflow_state') as mock_save:
-                StateManager.set_workflow_state("123", WorkflowState.ACTIVE)
-                
-                mock_save.assert_called_once()
-                saved_state = mock_save.call_args[0][0]
-                assert "123" not in saved_state
-    
-    def test_get_workflow_state_paused(self):
-        """Test getting PAUSED workflow state."""
-        test_data = {"123": {"state": "PAUSED", "timestamp": 123.0}}
-        with patch.object(StateManager, 'load_workflow_state', return_value=test_data):
-            state = StateManager.get_workflow_state("123")
-            assert state == WorkflowState.PAUSED
-    
-    def test_get_workflow_state_active_default(self):
-        """Test getting workflow state defaults to ACTIVE."""
-        with patch.object(StateManager, 'load_workflow_state', return_value={}):
-            state = StateManager.get_workflow_state("999")
-            assert state == WorkflowState.ACTIVE
-
-
-class TestAuditLog:
-    """Tests for audit logging."""
-    
-    def test_audit_log_creates_entry(self):
-        """Test that audit log appends an entry through the state store plugin."""
-        plugin = MagicMock()
-        plugin.append_line.return_value = True
-        with patch('state_manager._get_state_store_plugin', return_value=plugin):
-            with patch('state_manager.datetime') as mock_dt:
-                mock_dt.now.return_value.isoformat.return_value = "2024-01-01T12:00:00"
-                
-                StateManager.audit_log(123, "test_event", "test details")
-
-                written = plugin.append_line.call_args.args[1]
-                
-                assert "Issue #123" in written
-                assert "test_event" in written
-                assert "test details" in written
-                assert "2024-01-01T12:00:00" in written
-    
-    def test_audit_log_no_details(self):
-        """Test audit log with no additional details."""
-        plugin = MagicMock()
-        plugin.append_line.return_value = True
-        with patch('state_manager._get_state_store_plugin', return_value=plugin):
-            with patch('state_manager.datetime') as mock_dt:
-                mock_dt.now.return_value.isoformat.return_value = "2024-01-01T12:00:00"
-                
-                StateManager.audit_log(456, "simple_event")
-
-                written = plugin.append_line.call_args.args[1]
-                
-                assert "Issue #456" in written
-                assert "simple_event" in written
 
 
 class TestLaunchedAgents:

@@ -23,6 +23,7 @@ from config import (
     NEXUS_CORE_STORAGE_DIR,
 )
 from state_manager import StateManager
+from audit_store import AuditStore
 from models import WorkflowState
 from commands.workflow import (
     pause_handler as workflow_pause_handler,
@@ -69,7 +70,7 @@ _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
     "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
     "clear_pending_approval": StateManager.clear_pending_approval,
-    "audit_log": StateManager.audit_log,
+    "audit_log": AuditStore.audit_log,
 }
 
 
@@ -2216,12 +2217,12 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Import here to avoid circular imports
-        from state_manager import StateManager
+        from audit_store import AuditStore
         
         msg = await update.effective_message.reply_text(f"📊 Fetching audit trail for issue #{issue_num}...", parse_mode="Markdown")
         
         # Get audit history from StateManager (now returns structured dicts)
-        audit_history = StateManager.get_audit_history(issue_num, limit=100)
+        audit_history = AuditStore.get_audit_history(issue_num, limit=100)
         
         if not audit_history:
             await context.bot.edit_message_text(

@@ -15,6 +15,7 @@ from config import (
     BASE_DIR,
 )
 from state_manager import StateManager
+from audit_store import AuditStore
 from plugin_runtime import get_workflow_state_plugin
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
@@ -80,7 +81,7 @@ _WORKFLOW_STATE_PLUGIN_BASE_KWARGS = {
     "github_repo": get_github_repo("nexus"),
     "set_pending_approval": StateManager.set_pending_approval,
     "clear_pending_approval": StateManager.clear_pending_approval,
-    "audit_log": StateManager.audit_log,
+    "audit_log": AuditStore.audit_log,
 }
 _WORKFLOW_STATE_PLUGIN_CACHE_KEY = "workflow:state-engine"
 

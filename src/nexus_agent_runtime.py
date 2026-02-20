@@ -87,9 +87,9 @@ class NexusAgentRuntime(AgentRuntime):
         return bool(send_telegram_alert(message))
 
     def audit_log(self, issue_number: str, event: str, details: str = "") -> None:
-        from state_manager import StateManager
+        from audit_store import AuditStore
 
-        StateManager.audit_log(int(issue_number), event, details or None)
+        AuditStore.audit_log(int(issue_number), event, details or None)
 
     def finalize_workflow(
         self,

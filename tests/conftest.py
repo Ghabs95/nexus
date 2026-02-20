@@ -42,8 +42,8 @@ def mock_env_vars(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def mock_audit_log():
-    """Auto-use fixture to mock StateManager.audit_log to prevent writing to audit.log during tests."""
-    with patch('state_manager.StateManager.audit_log'):
+    """Auto-use fixture to mock AuditStore.audit_log during tests."""
+    with patch('audit_store.AuditStore.audit_log'):
         yield
 
 

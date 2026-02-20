@@ -47,27 +47,27 @@ class TestNexusAgentRuntimeShouldRetry:
 
 
 class TestNexusAgentRuntimeGetWorkflowState:
-    def test_returns_stopped_string(self):
+    def test_returns_cancelled_string(self):
         from nexus_agent_runtime import NexusAgentRuntime
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager") as MockSM:
-            from models import WorkflowState
-            MockSM.get_workflow_state.return_value = WorkflowState.STOPPED
-            result = runtime.get_workflow_state("10")
+        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-10-full"):
+            with patch("builtins.open", create=True):
+                with patch("json.load", return_value={"state": "cancelled"}):
+                    result = runtime.get_workflow_state("10")
 
-        assert result == "STOPPED"
+        assert result == "CANCELLED"
 
     def test_returns_paused_string(self):
         from nexus_agent_runtime import NexusAgentRuntime
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager") as MockSM:
-            from models import WorkflowState
-            MockSM.get_workflow_state.return_value = WorkflowState.PAUSED
-            result = runtime.get_workflow_state("11")
+        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-11-full"):
+            with patch("builtins.open", create=True):
+                with patch("json.load", return_value={"state": "paused"}):
+                    result = runtime.get_workflow_state("11")
 
         assert result == "PAUSED"
 
@@ -76,34 +76,44 @@ class TestNexusAgentRuntimeGetWorkflowState:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager") as MockSM:
-            from models import WorkflowState
-            MockSM.get_workflow_state.return_value = WorkflowState.ACTIVE
-            result = runtime.get_workflow_state("12")
+        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-12-full"):
+            with patch("builtins.open", create=True):
+                with patch("json.load", return_value={"state": "active"}):
+                    result = runtime.get_workflow_state("12")
+
+        assert result is None
+
+    def test_returns_none_for_missing_mapping(self):
+        from nexus_agent_runtime import NexusAgentRuntime
+
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
+
+        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value=None):
+            result = runtime.get_workflow_state("10")
 
         assert result is None
 
 
 class TestNexusAgentRuntimeAuditLog:
-    def test_delegates_to_state_manager(self):
+    def test_delegates_to_audit_store(self):
         from nexus_agent_runtime import NexusAgentRuntime
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager") as MockSM:
+        with patch("audit_store.AuditStore") as MockAudit:
             runtime.audit_log("55", "AGENT_DEAD", "PID 1234 exited")
 
-        MockSM.audit_log.assert_called_once_with(55, "AGENT_DEAD", "PID 1234 exited")
+        MockAudit.audit_log.assert_called_once_with(55, "AGENT_DEAD", "PID 1234 exited")
 
     def test_empty_details_passes_none(self):
         from nexus_agent_runtime import NexusAgentRuntime
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager") as MockSM:
+        with patch("audit_store.AuditStore") as MockAudit:
             runtime.audit_log("55", "AGENT_DEAD")
 
-        MockSM.audit_log.assert_called_once_with(55, "AGENT_DEAD", None)
+        MockAudit.audit_log.assert_called_once_with(55, "AGENT_DEAD", None)
 
 
 class TestNexusAgentRuntimeSendAlert:

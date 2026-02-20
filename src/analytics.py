@@ -95,9 +95,9 @@ class AuditLogParser:
         Args:
             lookback_days: Only consider events from the last N days (default: 30)
         """
-        from state_manager import StateManager
+        from audit_store import AuditStore
 
-        events = StateManager.read_all_audit_events(
+        events = AuditStore.read_all_audit_events(
             since_hours=lookback_days * 24,
         )
         

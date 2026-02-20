@@ -26,6 +26,7 @@ from config import (
     get_nexus_dir_name
 )
 from state_manager import StateManager
+from audit_store import AuditStore
 from notifications import notify_agent_completed, send_telegram_alert
 from ai_orchestrator import get_orchestrator, ToolUnavailableError
 from plugin_runtime import get_profiled_plugin
@@ -385,7 +386,7 @@ def invoke_copilot_agent(
             record_agent_launch(issue_num, pid=pid)
             
             # Audit log
-            StateManager.audit_log(
+            AuditStore.audit_log(
                 int(issue_num),
                 "AGENT_LAUNCHED",
                 f"Launched {tool_used.value} agent in {os.path.basename(agents_dir)} "
@@ -400,7 +401,7 @@ def invoke_copilot_agent(
         issue_match = re.search(r"/issues/(\d+)", issue_url or "")
         issue_num = issue_match.group(1) if issue_match else "unknown"
         if issue_num != "unknown":
-            StateManager.audit_log(
+            AuditStore.audit_log(
                 int(issue_num),
                 "AGENT_LAUNCH_FAILED",
                 f"All tools unavailable: {str(e)}"
@@ -413,7 +414,7 @@ def invoke_copilot_agent(
         issue_match = re.search(r"/issues/(\d+)", issue_url or "")
         issue_num = issue_match.group(1) if issue_match else "unknown"
         if issue_num != "unknown":
-            StateManager.audit_log(
+            AuditStore.audit_log(
                 int(issue_num),
                 "AGENT_LAUNCH_FAILED",
                 f"Exception: {str(e)}"
