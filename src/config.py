@@ -358,57 +358,46 @@ def get_inbox_dir(workspace: str = None, project: str = None) -> str:
     return inbox_dir
 
 
-def get_tasks_active_dir(workspace: str = None, project: str = None) -> str:
+def get_tasks_active_dir(workspace: str, project: str) -> str:
     """Get active tasks directory path for in-progress work.
 
     Args:
         workspace: Workspace directory
-        project: Optional project key subdirectory under tasks
-    
+        project: Project key subdirectory under tasks (required)
+
     Returns:
-        Path to {nexus_dir}/tasks/active or {nexus_dir}/tasks/{project}/active
+        Path to {nexus_dir}/tasks/{project}/active
     """
     nexus_dir = get_nexus_dir(workspace)
-    tasks_root = os.path.join(nexus_dir, "tasks")
-    if project:
-        return os.path.join(tasks_root, project, "active")
-    return os.path.join(tasks_root, "active")
+    return os.path.join(nexus_dir, "tasks", project, "active")
 
 
-def get_tasks_closed_dir(workspace: str = None, project: str = None) -> str:
+def get_tasks_closed_dir(workspace: str, project: str) -> str:
     """Get closed tasks directory path for archived work.
 
     Args:
         workspace: Workspace directory
-        project: Optional project key subdirectory under tasks
+        project: Project key subdirectory under tasks (required)
 
     Returns:
-        Path to {nexus_dir}/tasks/closed or {nexus_dir}/tasks/{project}/closed
+        Path to {nexus_dir}/tasks/{project}/closed
     """
     nexus_dir = get_nexus_dir(workspace)
-    tasks_root = os.path.join(nexus_dir, "tasks")
-    if project:
-        return os.path.join(tasks_root, project, "closed")
-    return os.path.join(tasks_root, "closed")
+    return os.path.join(nexus_dir, "tasks", project, "closed")
 
 
-def get_tasks_logs_dir(workspace: str = None, project: str = None) -> str:
+def get_tasks_logs_dir(workspace: str, project: str) -> str:
     """Get task logs directory path for agent execution logs.
-    
+
     Args:
         workspace: Workspace directory
-        project: Optional project subdirectory within logs
-        
+        project: Project key subdirectory under tasks (required)
+
     Returns:
-        Path to {nexus_dir}/tasks/logs or {nexus_dir}/tasks/{project}/logs
+        Path to {nexus_dir}/tasks/{project}/logs
     """
     nexus_dir = get_nexus_dir(workspace)
-    tasks_root = os.path.join(nexus_dir, "tasks")
-    if project:
-        return os.path.join(tasks_root, project, "logs")
-    return os.path.join(tasks_root, "logs")
-
-
+    return os.path.join(nexus_dir, "tasks", project, "logs")
 
 
 # --- TIMING CONFIGURATION ---

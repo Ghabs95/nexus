@@ -326,6 +326,7 @@ def invoke_copilot_agent(
             continuation_prompt=continuation_prompt,
             workflow_path=workflow_path,
             nexus_dir=get_nexus_dir_name(),
+            project_name=project_name,
         )
     else:
         prompt = (

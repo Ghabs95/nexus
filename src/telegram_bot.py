@@ -1384,22 +1384,30 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_path = os.path.join(active_dir, f)
                     issue_number = extract_issue_number_from_file(file_path)
                     if not issue_number:
-                        filename_match = re.search(r"issue_(\d+)\.md$", f)
+                        # Try both issue_N.md and type_N.md naming conventions
+                        filename_match = re.search(r"_(\d+)\.md$", f)
                         issue_number = filename_match.group(1) if filename_match else None
 
                     if not issue_number:
-                        # Non-GitHub or orphan task: keep visible as active.
+                        # No number at all — orphan task
                         open_files.append((f, None))
                         continue
 
                     cache_key = f"{repo}:{issue_number}"
                     if cache_key not in issue_state_cache:
                         details = get_issue_details(issue_number, repo=repo)
-                        issue_state_cache[cache_key] = (
-                            details.get("state", "") if details else "unknown"
-                        )
+                        if not details:
+                            # Number from filename but no matching GitHub issue → orphan
+                            issue_state_cache[cache_key] = "orphan"
+                        else:
+                            issue_state_cache[cache_key] = details.get("state", "unknown")
 
                     issue_state = issue_state_cache[cache_key]
+
+                    if issue_state == "orphan":
+                        # Show as active but with orphan label — may need manual cleanup
+                        open_files.append((f, None))
+                        continue
 
                     if issue_state == "closed":
                         stale_count += 1
@@ -1441,7 +1449,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         issue_link = f"https://github.com/{repo}/issues/{issue_number}"
                         issue_suffix = f" [#{issue_number}]({issue_link})"
                     else:
-                        issue_suffix = " (no issue link)"
+                        issue_suffix = " _(orphan — no GitHub issue)_"
                     active_text += f"  • {emoji} `{f}`{issue_suffix}\n"
                 if len(open_files) > 3:
                     active_text += f"  ... +{len(open_files) - 3} more\n"
@@ -1906,25 +1914,16 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         latest_tail = read_latest_log_tail(task_file, max_lines=50)
         if not latest_tail:
-            logs_dir = _get_project_logs_dir(project_key)
-            if logs_dir:
-                log_files = [
-                    os.path.join(logs_dir, f)
-                    for f in os.listdir(logs_dir)
-                    if f.endswith(".log")
-                ]
-                if log_files:
-                    log_files.sort(key=os.path.getmtime, reverse=True)
-                    latest = log_files[0]
-                    try:
-                        with open(latest, "r") as f:
-                            lines = f.readlines()[-50:]
-                        latest_tail = [
-                            f"[{os.path.basename(latest)}] {line.rstrip()}"
-                            for line in lines
-                        ]
-                    except Exception as e:
-                        logger.error(f"Error reading log file: {e}", exc_info=True)
+            # Do NOT fall back to the latest unrelated log — search for actual
+            # references to this issue number in bot/processor logs instead.
+            issue_refs = search_logs_for_issue(issue_num)
+            if issue_refs:
+                timeline += "\nReferences in service logs:\n"
+                for line in issue_refs[-30:]:
+                    timeline += f"{line}\n"
+            else:
+                timeline += "\n- No task logs found for this issue.\n"
+            latest_tail = []  # skip the block below
 
         if latest_tail:
             timeline += "\nLatest Task Logs:\n"

@@ -1,6 +1,5 @@
 """Compatibility wrapper for AI orchestrator backed by nexus-core plugin."""
 
-import os
 from typing import Any, Dict, Mapping, Optional
 
 from plugin_runtime import clear_cached_plugin, get_profiled_plugin
@@ -15,16 +14,10 @@ _orchestrator: Optional[AIOrchestrator] = None
 
 
 def _resolve_tasks_logs_dir(workspace: str, project: Optional[str] = None) -> str:
-    """Resolve tasks logs directory with lazy config import fallback."""
-    try:
-        from config import get_tasks_logs_dir
+    """Resolve tasks logs directory via config."""
+    from config import get_tasks_logs_dir
 
-        return get_tasks_logs_dir(workspace, project)
-    except Exception:
-        logs_dir = os.path.join(workspace, ".nexus", "tasks", "logs")
-        if project:
-            logs_dir = os.path.join(workspace, ".nexus", "tasks", project, "logs")
-        return logs_dir
+    return get_tasks_logs_dir(workspace, project)
 
 
 def get_orchestrator(config: Optional[Any] = None) -> AIOrchestrator:
