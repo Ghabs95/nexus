@@ -2536,7 +2536,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
             return
 
-    if details.get("state") == "closed":
+    if details.get("state", "").lower() == "closed":
         await update.effective_message.reply_text(f"⚠️ Issue #{issue_num} is closed.")
         return
 
@@ -2549,6 +2549,7 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Resolve which agent to launch: check last completion's next_agent first
     agent_type = None
     resumed_from = None
+    workflow_already_done = False
     try:
         completions = scan_for_completions(BASE_DIR)
         issue_completions = [
@@ -2557,30 +2558,44 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if issue_completions:
             # Use the most recent completion (by file mtime)
             latest = max(issue_completions, key=lambda c: os.path.getmtime(c.file_path))
-            raw_next = latest.summary.next_agent
-            normalized = _normalize_agent_reference(raw_next)
-            if normalized and normalized.lower() not in {
-                "none", "n/a", "null", "done", "end", "finish", "complete", ""
-            }:
-                agent_type = normalized
+            if getattr(latest.summary, "is_workflow_done", False):
+                workflow_already_done = True
                 resumed_from = latest.summary.agent_type
-                logger.info(
-                    f"Continue issue #{issue_num}: last step was {resumed_from}, "
-                    f"resuming with next_agent={agent_type}"
-                )
+            else:
+                raw_next = latest.summary.next_agent
+                normalized = _normalize_agent_reference(raw_next)
+                if normalized and normalized.lower() not in {
+                    "none", "n/a", "null", "done", "end", "finish", "complete", ""
+                }:
+                    agent_type = normalized
+                    resumed_from = latest.summary.agent_type
+                    logger.info(
+                        f"Continue issue #{issue_num}: last step was {resumed_from}, "
+                        f"resuming with next_agent={agent_type}"
+                    )
     except Exception as e:
         logger.warning(f"Could not scan completions for issue #{issue_num}: {e}")
+
+    # Allow caller to force a specific step via from:<step> (overrides done-check too)
+    if forced_agent:
+        agent_type = _normalize_agent_reference(forced_agent) or forced_agent
+        workflow_already_done = False
+        logger.info(f"Continue issue #{issue_num}: overriding agent to {agent_type} (from: arg)")
+
+    # Block restart if workflow already completed unless user forced a step
+    if workflow_already_done and not forced_agent:
+        await update.effective_message.reply_text(
+            f"✅ Workflow for issue #{issue_num} is already complete\n"
+            f"Last agent: `{resumed_from}`\n\n"
+            f"Use `/continue {project_key} {issue_num} from:<agent>` to re-run a specific step."
+        )
+        return
 
     # Fallback: extract from task file (defaults to triage)
     if not agent_type:
         agent_type_match = re.search(r"\*\*Agent Type:\*\*\s*(.+)", content)
         agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
         logger.info(f"Continue issue #{issue_num}: no prior completion found, starting with {agent_type}")
-
-    # Allow caller to force a specific step via from:<step>
-    if forced_agent:
-        agent_type = _normalize_agent_reference(forced_agent) or forced_agent
-        logger.info(f"Continue issue #{issue_num}: overriding agent to {agent_type} (from: arg)")
 
     # Prefer the workflow: label on the issue — task_type heuristic can be wrong
     # (e.g. feature-simple maps to fast-track but issue may have workflow:shortened)
