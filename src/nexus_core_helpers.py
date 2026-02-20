@@ -6,7 +6,7 @@ and the nexus-core workflow framework.
 """
 import logging
 import os
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 from config import (
     get_github_repo,
@@ -267,4 +267,37 @@ async def handle_approval_gate(
     logger.info(
         f"Approval gate triggered for issue #{issue_number} "
         f"step {step_num} ({step_name})."
+    )
+
+
+async def complete_step_for_issue(
+    issue_number: str,
+    completed_agent_type: str,
+    outputs: Dict[str, Any],
+):
+    """Mark the current running step for *issue_number* as complete.
+
+    Delegates to ``WorkflowStateEnginePlugin.complete_step_for_issue()``.
+    The engine evaluates router steps automatically, handling conditional
+    branches and review/develop loops.
+
+    Args:
+        issue_number: GitHub issue number.
+        completed_agent_type: The ``agent_type`` that just finished.
+        outputs: Structured outputs from the completion summary (use
+            ``CompletionSummary.to_dict()`` or pass a raw dict).
+
+    Returns:
+        Updated :class:`~nexus.core.models.Workflow` (inspect ``.state`` and
+        ``.active_agent_type`` to determine what to do next), or ``None``
+        when no workflow is mapped to the issue.
+    """
+    workflow_plugin = get_workflow_state_plugin(
+        **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
+    )
+    return await workflow_plugin.complete_step_for_issue(
+        issue_number=str(issue_number),
+        completed_agent_type=completed_agent_type,
+        outputs=outputs,
     )
