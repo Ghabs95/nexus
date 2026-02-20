@@ -33,6 +33,7 @@ from agent_launcher import invoke_copilot_agent, get_sop_tier_from_issue
 from inbox_processor import get_sop_tier, _normalize_agent_reference
 from nexus.core.completion import scan_for_completions
 from ai_orchestrator import get_orchestrator
+from nexus.plugins.builtin.ai_runtime_plugin import AIProvider
 from plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 from error_handling import format_error_for_user, run_command_with_retry
 from analytics import get_stats_report
@@ -951,6 +952,7 @@ async def on_startup(application):
         # BotCommand("cancel", "Cancel current process"),
         BotCommand("status", "Show pending tasks"),
         BotCommand("active", "Show active tasks"),
+        BotCommand("progress", "Show agent progress details"),
         # BotCommand("track", "Subscribe to issue updates"),
         # BotCommand("untrack", "Stop tracking an issue"),
         # BotCommand("myissues", "View your tracked issues"),
@@ -978,6 +980,42 @@ async def on_startup(application):
         logger.info("Registered bot commands for Telegram client menu")
     except Exception:
         logger.exception("Failed to set bot commands on startup")
+
+    # Tool availability health check
+    await _check_tool_health(application)
+
+
+async def _check_tool_health(application):
+    """Probe Copilot and Gemini availability and broadcast alerts on failure."""
+    tools_to_check = [AIProvider.COPILOT, AIProvider.GEMINI]
+    unavailable = []
+    for tool in tools_to_check:
+        try:
+            available = orchestrator.check_tool_available(tool)
+            if not available:
+                unavailable.append(tool.value)
+        except Exception as exc:
+            logger.warning(f"Health check error for {tool.value}: {exc}")
+            unavailable.append(tool.value)
+
+    if unavailable:
+        alert = (
+            f"⚠️ *Nexus Startup Alert*\n"
+            f"The following AI tools are unavailable: `{', '.join(unavailable)}`\n"
+            f"Agents using these tools will fail until they recover."
+        )
+        logger.warning(f"Tool health check failed: {unavailable}")
+        if TELEGRAM_CHAT_ID:
+            try:
+                await application.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=alert,
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to send health alert to Telegram: {exc}")
+    else:
+        logger.info("✅ Tool health check passed: Copilot and Gemini are available")
 
 
 # --- HELPER: AUDIO TRANSCRIPTION (via Orchestrator CLI) ---
@@ -1330,6 +1368,48 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text,
         parse_mode='Markdown',
         disable_web_page_preview=True,
+    )
+
+
+async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show active issues with current workflow step, agent type, tool, and duration."""
+    logger.info(f"Progress requested by user: {update.effective_user.id}")
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    launched_agents = StateManager.load_launched_agents()
+    if not launched_agents:
+        await update.effective_message.reply_text("ℹ️ No active agents tracked.")
+        return
+
+    now = time.time()
+    lines = ["📊 *Agent Progress*\n"]
+    for issue_num, info in sorted(launched_agents.items(), key=lambda x: x[0]):
+        if not isinstance(info, dict):
+            continue
+        agent_type = info.get("agent_type", "unknown")
+        tool = info.get("tool", "unknown")
+        tier = info.get("tier", "unknown")
+        ts = info.get("timestamp", 0)
+        exclude = info.get("exclude_tools", [])
+        elapsed = int(now - ts) if ts else 0
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        duration_str = (
+            f"{hours}h {minutes}m" if hours else f"{minutes}m {seconds}s"
+        )
+        line = (
+            f"• Issue *#{issue_num}* — `{agent_type}` via `{tool}`\n"
+            f"  Tier: `{tier}` | Running: `{duration_str}`"
+        )
+        if exclude:
+            line += f"\n  Excluded tools: `{', '.join(exclude)}`"
+        lines.append(line)
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
     )
 
 
@@ -2394,7 +2474,16 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not project_key:
         return
 
-    continuation_prompt = " ".join(rest) if rest else "Please continue with the next step."
+    # Parse optional from:<step> argument to override the next agent
+    forced_agent = None
+    filtered_rest = []
+    for token in (rest or []):
+        if token.lower().startswith("from:"):
+            forced_agent = token[5:].strip()
+        else:
+            filtered_rest.append(token)
+
+    continuation_prompt = " ".join(filtered_rest) if filtered_rest else "Please continue with the next step."
 
     # Check if agent is already running
     runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:telegram")
@@ -2477,6 +2566,11 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agent_type_match = re.search(r"\*\*Agent Type:\*\*\s*(.+)", content)
         agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
         logger.info(f"Continue issue #{issue_num}: no prior completion found, starting with {agent_type}")
+
+    # Allow caller to force a specific step via from:<step>
+    if forced_agent:
+        agent_type = _normalize_agent_reference(forced_agent) or forced_agent
+        logger.info(f"Continue issue #{issue_num}: overriding agent to {agent_type} (from: arg)")
 
     # Prefer the workflow: label on the issue — task_type heuristic can be wrong
     # (e.g. feature-simple maps to fast-track but issue may have workflow:shortened)
@@ -3287,6 +3381,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("active", active_handler))
+    app.add_handler(CommandHandler("progress", progress_handler))
     app.add_handler(CommandHandler("track", track_handler))
     app.add_handler(CommandHandler("untrack", untrack_handler))
     app.add_handler(CommandHandler("myissues", myissues_handler))

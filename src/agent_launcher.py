@@ -376,7 +376,8 @@ def invoke_copilot_agent(
                 'tier': tier_name,
                 'mode': mode,
                 'tool': tool_used.value,
-                'agent_type': agent_type
+                'agent_type': agent_type,
+                'exclude_tools': list(exclude_tools) if exclude_tools else []
             }
             StateManager.save_launched_agents(launched_agents)
             
@@ -508,6 +509,16 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
             "no tracker entry and no workflow: label."
         )
         return False
+
+    # Merge caller-provided exclude_tools with any persisted ones from previous runs
+    if exclude_tools is None:
+        launched_agents = StateManager.load_launched_agents()
+        persisted = launched_agents.get(str(issue_number), {}).get("exclude_tools", [])
+        if persisted:
+            exclude_tools = list(persisted)
+            logger.info(
+                f"Restored persisted exclude_tools for issue #{issue_number}: {exclude_tools}"
+            )
     
     issue_url = f"https://github.com/{repo}/issues/{issue_number}"
     agents_abs = os.path.join(BASE_DIR, config["agents_dir"])

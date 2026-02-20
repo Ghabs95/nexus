@@ -15,6 +15,7 @@ Event handlers:
 import json
 import logging
 import os
+import re
 import sys
 from flask import Flask, request, jsonify
 
@@ -370,6 +371,21 @@ def handle_pull_request(payload, event):
     if action == "opened":
         message = policy.build_pr_created_message(event)
         _notify_lifecycle(message)
+
+        # Auto-queue the reviewer agent if PR title references an issue
+        issue_match = re.search(r"#(\d+)", pr_title or "")
+        if issue_match:
+            referenced_issue = issue_match.group(1)
+            logger.info(
+                f"PR #{pr_number} references issue #{referenced_issue} — auto-queuing reviewer"
+            )
+            try:
+                launch_next_agent(
+                    referenced_issue, "reviewer", trigger_source="pr_opened"
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to auto-queue reviewer for issue #{referenced_issue}: {exc}")
+
         return {
             "status": "pr_opened_notified",
             "pr": pr_number,
@@ -435,6 +451,53 @@ def health_check():
         "service": "nexus-webhook",
         "version": "1.0.0"
     }), 200
+
+
+@app.route('/completion', methods=['POST'])
+def completion():
+    """Push-based completion endpoint.
+
+    Agents POST their completion JSON here instead of writing a file,
+    enabling instant handoff without polling latency.
+
+    Expected payload:
+        {
+            "issue_number": "42",
+            "agent_type": "developer",
+            "next_agent": "reviewer",
+            "summary": "..."
+        }
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        data = {}
+
+    issue_number = str(data.get("issue_number", "")).strip()
+    next_agent = str(data.get("next_agent", "")).strip()
+    agent_type = str(data.get("agent_type", "unknown")).strip()
+    summary = data.get("summary", "")
+
+    if not issue_number or not next_agent:
+        return jsonify({"status": "error", "message": "issue_number and next_agent required"}), 400
+
+    logger.info(
+        f"📬 Push completion received: issue #{issue_number}, "
+        f"agent={agent_type}, next={next_agent}"
+    )
+
+    try:
+        launched = launch_next_agent(
+            issue_number, next_agent, trigger_source="push_completion"
+        )
+        return jsonify({
+            "status": "queued" if launched else "skipped",
+            "issue_number": issue_number,
+            "next_agent": next_agent,
+        }), 200
+    except Exception as exc:
+        logger.error(f"Failed to queue next agent from push completion: {exc}")
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 @app.route('/webhook', methods=['POST'])
