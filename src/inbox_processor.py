@@ -524,6 +524,12 @@ def _post_completion_comments_from_logs() -> None:
             # --- Auto-chain to next agent (uses framework's is_workflow_done) ---
             if summary.is_workflow_done:
                 logger.info(f"✅ Workflow complete for issue #{issue_num} (last agent: {completed_agent})")
+                # Remove from tracker so _check_dead_agents doesn't spuriously
+                # retry the last agent after it exits cleanly.
+                _la = StateManager.load_launched_agents(recent_only=False)
+                if str(issue_num) in _la:
+                    del _la[str(issue_num)]
+                    save_launched_agents(_la)
                 _finalize_workflow(issue_num, repo, completed_agent, project_name)
                 continue
 
