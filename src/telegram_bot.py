@@ -1980,14 +1980,22 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     issue_logs = find_issue_log_files(issue_num, task_file=task_file)
     if issue_logs:
-        issue_logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        latest = issue_logs[0]
+        issue_logs.sort(key=lambda p: os.path.getmtime(p))
+        # List all log files (oldest → newest) with size
+        timeline += "\n"
+        for lf in issue_logs:
+            size = os.path.getsize(lf)
+            mtime = time.strftime("%H:%M:%S", time.localtime(os.path.getmtime(lf)))
+            timeline += f"• `{os.path.basename(lf)}` ({size}B, {mtime})\n"
+        # Read last 50 lines from the most recent non-empty file
+        non_empty = [lf for lf in reversed(issue_logs) if os.path.getsize(lf) > 0]
+        latest = non_empty[0] if non_empty else issue_logs[-1]
         logger.info(f"Reading log file: {latest}")
         try:
             with open(latest, "r") as f:
                 lines = f.readlines()[-50:]
             logger.info(f"Read {len(lines)} lines from log file")
-            timeline += f"\n**{os.path.basename(latest)}**\n"
+            timeline += f"\n**{os.path.basename(latest)}** (last 50 lines):\n"
             for line in lines:
                 timeline += f"{line.rstrip()}\n"
         except Exception as e:
