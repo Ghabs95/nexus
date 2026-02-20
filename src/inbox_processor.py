@@ -811,7 +811,9 @@ def _check_dead_agents() -> None:
     Gives a grace period of STUCK_AGENT_THRESHOLD seconds before alerting
     to allow normal completion scanning to detect the result first.
     """
-    launched_agents = load_launched_agents()
+    # recent_only=False: agents that crashed long ago are still detectable;
+    # the AGENT_RECENT_WINDOW filter would silently hide them.
+    launched_agents = StateManager.load_launched_agents(recent_only=False)
     if not launched_agents:
         return
 

@@ -111,9 +111,17 @@ class StateManager:
         return WorkflowState.ACTIVE
 
     @staticmethod
-    def load_launched_agents() -> Dict[str, dict]:
-        """Load recently launched agents from persistent storage."""
+    def load_launched_agents(recent_only: bool = True) -> Dict[str, dict]:
+        """Load launched agents from persistent storage.
+
+        Args:
+            recent_only: When True (default), filter to entries within
+                AGENT_RECENT_WINDOW. Pass False in dead-agent detection so
+                that crashed agents older than the window are still caught.
+        """
         data = StateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
+        if not recent_only:
+            return data
         cutoff = time.time() - AGENT_RECENT_WINDOW
         return {k: v for k, v in data.items() if v.get("timestamp", 0) > cutoff}
 
