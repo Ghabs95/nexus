@@ -388,7 +388,7 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
         create_pr_from_changes=_create_pr_from_changes,
         close_issue=_close_issue,
         send_notification=send_telegram_alert,
-        cache_key="workflow-policy:inbox",
+        cache_key="workflow-policy:finalize",
     )
 
     result = workflow_policy.finalize_workflow(

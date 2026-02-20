@@ -2582,13 +2582,38 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         workflow_already_done = False
         logger.info(f"Continue issue #{issue_num}: overriding agent to {agent_type} (from: arg)")
 
-    # Block restart if workflow already completed unless user forced a step
+    # When workflow is already done: finalize if issue still open, else report done
     if workflow_already_done and not forced_agent:
-        await update.effective_message.reply_text(
-            f"✅ Workflow for issue #{issue_num} is already complete\n"
-            f"Last agent: `{resumed_from}`\n\n"
-            f"Use `/continue {project_key} {issue_num} from:<agent>` to re-run a specific step."
-        )
+        if details.get("state", "").lower() == "open":
+            msg = await update.effective_message.reply_text(
+                f"✅ Workflow complete for issue #{issue_num} (last agent: `{resumed_from}`)\n"
+                f"Issue is still open — running finalization now..."
+            )
+            try:
+                from inbox_processor import _finalize_workflow
+                _finalize_workflow(issue_num, repo, resumed_from, project_name or project_key)
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=(
+                        f"✅ Workflow complete for issue #{issue_num}\n"
+                        f"Last agent: `{resumed_from}`\n"
+                        f"Issue finalized (closed + PR if applicable)."
+                    ),
+                )
+            except Exception as exc:
+                logger.error(f"Finalization failed for issue #{issue_num}: {exc}", exc_info=True)
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=msg.message_id,
+                    text=f"⚠️ Finalization error for issue #{issue_num}: {exc}",
+                )
+        else:
+            await update.effective_message.reply_text(
+                f"✅ Workflow for issue #{issue_num} is already complete and closed.\n"
+                f"Last agent: `{resumed_from}`\n\n"
+                f"Use `/continue {project_key} {issue_num} from:<agent>` to re-run a specific step."
+            )
         return
 
     # Fallback: extract from task file (defaults to triage)
