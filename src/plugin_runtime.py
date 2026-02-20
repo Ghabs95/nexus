@@ -92,9 +92,9 @@ _PLUGIN_PROFILES: Dict[str, Dict[str, Any]] = {
             "kill_timeout": 5,
         },
     },
-    "github_workflow_policy": {
+    "workflow_monitor_policy": {
         "kind": "INPUT_ADAPTER",
-        "name": "github-workflow-policy",
+        "name": "workflow-monitor-policy",
         "config": {},
     },
     "github_webhook_policy": {
@@ -117,7 +117,7 @@ _BUILTIN_REGISTER_MODULES = (
     "nexus.plugins.builtin.json_state_plugin",
     "nexus.plugins.builtin.runtime_ops_plugin",
     "nexus.plugins.builtin.workflow_policy_plugin",
-    "nexus.plugins.builtin.github_workflow_policy_plugin",
+    "nexus.plugins.builtin.workflow_monitor_policy_plugin",
     "nexus.plugins.builtin.github_webhook_policy_plugin",
     "nexus.plugins.builtin.workflow_state_engine_plugin",
 )
@@ -279,16 +279,19 @@ def get_runtime_ops_plugin(
     )
 
 
-def get_github_workflow_policy_plugin(
+def get_workflow_monitor_policy_plugin(
     *,
+    list_open_issues: Optional[Callable[..., list[Any]]] = None,
     list_issues: Optional[Callable[..., list[dict[str, Any]]]] = None,
     get_comments: Optional[Callable[..., list[Any]]] = None,
     search_linked_prs: Optional[Callable[..., list[Any]]] = None,
     get_issue: Optional[Callable[..., Any]] = None,
     cache_key: Optional[str] = None,
 ):
-    """Create a configured GitHub workflow policy plugin instance."""
+    """Create a configured platform-neutral workflow monitor policy plugin instance."""
     overrides: Dict[str, Any] = {}
+    if list_open_issues is not None:
+        overrides["list_open_issues"] = list_open_issues
     if list_issues is not None:
         overrides["list_issues"] = list_issues
     if get_comments is not None:
@@ -299,7 +302,7 @@ def get_github_workflow_policy_plugin(
         overrides["get_issue"] = get_issue
 
     return get_profiled_plugin(
-        "github_workflow_policy",
+        "workflow_monitor_policy",
         overrides=overrides,
         cache_key=cache_key,
     )

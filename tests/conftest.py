@@ -26,15 +26,15 @@ def mock_env_vars(monkeypatch, tmp_path):
     nexus:
         agents_dir: ghabs/nexus-core/examples/agents
         workspace: ghabs/nexus
-        github_repo: test/repo
+        git_repo: test/repo
     test-project:
         agents_dir: ghabs/test-agents
         workspace: ghabs/test-project
-        github_repo: test/project
+        git_repo: test/project
     my-project:
         agents_dir: ghabs/my-agents
         workspace: ghabs/my-project
-        github_repo: test/my-project
+        git_repo: test/my-project
     """)
     
     monkeypatch.setenv("PROJECT_CONFIG_PATH", str(project_config_file))

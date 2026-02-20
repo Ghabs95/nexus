@@ -10,6 +10,10 @@ from typing import Optional, Dict, List, Any
 
 from config import (
     get_github_repo,
+    get_default_github_repo,
+    get_default_project,
+    get_project_platform,
+    get_gitlab_base_url,
     _get_project_config,
     NEXUS_CORE_STORAGE_DIR,
     BASE_DIR,
@@ -19,6 +23,7 @@ from audit_store import AuditStore
 from plugin_runtime import get_workflow_state_plugin
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
+from nexus.adapters.git.gitlab import GitLabPlatform
 from nexus.core.workflow import WorkflowEngine
 
 logger = logging.getLogger(__name__)
@@ -30,9 +35,29 @@ def get_workflow_engine() -> WorkflowEngine:
     return WorkflowEngine(storage=storage)
 
 
-def get_git_platform(repo: str = None) -> GitHubPlatform:
-    """Get initialized GitHub platform adapter."""
-    return GitHubPlatform(repo=repo or get_github_repo("nexus"))
+def get_git_platform(repo: str = None, project_name: str = None):
+    """Get initialized Git platform adapter for the project.
+
+    Returns either :class:`GitHubPlatform` or :class:`GitLabPlatform`.
+    """
+    project_key = project_name or get_default_project()
+    repo_name = repo or get_github_repo(project_key)
+    platform_type = get_project_platform(project_key)
+
+    if platform_type == "gitlab":
+        token = os.getenv("GITLAB_TOKEN")
+        if not token:
+            raise ValueError(
+                "GITLAB_TOKEN is required for gitlab projects. "
+                f"Missing token for project '{project_key}'."
+            )
+        return GitLabPlatform(
+            token=token,
+            repo=repo_name,
+            base_url=get_gitlab_base_url(project_key),
+        )
+
+    return GitHubPlatform(repo=repo_name)
 
 
 def get_workflow_definition_path(project_name: str) -> Optional[str]:
@@ -78,7 +103,6 @@ _WORKFLOW_STATE_PLUGIN_BASE_KWARGS = {
     "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
     "issue_to_workflow_map_setter": StateManager.map_issue_to_workflow,
     "workflow_definition_path_resolver": get_workflow_definition_path,
-    "github_repo": get_github_repo("nexus"),
     "set_pending_approval": StateManager.set_pending_approval,
     "clear_pending_approval": StateManager.clear_pending_approval,
     "audit_log": AuditStore.audit_log,
@@ -110,6 +134,7 @@ async def create_workflow_for_issue(
     """
     workflow_plugin = get_workflow_state_plugin(
         **_WORKFLOW_STATE_PLUGIN_BASE_KWARGS,
+        github_repo=get_github_repo(project_name),
         cache_key=_WORKFLOW_STATE_PLUGIN_CACHE_KEY,
     )
 

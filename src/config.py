@@ -2,6 +2,9 @@
 import os
 import sys
 import logging
+import subprocess
+import urllib.parse
+from typing import List
 
 import yaml
 from dotenv import load_dotenv
@@ -30,7 +33,7 @@ AUDIT_LOG_FILE = os.path.join(LOGS_DIR, "audit.log")
 INBOX_PROCESSOR_LOG_FILE = os.path.join(LOGS_DIR, "inbox_processor.log")
 TELEGRAM_BOT_LOG_FILE = os.path.join(LOGS_DIR, "telegram_bot.log")
 
-# --- GITHUB CONFIGURATION ---
+# --- GIT PLATFORM CONFIGURATION ---
 # Note: PROJECT_CONFIG_PATH is read from environment each time it's needed (for testing with monkeypatch)
 
 # Lazy-load PROJECT_CONFIG to support testing with monkeypatch
@@ -87,8 +90,25 @@ def _validate_config_with_project_config(config: dict) -> None:
         
         if 'workspace' not in proj_config:
             raise ValueError(f"PROJECT_CONFIG['{project}'] missing 'workspace' key")
-        if 'github_repo' not in proj_config:
-            raise ValueError(f"PROJECT_CONFIG['{project}'] missing 'github_repo' key")
+
+        repos_list = proj_config.get("git_repos")
+
+        if repos_list is not None:
+            if not isinstance(repos_list, list):
+                raise ValueError(
+                    f"PROJECT_CONFIG['{project}']['git_repos'] must be a list"
+                )
+            for repo_name in repos_list:
+                if not isinstance(repo_name, str) or not repo_name.strip():
+                    raise ValueError(
+                        f"PROJECT_CONFIG['{project}']['git_repos'] contains invalid repo entry"
+                    )
+
+        git_platform = str(proj_config.get("git_platform", "github")).lower().strip()
+        if git_platform not in {"github", "gitlab"}:
+            raise ValueError(
+                f"PROJECT_CONFIG['{project}']['git_platform'] must be 'github' or 'gitlab'"
+            )
 
 
 def _load_and_validate_project_config() -> dict:
@@ -284,6 +304,165 @@ APPROVAL_STATE_FILE = os.path.join(DATA_DIR, "approval_state.json")
 NEXUS_CORE_STORAGE_BACKEND = os.getenv("NEXUS_CORE_STORAGE", "file")  # Options: file, postgres, redis
 
 # --- PROJECT CONFIGURATION ---
+def get_default_project() -> str:
+    """Return default project key for legacy call sites.
+
+    Preference order:
+    1. explicit "nexus" project when present
+    2. first configured project dict containing workspace + repo metadata
+    """
+    config = _get_project_config()
+    if isinstance(config.get("nexus"), dict):
+        return "nexus"
+
+    for key, value in config.items():
+        if isinstance(value, dict) and value.get("workspace"):
+            return key
+
+    raise ValueError("No project with repository configuration found in PROJECT_CONFIG")
+
+
+def get_github_repos(project: str) -> List[str]:
+    """Get all GitHub repositories configured for a project.
+
+    Uses provider-neutral ``git_repo`` / ``git_repos``.
+    """
+    config = _get_project_config()
+    if project not in config:
+        raise KeyError(
+            f"Project '{project}' not found in PROJECT_CONFIG. "
+            f"Available projects: {[k for k in config.keys() if isinstance(config.get(k), dict)]}"
+        )
+
+    project_cfg = config[project]
+    if not isinstance(project_cfg, dict):
+        raise ValueError(f"Project '{project}' configuration must be a mapping")
+
+    repos: List[str] = []
+    single_repo = project_cfg.get("git_repo")
+    if isinstance(single_repo, str) and single_repo.strip():
+        repos.append(single_repo.strip())
+
+    repo_list = project_cfg.get("git_repos")
+    if isinstance(repo_list, list):
+        for repo_name in repo_list:
+            if isinstance(repo_name, str):
+                value = repo_name.strip()
+                if value and value not in repos:
+                    repos.append(value)
+
+    if not repos:
+        repos = _discover_workspace_repos(project_cfg)
+
+    if not repos:
+        raise ValueError(
+            f"Project '{project}' is missing repository configuration and "
+            "workspace auto-discovery found no git remotes"
+        )
+
+    return repos
+
+
+def _discover_workspace_repos(project_cfg: dict) -> List[str]:
+    """Discover repository slugs from local git remotes in workspace.
+
+    Scans workspace root and first-level subdirectories that are git repos.
+    """
+    workspace = project_cfg.get("workspace") if isinstance(project_cfg, dict) else None
+    if not workspace:
+        return []
+
+    workspace_abs = workspace if os.path.isabs(workspace) else os.path.join(BASE_DIR, workspace)
+    if not os.path.isdir(workspace_abs):
+        return []
+
+    candidates = [workspace_abs]
+    try:
+        for entry in os.scandir(workspace_abs):
+            if entry.is_dir(follow_symlinks=False):
+                candidates.append(entry.path)
+    except Exception:
+        pass
+
+    repos: List[str] = []
+    for candidate in candidates:
+        if not os.path.isdir(os.path.join(candidate, ".git")):
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "-C", candidate, "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            continue
+
+        if result.returncode != 0:
+            continue
+
+        slug = _repo_slug_from_remote_url(result.stdout.strip())
+        if slug and slug not in repos:
+            repos.append(slug)
+
+    return repos
+
+
+def _repo_slug_from_remote_url(remote_url: str) -> str:
+    """Normalize git remote URL into ``namespace/repo`` slug."""
+    if not remote_url:
+        return ""
+
+    value = remote_url.strip()
+
+    # SCP-like URLs: git@host:group/subgroup/repo.git
+    if value.startswith("git@") and ":" in value:
+        value = value.split(":", 1)[1]
+    elif "://" in value:
+        try:
+            parsed = urllib.parse.urlparse(value)
+            value = parsed.path or ""
+        except Exception:
+            return ""
+
+    value = value.strip().lstrip("/")
+    if value.endswith(".git"):
+        value = value[:-4]
+
+    return value
+
+
+def get_default_github_repo() -> str:
+    """Return default GitHub repo for legacy single-repo call sites."""
+    return get_github_repo(get_default_project())
+
+
+def get_project_platform(project: str) -> str:
+    """Return VCS platform type for a project (``github`` or ``gitlab``)."""
+    config = _get_project_config()
+    if project not in config or not isinstance(config[project], dict):
+        raise KeyError(f"Project '{project}' not found in PROJECT_CONFIG")
+    return str(config[project].get("git_platform", "github")).lower().strip()
+
+
+def get_gitlab_base_url(project: str) -> str:
+    """Return GitLab base URL for a project.
+
+    Priority:
+    1. project-level ``gitlab_base_url``
+    2. env var ``GITLAB_BASE_URL``
+    3. default ``https://gitlab.com``
+    """
+    config = _get_project_config()
+    project_cfg = config.get(project, {}) if isinstance(config, dict) else {}
+    if isinstance(project_cfg, dict):
+        project_url = project_cfg.get("gitlab_base_url")
+        if isinstance(project_url, str) and project_url.strip():
+            return project_url.strip()
+    return os.getenv("GITLAB_BASE_URL", "https://gitlab.com")
+
+
 def get_github_repo(project: str) -> str:
     """Get GitHub repo for a project from PROJECT_CONFIG.
     
@@ -296,18 +475,7 @@ def get_github_repo(project: str) -> str:
     Raises:
         KeyError: If project not found in PROJECT_CONFIG
     """
-    config = _get_project_config()
-    if project not in config:
-        raise KeyError(
-            f"Project '{project}' not found in PROJECT_CONFIG. "
-            f"Available projects: {[k for k in config.keys() if k != 'workflow_definition_path']}"
-        )
-    repo = config[project].get("github_repo")
-    if not repo:
-        raise ValueError(
-            f"Project '{project}' is missing 'github_repo' in PROJECT_CONFIG"
-        )
-    return repo
+    return get_github_repos(project)[0]
 
 
 def get_nexus_dir_name() -> str:
@@ -446,8 +614,12 @@ def validate_configuration():
                 else:
                     if 'workspace' not in proj_config:
                         errors.append(f"PROJECT_CONFIG['{project}'] missing 'workspace' key")
-                    if 'github_repo' not in proj_config:
-                        errors.append(f"PROJECT_CONFIG['{project}'] missing 'github_repo' key")
+                    # git_repo/git_repos are optional when workspace auto-discovery is used.
+                    repo_list = proj_config.get("git_repos")
+                    if repo_list is not None and not isinstance(repo_list, list):
+                        errors.append(
+                            f"PROJECT_CONFIG['{project}']['git_repos'] must be a list"
+                        )
     except Exception as e:
         # If PROJECT_CONFIG can't be loaded, that's okay during import (tests handle this)
         pass

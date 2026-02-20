@@ -163,22 +163,22 @@ ai_tool_preferences:
 case_italia:
   agents_dir: ghabs/agents/casit-agents
   workspace: case_italia
-  github_repo: Ghabs95/agents
+  git_repo: Ghabs95/agents
 
 wallible:
   agents_dir: ghabs/agents/wlbl-agents
   workspace: wallible
-  github_repo: Ghabs95/agents
+  git_repo: Ghabs95/agents
 
 biome:
   agents_dir: ghabs/agents/bm-agents
   workspace: biome
-  github_repo: Ghabs95/agents
+  git_repo: Ghabs95/agents
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
   workspace: ghabs/nexus
-  github_repo: Ghabs95/nexus-core
+  git_repo: Ghabs95/nexus-core
   # Project-specific AI tool preferences
   ai_tool_preferences:
     Copilot: copilot
@@ -193,9 +193,27 @@ nexus:
 - `{project_name}` - Section for each project
   - `agents_dir` - Path to project's agents directory
   - `workspace` - Workspace identifier for the project
-  - `github_repo` - GitHub repo in format `owner/repo`
+  - `git_repo` - Primary repository slug in format `owner/repo` (GitHub) or `group/repo` (GitLab)
+  - `git_repos` (optional) - Additional repositories for multi-repo projects
+    - If omitted, Nexus attempts workspace repo auto-discovery from local `git remote origin` URLs
   - `workflow_definition_path` (optional) - Project-specific override of global workflow path
   - `ai_tool_preferences` (optional) - Project-specific override of global AI tool preferences
+
+### Multi-Repo Model (Recommended)
+
+For projects with multiple code repositories, use this model:
+
+- Keep one **central issue repo** for workflow tracking.
+- Set `git_repo` to that issue-tracking repo.
+- List all implementation repos in `git_repos` (including `git_repo`).
+
+This gives a single issue timeline while allowing implementation in multiple repos.
+
+#### PR Linking Rule
+
+When code changes are in a repo different from the issue repo, PR descriptions should reference
+the issue using a **fully-qualified** cross-repo reference (for example `group/workflow-repo#123`),
+not only `#123`, so platform linking works reliably across repositories.
 
 ### Storage Backend
 

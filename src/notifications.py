@@ -195,7 +195,13 @@ def notify_workflow_started(issue_number: str, project: str, tier: str, task_typ
     return send_notification(message, keyboard=keyboard)
 
 
-def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: str, project: str = "nexus") -> bool:
+def notify_agent_completed(
+    issue_number: str,
+    completed_agent: Optional[str] = None,
+    next_agent: str = "",
+    project: str = "nexus",
+    agent_name: Optional[str] = None,
+) -> bool:
     """
     Send notification that an agent completed and next one started.
     
@@ -204,15 +210,19 @@ def notify_agent_completed(issue_number: str, completed_agent: str, next_agent: 
         completed_agent: Agent that just completed
         next_agent: Agent that's starting next
         project: Project name (default: nexus)
+        agent_name: Legacy alias for completed_agent
     
     Returns:
         True if sent successfully
     """
+    resolved_completed_agent = completed_agent or agent_name or "agent"
+    resolved_next_agent = next_agent or "unknown"
+
     message = (
         f"✅ **Agent Completed → Auto-Chain**\n\n"
         f"Issue: #{issue_number}\n"
-        f"Completed: @{completed_agent}\n"
-        f"Next: @{next_agent}"
+        f"Completed: @{resolved_completed_agent}\n"
+        f"Next: @{resolved_next_agent}"
     )
     
     keyboard = (

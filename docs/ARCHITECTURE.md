@@ -352,7 +352,7 @@ TELEGRAM_TOKEN          # Bot authentication
 TELEGRAM_CHAT_ID        # Target chat
 ALLOWED_USER            # Authorized user ID
 AI_API_KEY              # Google Gemini key
-PROJECT_CONFIG_PATH     # Per-project github_repo settings
+PROJECT_CONFIG_PATH     # Per-project git_repo/git_repos settings
 ```
 
 ### Project Configuration (`src/config.py`)

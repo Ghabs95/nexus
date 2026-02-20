@@ -25,6 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (
     BASE_DIR, 
     PROJECT_CONFIG,
+    get_default_project,
+    get_github_repos,
+    get_inbox_dir,
+    get_tasks_active_dir,
     WEBHOOK_PORT,
     WEBHOOK_SECRET,
     LOGS_DIR
@@ -54,6 +58,35 @@ app = Flask(__name__)
 processed_events = set()
 
 
+def _project_repos(project_key: str, project_cfg: dict) -> list[str]:
+    """Return configured repositories for a project entry."""
+    repos: list[str] = []
+
+    single_repo = None
+    if isinstance(project_cfg, dict):
+        single_repo = project_cfg.get("git_repo")
+    if isinstance(single_repo, str) and single_repo.strip():
+        repos.append(single_repo.strip())
+
+    repo_list = None
+    if isinstance(project_cfg, dict):
+        repo_list = project_cfg.get("git_repos")
+    if isinstance(repo_list, list):
+        for repo_name in repo_list:
+            if isinstance(repo_name, str):
+                value = repo_name.strip()
+                if value and value not in repos:
+                    repos.append(value)
+
+    if repos:
+        return repos
+
+    try:
+        return get_github_repos(project_key)
+    except Exception:
+        return []
+
+
 def _get_webhook_policy():
     """Get framework webhook policy plugin."""
     return get_github_webhook_policy_plugin(cache_key="github-webhook-policy:webhook")
@@ -62,7 +95,11 @@ def _get_webhook_policy():
 def _repo_to_project_key(repo_name: str) -> str:
     """Best-effort mapping from repository full_name to configured project key."""
     policy = _get_webhook_policy()
-    return policy.resolve_project_key(repo_name, PROJECT_CONFIG, default_project="nexus")
+    return policy.resolve_project_key(
+        repo_name,
+        PROJECT_CONFIG,
+        default_project=get_default_project(),
+    )
 
 
 def _effective_merge_policy(repo_name: str) -> str:
@@ -139,11 +176,8 @@ def handle_issue_opened(payload, event):
     
     # Also skip if an active task file already exists for this issue
     try:
-        import os
-        from config import PROJECT_CONFIG, BASE_DIR
-        from config import get_tasks_active_dir
         for _key, _cfg in PROJECT_CONFIG.items():
-            if isinstance(_cfg, dict) and _cfg.get("github_repo") == repo_name:
+            if isinstance(_cfg, dict) and repo_name in _project_repos(_key, _cfg):
                 _ws = os.path.join(BASE_DIR, _cfg.get("workspace", ""))
                 _active = get_tasks_active_dir(_ws, _key)
                 _task = os.path.join(_active, f"issue_{issue_number}.md")
@@ -156,8 +190,6 @@ def handle_issue_opened(payload, event):
     
     # Determine which agent type to route to
     try:
-        from config import PROJECT_CONFIG, get_inbox_dir
-        
         triage_config = PROJECT_CONFIG.get("github_issue_triage", {})
         agent_type = triage_config.get("default_agent_type", "triage")
         
@@ -177,29 +209,41 @@ def handle_issue_opened(payload, event):
         
     except Exception as e:
         logger.warning(f"⚠️ Could not load triage config, using default: {e}")
-        from config import PROJECT_CONFIG
         triage_config = PROJECT_CONFIG.get("github_issue_triage", {})
         agent_type = triage_config.get("default_agent_type", "triage")
     
     # Create markdown task file for inbox processor
     try:
         from pathlib import Path
-        from config import get_inbox_dir, PROJECT_CONFIG, BASE_DIR
-        import os
         
         # Determine project from repository name
         project_workspace = None
         project_key = None
         for project_key, project_cfg in PROJECT_CONFIG.items():
-            if isinstance(project_cfg, dict) and project_cfg.get("github_repo") == repo_name:
+            if not isinstance(project_cfg, dict):
+                continue
+            project_repos = _project_repos(project_key, project_cfg)
+            if repo_name in project_repos:
                 project_workspace = project_cfg.get("workspace")
-                logger.info(f"📌 Mapped repository '{repo_name}' → project '{project_key}' (workspace: {project_workspace})")
+                logger.info(
+                    f"📌 Mapped repository '{repo_name}' → project '{project_key}' "
+                    f"(workspace: {project_workspace})"
+                )
                 break
         
-        if not project_workspace:
-            logger.warning(f"⚠️ No project mapping for repository '{repo_name}', using default 'ghabs'")
-            project_workspace = "ghabs"
-            project_key = "nexus"
+        if not project_workspace or not project_key:
+            message = (
+                f"🚫 No project mapping for repository '{repo_name}'. "
+                "Webhook issue task creation blocked to enforce project boundaries."
+            )
+            logger.error(message)
+            send_telegram_alert(message)
+            return {
+                "status": "ignored",
+                "reason": "unmapped_repository",
+                "repository": repo_name,
+                "issue": issue_number,
+            }
         
         # Get inbox directory for the project's workspace
         workspace_abs = os.path.join(BASE_DIR, project_workspace)

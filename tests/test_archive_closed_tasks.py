@@ -24,7 +24,7 @@ def test_archive_closed_task_by_issue_url(tmp_path, monkeypatch):
         {
             "nexus": {
                 "workspace": "workspace",
-                "github_repo": "acme/repo",
+                "git_repo": "acme/repo",
             }
         },
     )
@@ -53,7 +53,7 @@ def test_archive_closed_task_by_issue_filename(tmp_path, monkeypatch):
         {
             "nexus": {
                 "workspace": "workspace",
-                "github_repo": "acme/repo",
+                "git_repo": "acme/repo",
             }
         },
     )
@@ -86,7 +86,7 @@ def test_archive_closed_task_ignores_other_issues(tmp_path, monkeypatch):
         {
             "nexus": {
                 "workspace": "workspace",
-                "github_repo": "acme/repo",
+                "git_repo": "acme/repo",
             }
         },
     )

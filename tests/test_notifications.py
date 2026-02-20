@@ -176,6 +176,23 @@ class TestNotificationFunctions:
         assert "#789" in message
         assert "OldAgent" in message
         assert "NewAgent" in message
+
+    @patch('notifications.send_notification')
+    def test_notify_agent_completed_legacy_agent_name_kwarg(self, mock_send):
+        """Legacy agent_name kwarg should map to completed agent."""
+        mock_send.return_value = True
+
+        result = notify_agent_completed(
+            issue_number="790",
+            agent_name="LegacyAgent",
+            next_agent="NewAgent",
+        )
+
+        assert result is True
+        message = mock_send.call_args[0][0]
+        assert "#790" in message
+        assert "LegacyAgent" in message
+        assert "NewAgent" in message
     
     @patch('notifications.send_notification')
     def test_notify_agent_timeout_with_retry(self, mock_send):

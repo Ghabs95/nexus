@@ -17,7 +17,7 @@ from telegram.ext import (
 # Import configuration from centralized config module
 from config import (
     TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
-    DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, PROJECT_CONFIG, ensure_data_dir,
+    DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, get_default_github_repo, PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
     get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir, get_tasks_logs_dir, get_nexus_dir_name,
     NEXUS_CORE_STORAGE_DIR,
@@ -65,7 +65,7 @@ rate_limiter = get_rate_limiter()
 user_manager = get_user_manager()
 
 # Legacy alias for compatibility
-GITHUB_REPO = get_github_repo("nexus")
+GITHUB_REPO = get_default_github_repo()
 _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
     "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,

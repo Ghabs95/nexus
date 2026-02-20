@@ -6,6 +6,7 @@ in response to workflow events, whether triggered by polling (inbox processor)
 or webhooks (webhook server).
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -21,6 +22,8 @@ from nexus.core.guards import LaunchGuard
 from config import (
     BASE_DIR,
     get_github_repo,
+    get_github_repos,
+    get_project_platform,
     PROJECT_CONFIG,
     ORCHESTRATOR_CONFIG,
     get_nexus_dir_name
@@ -51,6 +54,102 @@ def _get_issue_plugin(repo: str):
     if plugin:
         _issue_plugin_cache[repo] = plugin
     return plugin
+
+
+def _iter_project_configs():
+    """Yield (project_key, project_cfg) for configured projects only."""
+    for project_key, project_cfg in PROJECT_CONFIG.items():
+        if not isinstance(project_cfg, dict) or not project_cfg.get("workspace"):
+            continue
+        if _project_repos(project_key, project_cfg):
+            yield project_key, project_cfg
+
+
+def _project_repos(project_key: str, project_cfg: dict) -> list[str]:
+    """Return configured repository list for a project config entry."""
+    repos: list[str] = []
+    single_repo = None
+    if isinstance(project_cfg, dict):
+        single_repo = project_cfg.get("git_repo")
+    if isinstance(single_repo, str) and single_repo.strip():
+        repos.append(single_repo.strip())
+
+    repo_list = None
+    if isinstance(project_cfg, dict):
+        repo_list = project_cfg.get("git_repos")
+    if isinstance(repo_list, list):
+        for repo_name in repo_list:
+            if isinstance(repo_name, str):
+                value = repo_name.strip()
+                if value and value not in repos:
+                    repos.append(value)
+
+    if repos:
+        return repos
+
+    try:
+        return get_github_repos(project_key)
+    except Exception:
+        return []
+
+
+def _resolve_project_from_task_file(task_file: str) -> str:
+    """Resolve project key by matching task file path against project workspaces."""
+    for project_key, project_cfg in _iter_project_configs():
+        workspace_abs = os.path.join(BASE_DIR, project_cfg["workspace"])
+        if task_file.startswith(workspace_abs):
+            return project_key
+    return ""
+
+
+def _load_issue_body_from_project_repo(issue_number: str):
+    """Load issue body from the repo that matches task-file/project boundaries.
+
+    Returns:
+        ``(body, repo, task_file)`` when resolved, otherwise ``("", "", "")``.
+    """
+    issue_number = str(issue_number)
+    candidate_repos = []
+    for project_key, cfg in _iter_project_configs():
+        project_repos = _project_repos(project_key, cfg)
+        for repo_name in project_repos:
+            if repo_name not in candidate_repos:
+                candidate_repos.append(repo_name)
+
+    for repo_name in candidate_repos:
+        plugin = _get_issue_plugin(repo_name)
+        if not plugin:
+            continue
+
+        try:
+            data = plugin.get_issue(issue_number, ["body"])
+        except Exception:
+            continue
+
+        if not data:
+            continue
+
+        body = data.get("body", "")
+        if not body:
+            continue
+
+        task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
+        if not task_file_match:
+            continue
+
+        task_file = task_file_match.group(1)
+        project_key = _resolve_project_from_task_file(task_file)
+        if not project_key:
+            continue
+
+        project_cfg = PROJECT_CONFIG.get(project_key, {})
+        expected_repos = _project_repos(project_key, project_cfg)
+        if repo_name not in expected_repos:
+            continue
+
+        return body, repo_name, task_file
+
+    return "", "", ""
 
 
 def _get_launch_policy_plugin():
@@ -259,11 +358,27 @@ def get_sop_tier_from_issue(issue_number, project="nexus"):
     Returns: tier_name (full/shortened/fast-track) or None
     """
     from nexus.adapters.git.github import GitHubPlatform
+    from nexus_core_helpers import get_git_platform
 
     try:
         repo = get_github_repo(project)
-        platform = GitHubPlatform(repo)
-        return platform.get_workflow_type_from_issue(int(issue_number))
+        platform_type = get_project_platform(project)
+
+        if platform_type == "github":
+            platform = GitHubPlatform(repo)
+            return platform.get_workflow_type_from_issue(int(issue_number))
+
+        issue = asyncio.run(get_git_platform(repo, project_name=project).get_issue(str(issue_number)))
+        if not issue:
+            return None
+        labels = {str(label).lower() for label in (issue.labels or [])}
+        if "workflow:fast-track" in labels:
+            return "fast-track"
+        if "workflow:shortened" in labels:
+            return "shortened"
+        if "workflow:full" in labels:
+            return "full"
+        return None
     except Exception as e:
         logger.error(f"Failed to get tier from issue #{issue_number} in {project}: {e}")
         return None
@@ -445,20 +560,14 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
         logger.info(f"⏭️ Skipping duplicate launch for issue #{issue_number}")
         return None, None
 
-    # Get issue details
+    # Get issue details from the repo matching this issue's task-file project
     try:
-        repo = get_github_repo("nexus")
-        plugin = _get_issue_plugin(repo)
-        if not plugin:
-            logger.error(f"GitHub issue plugin unavailable for repo {repo}")
+        body, resolved_repo, resolved_task_file = _load_issue_body_from_project_repo(issue_number)
+        if not body:
+            logger.error(
+                f"Failed to resolve issue #{issue_number} from configured project repositories"
+            )
             return None, None
-
-        data = plugin.get_issue(str(issue_number), ["body"])
-        if not data:
-            logger.error(f"Failed to get issue #{issue_number} body")
-            return None, None
-
-        body = data.get("body", "")
     except Exception as e:
         logger.error(f"Failed to get issue #{issue_number} body: {e}")
         return None, None
@@ -470,6 +579,11 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
         return None, None
 
     task_file = task_file_match.group(1)
+    if resolved_task_file and resolved_task_file != task_file:
+        logger.warning(
+            f"Issue #{issue_number} task file mismatch between resolution and body parse: "
+            f"{resolved_task_file} vs {task_file}"
+        )
     if not os.path.exists(task_file):
         logger.warning(f"Task file not found: {task_file}")
         return None, None
@@ -490,6 +604,14 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
 
     if not project_root or not config.get("agents_dir"):
         logger.warning(f"No project config for task file: {task_file}")
+        return None, None
+
+    expected_repos = _project_repos(project_root, config)
+    if resolved_repo and expected_repos and resolved_repo not in expected_repos:
+        logger.error(
+            f"Project boundary violation for issue #{issue_number}: "
+            f"resolved repo {resolved_repo}, project repos {expected_repos}"
+        )
         return None, None
 
     # Read task content

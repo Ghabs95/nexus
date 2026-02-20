@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 # Nexus Core framework imports — orchestration handled by ProcessOrchestrator
 
 # Import centralized configuration
 from config import (
-    BASE_DIR, get_github_repo,
+    BASE_DIR, get_github_repo, get_github_repos, get_default_project, get_project_platform,
     SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
     PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
     NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir,
@@ -28,7 +29,7 @@ from nexus_core_helpers import get_git_platform, get_workflow_definition_path, c
 from nexus_agent_runtime import NexusAgentRuntime
 from nexus.core.process_orchestrator import ProcessOrchestrator
 from plugin_runtime import (
-    get_github_workflow_policy_plugin,
+    get_workflow_monitor_policy_plugin,
     get_profiled_plugin,
     get_runtime_ops_plugin,
     get_workflow_policy_plugin,
@@ -59,7 +60,10 @@ def get_issue_repo(project: str = "nexus") -> str:
     Note: This should be extended to support per-project repos when multi-project
           issue tracking is implemented.
     """
-    return get_github_repo("nexus")
+    try:
+        return get_github_repo(project)
+    except Exception:
+        return get_github_repo(get_default_project())
 
 # Initialize orchestrator (CLI-only)
 orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
@@ -75,7 +79,6 @@ _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
     "issue_to_workflow_map_setter": StateManager.map_issue_to_workflow,
     "workflow_definition_path_resolver": get_workflow_definition_path,
-    "github_repo": get_github_repo("nexus"),
 }
 
 
@@ -265,8 +268,39 @@ def slugify(text):
 def _iter_project_configs():
     """Yield (project_name, config) pairs for dict-based project configs."""
     for project_name, cfg in PROJECT_CONFIG.items():
-        if isinstance(cfg, dict) and "github_repo" in cfg:
+        if not isinstance(cfg, dict):
+            continue
+        if _project_repos_from_config(project_name, cfg):
             yield project_name, cfg
+
+
+def _project_repos_from_config(project_name: str, cfg: dict) -> list[str]:
+    """Return configured repo list for project config dict."""
+    repos: list[str] = []
+
+    repo = None
+    if isinstance(cfg, dict):
+        repo = cfg.get("git_repo")
+    if isinstance(repo, str) and repo.strip():
+        repos.append(repo.strip())
+
+    repo_list = None
+    if isinstance(cfg, dict):
+        repo_list = cfg.get("git_repos")
+    if isinstance(repo_list, list):
+        for repo_name in repo_list:
+            if isinstance(repo_name, str):
+                value = repo_name.strip()
+                if value and value not in repos:
+                    repos.append(value)
+
+    if repos:
+        return repos
+
+    try:
+        return get_github_repos(project_name)
+    except Exception:
+        return []
 
 
 def _resolve_project_from_path(summary_path: str) -> str:
@@ -285,38 +319,146 @@ def _resolve_project_from_path(summary_path: str) -> str:
     return ""
 
 
-def _resolve_repo_for_issue(issue_num: str, default_project: str = "nexus") -> str:
-    """Resolve repo for issue by reading task file location from issue body.
+def _extract_repo_from_issue_url(issue_url: str) -> str:
+    """Extract ``namespace/repo`` from GitHub or GitLab issue URL."""
+    if not issue_url:
+        return ""
 
-    Delegates to nexus-core's GitHubPlatform.get_issue() to fetch the body.
-    """
-    default_repo = get_github_repo(default_project)
-    project_workspaces = {}
-    project_repos = {}
+    try:
+        parsed = urlparse(issue_url.strip())
+        parts = [segment for segment in parsed.path.strip("/").split("/") if segment]
+        # GitHub: /owner/repo/issues/<num>
+        if len(parts) >= 4 and parts[2].lower() == "issues":
+            return f"{parts[0]}/{parts[1]}"
+        # GitLab: /group/subgroup/repo/-/issues/<num>
+        if "-" in parts:
+            dash_idx = parts.index("-")
+            if dash_idx >= 1 and len(parts) > dash_idx + 2 and parts[dash_idx + 1] == "issues":
+                return "/".join(parts[:dash_idx])
+    except Exception:
+        return ""
+
+    return ""
+
+
+def _resolve_project_for_repo(repo_name: str) -> Optional[str]:
+    """Resolve configured project key for a repository full name."""
     for key, cfg in _iter_project_configs():
-        workspace = cfg.get("workspace")
-        if not workspace:
+        if repo_name in _project_repos_from_config(key, cfg):
+            return key
+    return None
+
+
+def _reroute_webhook_task_to_project(filepath: str, target_project: str) -> Optional[str]:
+    """Move a webhook task file to the target project's inbox directory."""
+    project_cfg = PROJECT_CONFIG.get(target_project)
+    if not isinstance(project_cfg, dict):
+        return None
+
+    workspace_rel = project_cfg.get("workspace")
+    if not workspace_rel:
+        return None
+
+    workspace_abs = os.path.join(BASE_DIR, workspace_rel)
+    inbox_dir = get_inbox_dir(workspace_abs, target_project)
+    os.makedirs(inbox_dir, exist_ok=True)
+
+    target_path = os.path.join(inbox_dir, os.path.basename(filepath))
+    if os.path.abspath(target_path) == os.path.abspath(filepath):
+        return target_path
+
+    if os.path.exists(target_path):
+        stem, ext = os.path.splitext(os.path.basename(filepath))
+        target_path = os.path.join(inbox_dir, f"{stem}_{int(time.time())}{ext}")
+
+    shutil.move(filepath, target_path)
+    return target_path
+
+
+def _resolve_repo_for_issue(issue_num: str, default_project: Optional[str] = None) -> str:
+    """Resolve the repository that owns an issue across all configured project repos."""
+    default_repo = (
+        get_github_repo(default_project)
+        if default_project
+        else get_github_repo(get_default_project())
+    )
+
+    repo_candidates: list[str] = []
+    if default_project and default_project in PROJECT_CONFIG:
+        repo_candidates.extend(
+            _project_repos_from_config(default_project, PROJECT_CONFIG[default_project])
+        )
+    if default_repo and default_repo not in repo_candidates:
+        repo_candidates.append(default_repo)
+
+    for project_key, cfg in _iter_project_configs():
+        for repo_name in _project_repos_from_config(project_key, cfg):
+            if repo_name not in repo_candidates:
+                repo_candidates.append(repo_name)
+
+    for repo_name in repo_candidates:
+        matched_project = None
+        for project_key, cfg in _iter_project_configs():
+            if repo_name in _project_repos_from_config(project_key, cfg):
+                matched_project = project_key
+                break
+        if not matched_project:
+            matched_project = default_project or get_default_project()
+
+        try:
+            issue = asyncio.run(
+                get_git_platform(repo_name, project_name=matched_project).get_issue(str(issue_num))
+            )
+        except Exception:
             continue
-        project_workspaces[key] = os.path.join(BASE_DIR, workspace)
-        project_repos[key] = get_github_repo(key)
+        if not issue:
+            continue
 
-    policy = get_github_workflow_policy_plugin(
-        get_issue=lambda **kwargs: asyncio.run(
-            get_git_platform(kwargs["repo"]).get_issue(str(kwargs["issue_number"]))
-        ),
-        cache_key=None,
+        issue_url = getattr(issue, "url", "") or ""
+        url_repo = _extract_repo_from_issue_url(issue_url)
+        if url_repo:
+            return url_repo
+
+        body = getattr(issue, "body", "") or ""
+        task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
+        if task_file_match:
+            task_file = task_file_match.group(1)
+            for project_key, cfg in _iter_project_configs():
+                workspace = cfg.get("workspace")
+                if not workspace:
+                    continue
+                workspace_abs = os.path.join(BASE_DIR, workspace)
+                if task_file.startswith(workspace_abs):
+                    project_repos = _project_repos_from_config(project_key, cfg)
+                    if repo_name in project_repos:
+                        return repo_name
+
+        return repo_name
+
+    return default_repo
+
+
+def _resolve_repo_strict(project_name: str, issue_num: str) -> str:
+    """Resolve repo with boundary checks between project and issue context."""
+    project_repos: list[str] = []
+    if project_name and project_name in PROJECT_CONFIG:
+        project_repos = _project_repos_from_config(project_name, PROJECT_CONFIG[project_name])
+
+    issue_repo = _resolve_repo_for_issue(
+        issue_num,
+        default_project=project_name or get_default_project(),
     )
+    if project_repos and issue_repo and issue_repo not in project_repos:
+        message = (
+            f"🚫 Project boundary mismatch for issue #{issue_num}: "
+            f"project '{project_name}' repos {project_repos}, issue context -> {issue_repo}. "
+            "Workflow finalization blocked."
+        )
+        logger.error(message)
+        send_telegram_alert(message)
+        raise ValueError(message)
 
-    resolved_repo = policy.resolve_repo_for_issue(
-        issue_number=str(issue_num),
-        default_repo=default_repo,
-        project_workspaces=project_workspaces,
-        project_repos=project_repos,
-    )
-
-    if resolved_repo != default_repo:
-        logger.debug(f"Issue #{issue_num} resolved to repo '{resolved_repo}'")
-    return resolved_repo
+    return issue_repo or (project_repos[0] if project_repos else get_github_repo(get_default_project()))
 
 
 def _normalize_agent_reference(agent_ref: str) -> str:
@@ -344,15 +486,15 @@ def _resolve_git_dir(project_name: str) -> Optional[str]:
     """
     proj_cfg = PROJECT_CONFIG.get(project_name, {})
     workspace = proj_cfg.get("workspace", "")
-    github_repo = proj_cfg.get("github_repo", "")
+    configured_repo = proj_cfg.get("git_repo", "")
     if not workspace:
         return None
     workspace_abs = os.path.join(BASE_DIR, workspace)
 
     if os.path.isdir(os.path.join(workspace_abs, ".git")):
         return workspace_abs
-    if github_repo and "/" in github_repo:
-        repo_name = github_repo.split("/")[-1]
+    if configured_repo and "/" in configured_repo:
+        repo_name = configured_repo.split("/")[-1]
         candidate = os.path.join(workspace_abs, repo_name)
         if os.path.isdir(os.path.join(candidate, ".git")):
             return candidate
@@ -366,19 +508,20 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
     Delegates PR creation and issue closing to nexus-core GitHubPlatform.
     """
     def _create_pr_from_changes(**kwargs):
-        platform = get_git_platform(kwargs["repo"])
+        platform = get_git_platform(kwargs["repo"], project_name=project_name)
         pr_result = asyncio.run(
             platform.create_pr_from_changes(
                 repo_dir=kwargs["repo_dir"],
                 issue_number=kwargs["issue_number"],
                 title=kwargs["title"],
                 body=kwargs["body"],
+                issue_repo=kwargs.get("issue_repo"),
             )
         )
         return pr_result.url if pr_result else None
 
     def _close_issue(**kwargs):
-        platform = get_git_platform(kwargs["repo"])
+        platform = get_git_platform(kwargs["repo"], project_name=project_name)
         return bool(asyncio.run(platform.close_issue(kwargs["issue_number"], comment=kwargs["comment"])))
 
     workflow_policy = get_workflow_policy_plugin(
@@ -494,9 +637,7 @@ def _get_process_orchestrator() -> ProcessOrchestrator:
     runtime = NexusAgentRuntime(
         finalize_fn=_finalize_workflow,
         resolve_project=_resolve_project_from_path,
-        resolve_repo=lambda proj, issue: (
-            get_github_repo(proj) if proj else _resolve_repo_for_issue(issue)
-        ),
+        resolve_repo=lambda proj, issue: _resolve_repo_strict(proj, issue),
     )
     _process_orchestrator = ProcessOrchestrator(
         runtime=runtime,
@@ -520,9 +661,7 @@ def _post_completion_comments_from_logs() -> None:
         BASE_DIR,
         dedup,
         resolve_project=_resolve_project_from_path,
-        resolve_repo=lambda proj, issue: (
-            get_github_repo(proj) if proj else _resolve_repo_for_issue(issue)
-        ),
+        resolve_repo=lambda proj, issue: _resolve_repo_strict(proj, issue),
         build_transition_message=lambda **kw: wfp.build_transition_message(**kw),
         build_autochain_failed_message=lambda **kw: wfp.build_autochain_failed_message(**kw),
     )
@@ -607,15 +746,23 @@ def check_agent_comments():
         # Query issues from all project repos
         all_issue_nums = []
         for project_name, _ in _iter_project_configs():
+            project_platform = (get_project_platform(project_name) or "github").lower().strip()
+            if project_platform != "github":
+                logger.debug(
+                    f"Skipping GitHub issue polling for non-GitHub project "
+                    f"{project_name} (platform={project_platform})"
+                )
+                continue
+
             repo = get_github_repo(project_name)
             list_scope = f"agent-comments:list-issues:{project_name}"
             try:
-                issue_plugin = _get_github_issue_plugin(repo, max_attempts=3, timeout=10)
-                monitor_policy = get_github_workflow_policy_plugin(
-                    list_issues=lambda **kwargs: issue_plugin.list_issues(
-                        state=kwargs["state"],
-                        limit=kwargs["limit"],
-                        fields=kwargs["fields"],
+                monitor_policy = get_workflow_monitor_policy_plugin(
+                    list_open_issues=lambda **kwargs: asyncio.run(
+                        get_git_platform(kwargs["repo"], project_name=project_name).list_open_issues(
+                            limit=kwargs["limit"],
+                            labels=sorted(kwargs["workflow_labels"]),
+                        )
                     ),
                     cache_key=None,
                 )
@@ -633,7 +780,7 @@ def check_agent_comments():
                     all_issue_nums.append((issue_number, project_name, repo))
                 _clear_polling_failures(list_scope)
             except Exception as e:
-                logger.warning(f"GitHub issue list failed for project {project_name}: {e}")
+                logger.warning(f"Issue list failed for project {project_name}: {e}")
                 _record_polling_failure(list_scope, e)
                 continue
         
@@ -647,9 +794,9 @@ def check_agent_comments():
             # Get issue comments via framework
             comments_scope = f"agent-comments:get-comments:{project_name}"
             try:
-                monitor_policy = get_github_workflow_policy_plugin(
+                monitor_policy = get_workflow_monitor_policy_plugin(
                     get_comments=lambda **kwargs: asyncio.run(
-                        get_git_platform(kwargs["repo"]).get_comments(str(kwargs["issue_number"]))
+                        get_git_platform(kwargs["repo"], project_name=project_name).get_comments(str(kwargs["issue_number"]))
                     ),
                     cache_key=None,
                 )
@@ -722,9 +869,9 @@ def check_and_notify_pr(issue_num, project):
     """
     try:
         repo = get_github_repo(project)
-        monitor_policy = get_github_workflow_policy_plugin(
+        monitor_policy = get_workflow_monitor_policy_plugin(
             search_linked_prs=lambda **kwargs: asyncio.run(
-                get_git_platform(kwargs["repo"]).search_linked_prs(str(kwargs["issue_number"]))
+                get_git_platform(kwargs["repo"], project_name=project).search_linked_prs(str(kwargs["issue_number"]))
             ),
             cache_key=None,
         )
@@ -939,6 +1086,46 @@ def process_file(filepath):
             if not issue_url or not issue_number:
                 logger.error(f"⚠️ Webhook task missing issue URL or number, skipping: {filepath}")
                 return
+
+            issue_repo = _extract_repo_from_issue_url(issue_url)
+            if not issue_repo:
+                message = (
+                    f"🚫 Unable to parse issue repository for webhook task issue #{issue_number}. "
+                    "Blocking processing to avoid cross-project execution."
+                )
+                logger.error(message)
+                send_telegram_alert(message)
+                return
+
+            configured_repos = []
+            try:
+                configured_repos = get_github_repos(project_name)
+            except Exception:
+                configured_repos = []
+
+            if configured_repos and issue_repo not in configured_repos:
+                reroute_project = _resolve_project_for_repo(issue_repo)
+                if reroute_project and reroute_project != project_name:
+                    rerouted_path = _reroute_webhook_task_to_project(filepath, reroute_project)
+                    message = (
+                        f"⚠️ Re-routed webhook task for issue #{issue_number}: "
+                        f"repo {issue_repo} does not match project {project_name} ({configured_repos}); "
+                        f"moved to project '{reroute_project}'."
+                    )
+                    logger.warning(message)
+                    send_telegram_alert(message)
+                    if rerouted_path:
+                        logger.info(f"Moved webhook task to: {rerouted_path}")
+                    return
+
+                message = (
+                    f"🚫 Project boundary violation for issue #{issue_number}: "
+                    f"task under project '{project_name}' ({configured_repos}) "
+                    f"but issue URL points to '{issue_repo}'. Processing blocked."
+                )
+                logger.error(message)
+                send_telegram_alert(message)
+                return
             
             logger.info(f"📌 Webhook task for existing issue #{issue_number}, launching agent directly")
             
@@ -976,7 +1163,21 @@ def process_file(filepath):
                         return
                 
                 # Resolve tier (halt if unknown — prevents wrong workflow execution)
-                repo_for_tier = config.get("github_repo", get_github_repo("nexus"))
+                try:
+                    repo_for_tier = get_github_repo(project_name)
+                except Exception:
+                    repo_for_tier = ""
+
+                if not repo_for_tier:
+                    logger.error(
+                        f"Missing git_repo for project '{project_name}', cannot resolve tier "
+                        f"for issue #{issue_number}."
+                    )
+                    send_telegram_alert(
+                        f"Missing git_repo for project '{project_name}' "
+                        f"(issue #{issue_number})."
+                    )
+                    return
                 tier_name = _resolve_tier_for_issue(
                     issue_number, project_name, repo_for_tier, context="webhook launch"
                 )
@@ -1072,7 +1273,7 @@ def process_file(filepath):
             workflow_label=workflow_label,
             task_type=task_type,
             tier_name=tier_name,
-            github_repo=config["github_repo"]
+            github_repo=get_github_repo(project_name)
         )
 
         if issue_url:
@@ -1092,7 +1293,7 @@ def process_file(filepath):
                     subprocess.run(
                         ["gh", "issue", "edit", issue_num,
                          "--body", corrected_body,
-                         "--repo", config["github_repo"]],
+                         "--repo", get_github_repo(project_name)],
                         capture_output=True, timeout=15
                     )
                     new_filepath = renamed_path
@@ -1109,6 +1310,7 @@ def process_file(filepath):
             # Create nexus-core workflow
             workflow_plugin = get_workflow_state_plugin(
                 **_WORKFLOW_STATE_PLUGIN_KWARGS,
+                github_repo=get_github_repo(project_name),
                 cache_key="workflow:state-engine",
             )
             workflow_id = asyncio.run(

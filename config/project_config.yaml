@@ -89,22 +89,27 @@ ai_tool_preferences:
 case_italia:
   agents_dir: ghabs/agents/casit-agents
   workspace: case_italia
-  github_repo: Ghabs95/agents
+  git_repo: Ghabs95/agents
 
 wallible:
   agents_dir: ghabs/agents/wlbl-agents
   workspace: wallible
-  github_repo: Ghabs95/agents
+  git_platform: gitlab
+  gitlab_base_url: https://gitlab.com
+  git_repo: wallible/backend
+  git_repos:
+    - wallible/backend
+    - wallible/mobile-app
 
 biome:
   agents_dir: ghabs/agents/bm-agents
   workspace: biome
-  github_repo: Ghabs95/agents
+  git_repo: Ghabs95/agents
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
   workspace: ghabs
-  github_repo: Ghabs95/nexus-core
+  git_repo: Ghabs95/nexus-core
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
   workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
   # AI tool preferences for enterprise workflow agent types
