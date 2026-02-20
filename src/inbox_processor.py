@@ -219,10 +219,11 @@ def save_completion_comments(comments):
 failed_task_lookups = load_failed_lookups()
 completion_comments = load_completion_comments()
 
-# Logging
+# Logging — force=True overrides the root handler set by config.py at import time
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO,
+    force=True,
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler(INBOX_PROCESSOR_LOG_FILE)

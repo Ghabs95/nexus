@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
+    force=True,
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler(TELEGRAM_BOT_LOG_FILE)
@@ -1480,7 +1481,8 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             # Number from filename but no matching GitHub issue → orphan
                             issue_state_cache[cache_key] = "orphan"
                         else:
-                            issue_state_cache[cache_key] = details.get("state", "unknown")
+                            # Normalize to lowercase — gh CLI returns "OPEN"/"CLOSED"
+                            issue_state_cache[cache_key] = details.get("state", "unknown").lower()
 
                     issue_state = issue_state_cache[cache_key]
 
