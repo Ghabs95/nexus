@@ -474,6 +474,8 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
     # Get project config
     project_root = None
     for key, cfg in PROJECT_CONFIG.items():
+        if not isinstance(cfg, dict):
+            continue
         workspace = cfg.get("workspace")
         if workspace:
             workspace_abs = os.path.join(BASE_DIR, workspace)
