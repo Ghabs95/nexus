@@ -328,13 +328,13 @@ def handle_issue_comment(payload, event):
         logger.info(f"🔗 Chaining to @{next_agent} for issue #{issue_number}")
         
         try:
-            success = launch_next_agent(
+            pid, _ = launch_next_agent(
                 issue_number=issue_number,
                 next_agent=next_agent,
                 trigger_source="github_webhook"
             )
-            
-            if success:
+
+            if pid:
                 processed_events.add(event_key)
                 return {
                     "status": "agent_launched",
@@ -487,11 +487,11 @@ def completion():
     )
 
     try:
-        launched = launch_next_agent(
+        pid, _ = launch_next_agent(
             issue_number, next_agent, trigger_source="push_completion"
         )
         return jsonify({
-            "status": "queued" if launched else "skipped",
+            "status": "queued" if pid else "skipped",
             "issue_number": issue_number,
             "next_agent": next_agent,
         }), 200

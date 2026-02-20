@@ -1,277 +1,162 @@
-"""Tests for dead-agent detection in check_stuck_agents / _check_dead_agents."""
+"""Tests for dead/stuck-agent detection after Phase-3 refactor.
+
+The dead- and stuck-agent detection logic has moved to
+``nexus.core.ProcessOrchestrator`` (nexus-core repo).  The full behavioural
+test suite lives in nexus-core's ``tests/test_process_orchestrator.py``.
+
+This file verifies the nexus-side integration:
+  - ``NexusAgentRuntime`` correctly delegates to ``AgentMonitor``,
+    ``StateManager``, and ``notifications``
+  - ``check_stuck_agents()`` in inbox_processor delegates to the orchestrator
+    and records polling failures on exception
+"""
 
 import time
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
-class TestIsPidAlive:
-    """Tests for _is_pid_alive helper."""
-
-    def test_pid_alive(self):
-        from inbox_processor import _is_pid_alive
-
-        with patch("inbox_processor.os.kill") as mock_kill:
-            mock_kill.return_value = None  # no exception => alive
-            assert _is_pid_alive(1234) is True
-            mock_kill.assert_called_once_with(1234, 0)
-
-    def test_pid_dead(self):
-        from inbox_processor import _is_pid_alive
-
-        with patch("inbox_processor.os.kill", side_effect=ProcessLookupError):
-            assert _is_pid_alive(9999) is False
-
-    def test_pid_permission_error(self):
-        """PermissionError means process exists but we can't signal it."""
-        from inbox_processor import _is_pid_alive
-
-        with patch("inbox_processor.os.kill", side_effect=PermissionError):
-            assert _is_pid_alive(1) is True
+# ---------------------------------------------------------------------------
+# NexusAgentRuntime hook tests
+# ---------------------------------------------------------------------------
 
 
-class TestCheckDeadAgents:
-    """Tests for _check_dead_agents detecting crashed agent processes."""
+class TestNexusAgentRuntimeShouldRetry:
+    def test_delegates_to_agent_monitor(self):
+        from nexus_agent_runtime import NexusAgentRuntime
 
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    @patch("inbox_processor.get_github_repo", return_value="test/repo")
-    @patch("inbox_processor._resolve_project_for_issue", return_value="nexus")
-    def test_dead_agent_sends_alert(
-        self, mock_resolve, mock_repo, mock_load, mock_alive, mock_alert, mock_save
-    ):
-        """Dead PID past grace period triggers a Telegram alert."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        _dead_agent_alerted.clear()
-        AgentMonitor_retry = MagicMock()
-
-        mock_load.return_value = {
-            "41": {
-                "timestamp": time.time() - 300,  # 5 min ago
-                "pid": 99999,
-                "tier": "shortened",
-                "agent_type": "developer",
-            }
-        }
-
-        with patch("inbox_processor.AgentMonitor") as MockMonitor:
+        with patch("agent_monitor.AgentMonitor") as MockMonitor:
             MockMonitor.should_retry.return_value = True
-            _check_dead_agents()
+            result = runtime.should_retry("42", "developer")
 
-        mock_alert.assert_called_once()
-        alert_text = mock_alert.call_args[0][0]
-        assert "Agent Crashed" in alert_text
-        assert "#41" in alert_text
-        assert "developer" in alert_text
-        mock_save.assert_called_once()
+        MockMonitor.should_retry.assert_called_once_with("42", "developer")
+        assert result is True
 
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=True)
-    @patch("inbox_processor.load_launched_agents")
-    def test_alive_agent_no_alert(self, mock_load, mock_alive, mock_alert, mock_save):
-        """Still-running agents should not trigger dead-agent alerts."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
+    def test_max_retries_returns_false(self):
+        from nexus_agent_runtime import NexusAgentRuntime
 
-        _dead_agent_alerted.clear()
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        mock_load.return_value = {
-            "41": {
-                "timestamp": time.time() - 300,
-                "pid": 99999,
-                "tier": "shortened",
-                "agent_type": "developer",
-            }
-        }
-
-        _check_dead_agents()
-        mock_alert.assert_not_called()
-        mock_save.assert_not_called()
-
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    def test_grace_period_respected(self, mock_load, mock_alive, mock_alert, mock_save):
-        """Agents within grace period should not trigger alerts."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
-
-        _dead_agent_alerted.clear()
-
-        mock_load.return_value = {
-            "41": {
-                "timestamp": time.time() - 10,  # Only 10 seconds ago
-                "pid": 99999,
-                "tier": "shortened",
-                "agent_type": "developer",
-            }
-        }
-
-        _check_dead_agents()
-        mock_alert.assert_not_called()
-        mock_save.assert_not_called()
-
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    @patch("inbox_processor.get_github_repo", return_value="test/repo")
-    @patch("inbox_processor._resolve_project_for_issue", return_value="nexus")
-    def test_no_duplicate_alerts(
-        self, mock_resolve, mock_repo, mock_load, mock_alive, mock_alert, mock_save
-    ):
-        """Same dead agent should only be alerted once."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
-
-        _dead_agent_alerted.clear()
-
-        agent_data = {
-            "41": {
-                "timestamp": time.time() - 300,
-                "pid": 99999,
-                "tier": "shortened",
-                "agent_type": "developer",
-            }
-        }
-
-        with patch("inbox_processor.AgentMonitor") as MockMonitor:
+        with patch("agent_monitor.AgentMonitor") as MockMonitor:
             MockMonitor.should_retry.return_value = False
-            MockMonitor.mark_failed = MagicMock()
+            result = runtime.should_retry("42", "developer")
 
-            # First call — should alert
-            mock_load.return_value = dict(agent_data)
-            _check_dead_agents()
-            assert mock_alert.call_count == 1
-
-            # Second call — same pid, should NOT alert again
-            mock_load.return_value = dict(agent_data)
-            mock_save.reset_mock()
-            _check_dead_agents()
-            assert mock_alert.call_count == 1  # still 1
-
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    @patch("inbox_processor.get_github_repo", return_value="test/repo")
-    @patch("inbox_processor._resolve_project_for_issue", return_value="nexus")
-    def test_max_retries_shows_manual_intervention(
-        self, mock_resolve, mock_repo, mock_load, mock_alive, mock_alert, mock_save
-    ):
-        """When retries exhausted, alert should say manual intervention needed."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
-
-        _dead_agent_alerted.clear()
-
-        mock_load.return_value = {
-            "42": {
-                "timestamp": time.time() - 300,
-                "pid": 88888,
-                "tier": "full",
-                "agent_type": "triage",
-            }
-        }
-
-        with patch("inbox_processor.AgentMonitor") as MockMonitor:
-            MockMonitor.should_retry.return_value = False
-            MockMonitor.mark_failed = MagicMock()
-
-            _check_dead_agents()
-
-        alert_text = mock_alert.call_args[0][0]
-        assert "Manual Intervention" in alert_text
-        assert "/reprocess" in alert_text
-
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert", return_value=False)
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    @patch("inbox_processor.get_github_repo", return_value="test/repo")
-    @patch("inbox_processor._resolve_project_for_issue", return_value="nexus")
-    def test_alert_send_failure_retries_next_poll(
-        self, mock_resolve, mock_repo, mock_load, mock_alive, mock_alert, mock_save
-    ):
-        """If Telegram send fails, keep tracker entry and retry alert next poll."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
-
-        _dead_agent_alerted.clear()
-
-        mock_load.return_value = {
-            "41": {
-                "timestamp": time.time() - 300,
-                "pid": 55555,
-                "tier": "shortened",
-                "agent_type": "reviewer",
-            }
-        }
-
-        with patch("inbox_processor.AgentMonitor") as MockMonitor:
-            MockMonitor.should_retry.return_value = True
-
-            _check_dead_agents()
-            _check_dead_agents()
-
-        assert mock_alert.call_count == 2
-        mock_save.assert_not_called()
-        assert "41:55555" not in _dead_agent_alerted
+        assert result is False
 
 
-class TestDeadAgentSkipsStoppedWorkflows:
-    """Dead agent detection should NOT alert for stopped/paused workflows."""
+class TestNexusAgentRuntimeGetWorkflowState:
+    def test_returns_stopped_string(self):
+        from nexus_agent_runtime import NexusAgentRuntime
 
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    def test_stopped_workflow_skipped(self, mock_load, mock_alive, mock_alert, mock_save):
-        """Dead agent on a STOPPED workflow should not trigger alert."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
-        from models import WorkflowState
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        _dead_agent_alerted.clear()
-
-        mock_load.return_value = {
-            "41": {
-                "timestamp": time.time() - 300,
-                "pid": 77777,
-                "tier": "fast-track",
-                "agent_type": "triage",
-            }
-        }
-
-        with patch("inbox_processor.StateManager") as MockSM:
+        with patch("state_manager.StateManager") as MockSM:
+            from models import WorkflowState
             MockSM.get_workflow_state.return_value = WorkflowState.STOPPED
-            _check_dead_agents()
+            result = runtime.get_workflow_state("10")
 
-        mock_alert.assert_not_called()
-        mock_save.assert_not_called()
+        assert result == "STOPPED"
 
-    @patch("inbox_processor.save_launched_agents")
-    @patch("inbox_processor.send_telegram_alert")
-    @patch("inbox_processor._is_pid_alive", return_value=False)
-    @patch("inbox_processor.load_launched_agents")
-    def test_paused_workflow_skipped(self, mock_load, mock_alive, mock_alert, mock_save):
-        """Dead agent on a PAUSED workflow should not trigger alert."""
-        from inbox_processor import _check_dead_agents, _dead_agent_alerted
-        from models import WorkflowState
+    def test_returns_paused_string(self):
+        from nexus_agent_runtime import NexusAgentRuntime
 
-        _dead_agent_alerted.clear()
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        mock_load.return_value = {
-            "42": {
-                "timestamp": time.time() - 300,
-                "pid": 66666,
-                "tier": "shortened",
-                "agent_type": "developer",
-            }
-        }
-
-        with patch("inbox_processor.StateManager") as MockSM:
+        with patch("state_manager.StateManager") as MockSM:
+            from models import WorkflowState
             MockSM.get_workflow_state.return_value = WorkflowState.PAUSED
-            _check_dead_agents()
+            result = runtime.get_workflow_state("11")
 
-        mock_alert.assert_not_called()
-        mock_save.assert_not_called()
+        assert result == "PAUSED"
+
+    def test_returns_none_for_active(self):
+        from nexus_agent_runtime import NexusAgentRuntime
+
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
+
+        with patch("state_manager.StateManager") as MockSM:
+            from models import WorkflowState
+            MockSM.get_workflow_state.return_value = WorkflowState.ACTIVE
+            result = runtime.get_workflow_state("12")
+
+        assert result is None
+
+
+class TestNexusAgentRuntimeAuditLog:
+    def test_delegates_to_state_manager(self):
+        from nexus_agent_runtime import NexusAgentRuntime
+
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
+
+        with patch("state_manager.StateManager") as MockSM:
+            runtime.audit_log("55", "AGENT_DEAD", "PID 1234 exited")
+
+        MockSM.audit_log.assert_called_once_with(55, "AGENT_DEAD", "PID 1234 exited")
+
+    def test_empty_details_passes_none(self):
+        from nexus_agent_runtime import NexusAgentRuntime
+
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
+
+        with patch("state_manager.StateManager") as MockSM:
+            runtime.audit_log("55", "AGENT_DEAD")
+
+        MockSM.audit_log.assert_called_once_with(55, "AGENT_DEAD", None)
+
+
+class TestNexusAgentRuntimeSendAlert:
+    def test_delegates_to_telegram(self):
+        from nexus_agent_runtime import NexusAgentRuntime
+
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
+
+        with patch("notifications.send_telegram_alert", return_value=True) as mock_tg:
+            result = runtime.send_alert("hello")
+
+        mock_tg.assert_called_once_with("hello")
+        assert result is True
+
+    def test_returns_false_on_failure(self):
+        from nexus_agent_runtime import NexusAgentRuntime
+
+        runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
+
+        with patch("notifications.send_telegram_alert", return_value=False):
+            result = runtime.send_alert("hello")
+
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# check_stuck_agents delegation smoke test
+# ---------------------------------------------------------------------------
+
+
+class TestCheckStuckAgentsDelegates:
+    def test_delegates_to_process_orchestrator(self):
+        """check_stuck_agents() must delegate to ProcessOrchestrator."""
+        from inbox_processor import check_stuck_agents
+
+        with patch("inbox_processor._get_process_orchestrator") as mock_factory:
+            mock_orc = MagicMock()
+            mock_factory.return_value = mock_orc
+            check_stuck_agents()
+
+        mock_orc.check_stuck_agents.assert_called_once()
+
+    def test_records_polling_failure_on_exception(self):
+        """An exception in check_stuck_agents must record a polling failure."""
+        from inbox_processor import check_stuck_agents, polling_failure_counts
+
+        with patch("inbox_processor._get_process_orchestrator") as mock_factory:
+            mock_orc = MagicMock()
+            mock_orc.check_stuck_agents.side_effect = RuntimeError("boom")
+            mock_factory.return_value = mock_orc
+
+            check_stuck_agents()
+
+        assert polling_failure_counts.get("stuck-agents:loop", 0) >= 1
+
+

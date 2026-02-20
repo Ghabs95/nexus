@@ -424,16 +424,17 @@ def invoke_copilot_agent(
 def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclude_tools=None):
     """
     Launch the next agent in the workflow chain.
-    
+
     This is the main entry point used by both inbox_processor and webhook_server.
-    
+
     Args:
         issue_number: GitHub issue number (string or int)
         next_agent: Name of the agent to launch (e.g., "Atlas", "Architect")
         trigger_source: Where the trigger came from ("github_webhook", "log_file", "github_comment")
-        
+        exclude_tools: List of tool names to exclude from this launch attempt.
+
     Returns:
-        True if agent was launched successfully, False otherwise
+        ``(pid, tool_name)`` on success, ``(None, None)`` on failure.
     """
     issue_number = str(issue_number)
     logger.info(f"🔗 Launching next agent @{next_agent} for issue #{issue_number} (trigger: {trigger_source})")
@@ -441,39 +442,40 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
     # Check for duplicate launches
     if is_recent_launch(issue_number):
         logger.info(f"⏭️ Skipping duplicate launch for issue #{issue_number}")
-        return False
-    
+        return None, None
+
     # Get issue details
     try:
         repo = get_github_repo("nexus")
         plugin = _get_issue_plugin(repo)
         if not plugin:
             logger.error(f"GitHub issue plugin unavailable for repo {repo}")
-            return False
+            return None, None
 
         data = plugin.get_issue(str(issue_number), ["body"])
         if not data:
             logger.error(f"Failed to get issue #{issue_number} body")
-            return False
+            return None, None
 
         body = data.get("body", "")
     except Exception as e:
         logger.error(f"Failed to get issue #{issue_number} body: {e}")
-        return False
-    
+        return None, None
+
     # Find task file
     task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
     if not task_file_match:
         logger.warning(f"No task file in issue #{issue_number}")
-        return False
-    
+        return None, None
+
     task_file = task_file_match.group(1)
     if not os.path.exists(task_file):
         logger.warning(f"Task file not found: {task_file}")
-        return False
-    
+        return None, None
+
     # Get project config
     project_root = None
+    config = {}
     for key, cfg in PROJECT_CONFIG.items():
         if not isinstance(cfg, dict):
             continue
@@ -484,18 +486,18 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
                 project_root = key
                 config = cfg
                 break
-    
+
     if not project_root or not config.get("agents_dir"):
         logger.warning(f"No project config for task file: {task_file}")
-        return False
-    
+        return None, None
+
     # Read task content
     try:
         with open(task_file, "r") as f:
             task_content = f.read()
     except Exception as e:
         logger.error(f"Failed to read task file {task_file}: {e}")
-        return False
+        return None, None
     
     # Get workflow tier: launched_agents tracker → issue labels → halt if unknown
     from state_manager import StateManager
@@ -508,7 +510,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
             f"Cannot determine workflow tier for issue #{issue_number}: "
             "no tracker entry and no workflow: label."
         )
-        return False
+        return None, None
 
     # Merge caller-provided exclude_tools with any persisted ones from previous runs
     if exclude_tools is None:
@@ -549,8 +551,10 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
     )
     
     if pid:
-        logger.info(f"✅ Successfully launched @{next_agent} for issue #{issue_number} (PID: {pid}, tool: {tool_used})")
-        
+        logger.info(
+            f"✅ Successfully launched @{next_agent} for issue #{issue_number} "
+            f"(PID: {pid}, tool: {tool_used})"
+        )
         # Send notification
         try:
             project_label = project_root.replace("_", " ").title()
@@ -562,8 +566,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
             )
         except Exception as e:
             logger.warning(f"Failed to send notification: {e}")
-        
-        return True
+        return pid, tool_used
     else:
         logger.error(f"❌ Failed to launch @{next_agent} for issue #{issue_number}")
-        return False
+        return None, None

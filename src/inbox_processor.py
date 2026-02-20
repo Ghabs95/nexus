@@ -9,12 +9,7 @@ import subprocess
 import time
 from typing import Any, Optional
 
-# Nexus Core framework imports
-from nexus.core.completion import (
-    CompletionSummary,
-    scan_for_completions,
-)
-from nexus.core.models import WorkflowState as NexusCoreWorkflowState
+# Nexus Core framework imports — orchestration handled by ProcessOrchestrator
 
 # Import centralized configuration
 from config import (
@@ -27,9 +22,11 @@ from config import (
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
-from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue, clear_launch_guard, launch_next_agent
+from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
 from ai_orchestrator import get_orchestrator
 from nexus_core_helpers import get_git_platform, get_workflow_definition_path, complete_step_for_issue
+from nexus_agent_runtime import NexusAgentRuntime
+from nexus.core.process_orchestrator import ProcessOrchestrator
 from plugin_runtime import (
     get_github_workflow_policy_plugin,
     get_profiled_plugin,
@@ -481,225 +478,61 @@ def _archive_closed_task_files(issue_num: str, project_name: str = "") -> int:
     return archived_count
 
 
+# ---------------------------------------------------------------------------
+# ProcessOrchestrator singleton (Phase 3)
+# ---------------------------------------------------------------------------
+
+_process_orchestrator: Optional[ProcessOrchestrator] = None
+
+
+def _get_process_orchestrator() -> ProcessOrchestrator:
+    """Build (or return the cached) ProcessOrchestrator for this session."""
+    global _process_orchestrator
+    if _process_orchestrator is not None:
+        return _process_orchestrator
+
+    runtime = NexusAgentRuntime(
+        finalize_fn=_finalize_workflow,
+        resolve_project=_resolve_project_from_path,
+        resolve_repo=lambda proj, issue: (
+            get_github_repo(proj) if proj else _resolve_repo_for_issue(issue)
+        ),
+    )
+    _process_orchestrator = ProcessOrchestrator(
+        runtime=runtime,
+        complete_step_fn=complete_step_for_issue,
+        stuck_threshold_seconds=STUCK_AGENT_THRESHOLD,
+        nexus_dir=get_nexus_dir_name(),
+    )
+    return _process_orchestrator
+
+
 def _post_completion_comments_from_logs() -> None:
     """Detect agent completions and auto-chain to the next workflow step.
 
-    Uses nexus-core's scan_for_completions() to detect completion files.
-    Agents post their own rich GitHub comments, so this function only handles
-    orchestration: dedup, finalization, Telegram alerts, and auto-chaining.
+    Delegates to :class:`ProcessOrchestrator` from nexus-core.
     """
-    global completion_comments
-    nexus_dir_name = get_nexus_dir_name()
+    orc = _get_process_orchestrator()
+    wfp = get_workflow_policy_plugin(cache_key="workflow-policy:inbox")
 
-    # Use framework scanner to find all completion summaries
-    detected = scan_for_completions(BASE_DIR, nexus_dir=nexus_dir_name)
+    dedup = set(completion_comments.keys())
+    orc.scan_and_process_completions(
+        BASE_DIR,
+        dedup,
+        resolve_project=_resolve_project_from_path,
+        resolve_repo=lambda proj, issue: (
+            get_github_repo(proj) if proj else _resolve_repo_for_issue(issue)
+        ),
+        build_transition_message=lambda **kw: wfp.build_transition_message(**kw),
+        build_autochain_failed_message=lambda **kw: wfp.build_autochain_failed_message(**kw),
+    )
 
-    for detection in detected:
-        issue_num = detection.issue_number
-        summary = detection.summary
-
-        try:
-            # Skip if agent for this issue is still running
-            runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:inbox")
-            if runtime_ops.is_issue_process_running(issue_num):
-                continue
-
-            # Dedup using framework's dedup_key
-            comment_key = detection.dedup_key
-            if comment_key in completion_comments:
-                continue
-
-            project_name = _resolve_project_from_path(detection.file_path)
-            if project_name:
-                repo = get_github_repo(project_name)
-            else:
-                repo = _resolve_repo_for_issue(issue_num)
-
-            completed_agent = summary.agent_type
-
-            # Record completion (no GitHub comment — agents post their own)
-            completion_comments[comment_key] = time.time()
-            save_completion_comments(completion_comments)
-            logger.info(f"📋 Agent completed for issue #{issue_num} ({completed_agent})")
-
-            # --- Auto-chain: engine-driven routing (Phase 2) with manual fallback ---
-            # Try to advance the workflow via WorkflowEngine.complete_step().
-            # The engine handles router steps, conditional branches, and
-            # review/develop loops automatically. Falls back to manual routing
-            # when no engine workflow is mapped to this issue (legacy issues).
-            engine_workflow = asyncio.run(
-                complete_step_for_issue(
-                    issue_number=issue_num,
-                    completed_agent_type=completed_agent,
-                    outputs=summary.to_dict(),
-                )
-            )
-
-            tier_name = None
-            next_agent = None
-
-            if engine_workflow is not None:
-                # Engine path: routing was determined by the WorkflowEngine
-                if engine_workflow.state in (
-                    NexusCoreWorkflowState.COMPLETED,
-                    NexusCoreWorkflowState.FAILED,
-                ):
-                    reason = engine_workflow.state.value
-                    logger.info(f"✅ Workflow {reason} for issue #{issue_num} (last agent: {completed_agent})")
-                    _la = StateManager.load_launched_agents(recent_only=False)
-                    if str(issue_num) in _la:
-                        del _la[str(issue_num)]
-                        save_launched_agents(_la)
-                    _finalize_workflow(issue_num, repo, completed_agent, project_name)
-                    continue
-
-                next_agent = engine_workflow.active_agent_type
-                if not next_agent:
-                    logger.warning(
-                        f"Engine returned no active agent for issue #{issue_num}; skipping auto-chain"
-                    )
-                    continue
-                logger.info(f"🔀 Engine routed #{issue_num}: {completed_agent} → {next_agent}")
-
-            else:
-                # Fallback: manual routing (no engine workflow mapped to this issue)
-                if summary.is_workflow_done:
-                    logger.info(f"✅ Workflow complete for issue #{issue_num} (last agent: {completed_agent})")
-                    _la = StateManager.load_launched_agents(recent_only=False)
-                    if str(issue_num) in _la:
-                        del _la[str(issue_num)]
-                        save_launched_agents(_la)
-                    _finalize_workflow(issue_num, repo, completed_agent, project_name)
-                    continue
-
-                next_agent = _normalize_agent_reference(summary.next_agent)
-
-                workflow_path = get_workflow_definition_path(project_name)
-                tier_name = _resolve_tier_for_issue(
-                    issue_num, project_name, repo, context="auto-chain"
-                )
-                if not tier_name:
-                    continue
-
-                if workflow_path and os.path.exists(workflow_path):
-                    try:
-                        from nexus.core.workflow import WorkflowDefinition
-                        canonical_next = WorkflowDefinition.canonicalize_next_agent(
-                            workflow_path,
-                            completed_agent,
-                            summary.next_agent,
-                            workflow_type=tier_name,
-                        )
-                        valid_next = WorkflowDefinition.resolve_next_agents(
-                            workflow_path, completed_agent, workflow_type=tier_name
-                        )
-                        if canonical_next:
-                            if canonical_next != next_agent:
-                                logger.warning(
-                                    f"Canonicalized next_agent '{next_agent}' → '{canonical_next}' "
-                                    f"for '{completed_agent}'"
-                                )
-                            next_agent = canonical_next
-                        elif valid_next and next_agent not in valid_next:
-                            logger.error(
-                                f"Invalid next_agent '{next_agent}' for '{completed_agent}'. "
-                                f"Valid: {valid_next}. Skipping auto-chain."
-                            )
-                            send_telegram_alert(
-                                f"❌ Auto-chain skipped for issue #{issue_num}: invalid next_agent "
-                                f"`{next_agent}` after `{completed_agent}`. "
-                                f"Valid options: {', '.join(valid_next)}"
-                            )
-                            continue
-                    except Exception as e:
-                        logger.debug(f"Could not validate next_agent: {e}")
-
-                if _is_terminal_agent_reference(next_agent):
-                    logger.info(
-                        f"✅ Workflow complete for issue #{issue_num} "
-                        f"(terminal next_agent after {completed_agent})"
-                    )
-                    _finalize_workflow(issue_num, repo, completed_agent, project_name)
-                    continue
-
-            # NOTE: no is_recent_launch() check here — dedup_key above already
-            # guarantees each completion triggers auto-chain at most once.
-            if not project_name:
-                logger.warning(f"Cannot auto-chain issue #{issue_num}: could not resolve project")
-                continue
-
-            proj_cfg = PROJECT_CONFIG.get(project_name, {})
-            agents_dir = proj_cfg.get("agents_dir", "")
-            workspace = proj_cfg.get("workspace", "")
-            if not agents_dir or not workspace:
-                logger.warning(
-                    f"Cannot auto-chain issue #{issue_num}: missing agents_dir/workspace for {project_name}"
-                )
-                continue
-
-            agents_abs = os.path.join(BASE_DIR, agents_dir)
-            workspace_abs = os.path.join(BASE_DIR, workspace)
-            issue_url = f"https://github.com/{repo}/issues/{issue_num}"
-
-            workflow_policy = get_workflow_policy_plugin(cache_key="workflow-policy:inbox")
-
-            # Resolve tier lazily for engine path (not needed for routing, but
-            # required by the agent launcher)
-            if tier_name is None:
-                tier_name = _resolve_tier_for_issue(
-                    issue_num, project_name, repo, context="auto-chain"
-                )
-                if not tier_name:
-                    continue
-
-            send_telegram_alert(
-                workflow_policy.build_transition_message(
-                    issue_number=issue_num,
-                    completed_agent=completed_agent,
-                    next_agent=next_agent,
-                    repo=repo,
-                )
-            )
-
-            continuation_prompt = (
-                f"You are a {next_agent} agent. The previous step ({completed_agent}) is complete.\n\n"
-                f"Your task: Begin your step in the workflow.\n"
-                f"Read recent GitHub comments to understand what's been completed.\n"
-                f"Then perform your assigned work and post a status update."
-            )
-
-            pid, tool_used = invoke_copilot_agent(
-                agents_dir=agents_abs,
-                workspace_dir=workspace_abs,
-                issue_url=issue_url,
-                tier_name=tier_name,
-                task_content="",
-                continuation=True,
-                continuation_prompt=continuation_prompt,
-                log_subdir=project_name,
-                agent_type=next_agent,
-                project_name=project_name
-            )
-
-            if pid:
-                logger.info(
-                    f"🔗 Auto-chained {completed_agent} → {next_agent} "
-                    f"for issue #{issue_num} (PID: {pid}, tool: {tool_used})"
-                )
-            else:
-                logger.error(f"❌ Failed to auto-chain to {next_agent} for issue #{issue_num}")
-                send_telegram_alert(
-                    workflow_policy.build_autochain_failed_message(
-                        issue_number=issue_num,
-                        completed_agent=completed_agent,
-                        next_agent=next_agent,
-                        repo=repo,
-                    )
-                )
-        except json.JSONDecodeError as e:
-            logger.warning(f"Invalid completion_summary.json for issue #{detection.issue_number}: {e}")
-        except Exception as e:
-            logger.warning(f"Error processing completion summary for issue #{detection.issue_number}: {e}")
+    # Sync newly-seen dedup keys back to the persistent dict.
+    now = time.time()
+    for key in dedup:
+        if key not in completion_comments:
+            completion_comments[key] = now
+    save_completion_comments(completion_comments)
 
 
 def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "") -> str:
@@ -744,236 +577,19 @@ def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "")
 # send_telegram_alert is now imported from notifications module
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Check whether a process is still running via kill(pid, 0)."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but we can't signal it — still alive
-        return True
-    except Exception:
-        return False
-
-
 def check_stuck_agents():
     """Monitor agent processes and handle timeouts with auto-kill and retry.
 
-    Two detection strategies:
-    1. Log-file scan: find stale log files with a still-running PID → kill + retry.
-    2. Dead-process scan: iterate launched_agents.json, detect PIDs that exited
-       without posting a completion → alert via Telegram.
+    Delegates to :class:`ProcessOrchestrator` which implements both
+    strategy-1 (stale-log timeout kill) and strategy-2 (dead-process detection).
     """
     scope = "stuck-agents:loop"
     try:
-        # --- Strategy 1: stale log file detection (kills still-running agents) ---
-        nexus_dir_name = get_nexus_dir_name()
-        log_files = glob.glob(
-            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "*", "logs", "*_*.log"),
-            recursive=True
-        )
-
-        for log_file in log_files:
-            # Extract issue number from filename: <tool>_<issue>_<timestamp>.log
-            match = re.search(r"(?:copilot|gemini)_(\d+)_\d{8}_", os.path.basename(log_file))
-            if not match:
-                continue
-
-            issue_num = match.group(1)
-
-            # Get latest log file for this issue only (ignore old ones)
-            all_logs_for_issue = sorted(
-                [f for f in log_files if re.search(rf"(?:copilot|gemini)_{issue_num}_\d{{8}}_", os.path.basename(f))],
-                key=os.path.getmtime,
-                reverse=True
-            )
-            if all_logs_for_issue and log_file != all_logs_for_issue[0]:
-                continue  # Skip old log files
-
-            # Check for timeout
-            timed_out, pid = AgentMonitor.check_timeout(issue_num, log_file)
-
-            if timed_out and pid:
-                # Kill the stuck agent
-                killed = AgentMonitor.kill_agent(pid, issue_num)
-
-                if killed:
-                    launched_agents = load_launched_agents()
-                    agent_data = launched_agents.get(str(issue_num), {})
-                    agent_type = agent_data.get("agent_type", "unknown")
-
-                    will_retry = AgentMonitor.should_retry(issue_num, agent_type)
-                    notify_agent_timeout(issue_num, agent_type, will_retry, project="nexus")
-
-                    if will_retry:
-                        crashed_tool = agent_data.get("tool", "")
-                        # Remove stale entry and immediately relaunch
-                        launched_agents.pop(str(issue_num), None)
-                        save_launched_agents(launched_agents)
-                        clear_launch_guard(issue_num)
-                        try:
-                            launched = launch_next_agent(
-                                issue_num, agent_type, trigger_source="timeout-retry",
-                                exclude_tools=[crashed_tool] if crashed_tool else None
-                            )
-                            if not launched:
-                                logger.error(
-                                    f"Timeout retry failed to launch {agent_type} "
-                                    f"for issue #{issue_num}"
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                f"Exception during timeout retry for issue #{issue_num}: {exc}"
-                            )
-
-        # --- Strategy 2: dead-process detection (catches crashed agents) ---
-        _check_dead_agents()
-
+        _get_process_orchestrator().check_stuck_agents(BASE_DIR)
         _clear_polling_failures(scope)
-
     except Exception as e:
         logger.error(f"Error in check_stuck_agents: {e}")
         _record_polling_failure(scope, e)
-
-
-# Track issues we've already alerted about to avoid repeat notifications
-_dead_agent_alerted: set = set()
-
-
-def _check_dead_agents() -> None:
-    """Detect agents that exited without completing and send alerts.
-
-    Reads launched_agents.json, checks each PID, and alerts if the process
-    is dead but no completion was recorded (i.e. still in launched_agents).
-    Gives a grace period of STUCK_AGENT_THRESHOLD seconds before alerting
-    to allow normal completion scanning to detect the result first.
-    """
-    # recent_only=False: agents that crashed long ago are still detectable;
-    # the AGENT_RECENT_WINDOW filter would silently hide them.
-    launched_agents = StateManager.load_launched_agents(recent_only=False)
-    if not launched_agents:
-        return
-
-    current_time = time.time()
-
-    for issue_num, agent_data in list(launched_agents.items()):
-        pid = agent_data.get("pid")
-        launch_ts = agent_data.get("timestamp", 0)
-        agent_type = agent_data.get("agent_type", "unknown")
-        tier = agent_data.get("tier", "unknown")
-
-        if not pid:
-            continue
-
-        # Grace period: let completion scanner run first
-        age_seconds = current_time - launch_ts
-        if age_seconds < STUCK_AGENT_THRESHOLD:
-            continue
-
-        # Check if process is still alive
-        if _is_pid_alive(pid):
-            continue  # Still running — Strategy 1 handles timeout kills
-
-        # Skip if workflow was stopped/paused (e.g. via /stop command)
-        wf_state = StateManager.get_workflow_state(str(issue_num))
-        if wf_state in (WorkflowState.STOPPED, WorkflowState.PAUSED):
-            logger.debug(
-                f"Skipping dead agent check for issue #{issue_num}: "
-                f"workflow state is {wf_state.value}"
-            )
-            continue
-
-        # Process is dead. Check if completion scanner already handled it
-        # (it would have removed from launched_agents or the dedup would fire).
-        # If we get here, the agent exited without a detected completion.
-
-        alert_key = f"{issue_num}:{pid}"
-        if alert_key in _dead_agent_alerted:
-            continue  # Already alerted for this specific launch
-
-        logger.warning(
-            f"💀 Dead agent detected: issue #{issue_num} "
-            f"({agent_type}, PID {pid}, tier {tier}, age {age_seconds/60:.0f}min)"
-        )
-
-        StateManager.audit_log(
-            int(issue_num),
-            "AGENT_DEAD",
-            f"Agent process PID {pid} ({agent_type}) exited without completion "
-            f"after {age_seconds/60:.0f}min"
-        )
-
-        # Determine project for GitHub link
-        project_name = _resolve_project_for_issue(issue_num)
-        repo = get_github_repo(project_name) if project_name else get_github_repo()
-
-        crashed_tool = agent_data.get("tool", "")
-        will_retry = AgentMonitor.should_retry(issue_num, agent_type)
-        if will_retry:
-            alert_sent = send_telegram_alert(
-                f"💀 **Agent Crashed → Retrying**\n\n"
-                f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
-                f"Agent: {agent_type} (PID {pid}, tool: {crashed_tool})\n"
-                f"Tier: {tier}\n"
-                f"Status: Process exited without completion, retry scheduled"
-                + (" with Copilot" if crashed_tool == "gemini" else "")
-            )
-            if not alert_sent:
-                logger.warning(
-                    f"Failed to send dead-agent alert for issue #{issue_num}; "
-                    "will retry notification on next poll"
-                )
-                continue
-
-            _dead_agent_alerted.add(alert_key)
-            # Remove from tracker before retrying so launch_next_agent's own
-            # save writes the fresh entry cleanly (no post-loop clobber).
-            del launched_agents[issue_num]
-            save_launched_agents(launched_agents)
-
-            # Actually relaunch — clear the LaunchGuard cooldown first so the
-            # retry is not blocked by the now-dead previous launch record.
-            # Exclude the tool that crashed so the next available tool is used.
-            clear_launch_guard(issue_num)
-            try:
-                launched = launch_next_agent(
-                    issue_num, agent_type, trigger_source="dead-agent-retry",
-                    exclude_tools=[crashed_tool] if crashed_tool else None
-                )
-                if launched:
-                    logger.info(
-                        f"🔄 Dead-agent retry launched: {agent_type} for issue #{issue_num}"
-                    )
-                else:
-                    logger.error(
-                        f"Dead-agent retry failed to launch {agent_type} for issue #{issue_num}"
-                    )
-            except Exception as exc:
-                logger.error(
-                    f"Exception during dead-agent retry for issue #{issue_num}: {exc}"
-                )
-        else:
-            alert_sent = send_telegram_alert(
-                f"💀 **Agent Crashed → Manual Intervention**\n\n"
-                f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
-                f"Agent: {agent_type} (PID {pid})\n"
-                f"Tier: {tier}\n"
-                f"Status: Process exited without completion, max retries reached\n\n"
-                f"Use /reprocess nexus {issue_num} to retry"
-            )
-            if not alert_sent:
-                logger.warning(
-                    f"Failed to send dead-agent alert for issue #{issue_num}; "
-                    "will retry notification on next poll"
-                )
-                continue
-
-            _dead_agent_alerted.add(alert_key)
-            AgentMonitor.mark_failed(issue_num, agent_type, "Agent process exited without completion")
-            del launched_agents[issue_num]
-            save_launched_agents(launched_agents)
 
 
 def _resolve_project_for_issue(issue_num: str) -> Optional[str]:
