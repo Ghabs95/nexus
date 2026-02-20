@@ -3366,6 +3366,7 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"Workflow has been stopped.",
                 parse_mode='Markdown'
             )
+            StateManager.set_workflow_state(real_issue, WorkflowState.STOPPED)
         except Exception as e:
             await query.edit_message_text(f"❌ Error denying workflow step: {e}")
 
