@@ -4,6 +4,7 @@ import pytest
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 # Add src directory to Python path for imports
 src_path = Path(__file__).parent.parent / "src"
@@ -37,6 +38,13 @@ def mock_env_vars(monkeypatch, tmp_path):
     """)
     
     monkeypatch.setenv("PROJECT_CONFIG_PATH", str(project_config_file))
+
+
+@pytest.fixture(autouse=True)
+def mock_audit_log():
+    """Auto-use fixture to mock StateManager.audit_log to prevent writing to audit.log during tests."""
+    with patch('state_manager.StateManager.audit_log'):
+        yield
 
 
 @pytest.fixture
