@@ -26,7 +26,7 @@ from config import (
 from state_manager import StateManager
 from models import WorkflowState
 from agent_monitor import AgentMonitor, WorkflowRouter
-from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
+from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue, clear_launch_guard, launch_next_agent
 from ai_orchestrator import get_orchestrator
 from nexus_core_helpers import get_git_platform, get_workflow_definition_path
 from plugin_runtime import (
@@ -436,11 +436,11 @@ def _archive_closed_task_files(issue_num: str, project_name: str = "") -> int:
             continue
 
         project_root = os.path.join(BASE_DIR, workspace_rel)
-        active_dir = get_tasks_active_dir(project_root)
+        active_dir = get_tasks_active_dir(project_root, project_key)
         if not os.path.isdir(active_dir):
             continue
 
-        closed_dir = get_tasks_closed_dir(project_root)
+        closed_dir = get_tasks_closed_dir(project_root, project_key)
 
         for filename in os.listdir(active_dir):
             if not filename.endswith(".md"):
@@ -731,13 +731,13 @@ def check_stuck_agents():
         # --- Strategy 1: stale log file detection (kills still-running agents) ---
         nexus_dir_name = get_nexus_dir_name()
         log_files = glob.glob(
-            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "copilot_*.log"),
+            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "*_*.log"),
             recursive=True
         )
 
         for log_file in log_files:
-            # Extract issue number from filename: copilot_4_20260215_112450.log
-            match = re.search(r"copilot_(\d+)_", os.path.basename(log_file))
+            # Extract issue number from filename: <tool>_<issue>_<timestamp>.log
+            match = re.search(r"(?:copilot|gemini)_(\d+)_\d{8}_", os.path.basename(log_file))
             if not match:
                 continue
 
@@ -745,7 +745,7 @@ def check_stuck_agents():
 
             # Get latest log file for this issue only (ignore old ones)
             all_logs_for_issue = sorted(
-                [f for f in log_files if f"copilot_{issue_num}_" in f],
+                [f for f in log_files if re.search(rf"(?:copilot|gemini)_{issue_num}_\d{{8}}_", os.path.basename(f))],
                 key=os.path.getmtime,
                 reverse=True
             )
@@ -766,6 +766,27 @@ def check_stuck_agents():
 
                     will_retry = AgentMonitor.should_retry(issue_num, agent_type)
                     notify_agent_timeout(issue_num, agent_type, will_retry, project="nexus")
+
+                    if will_retry:
+                        crashed_tool = agent_data.get("tool", "")
+                        # Remove stale entry and immediately relaunch
+                        launched_agents.pop(str(issue_num), None)
+                        save_launched_agents(launched_agents)
+                        clear_launch_guard(issue_num)
+                        try:
+                            launched = launch_next_agent(
+                                issue_num, agent_type, trigger_source="timeout-retry",
+                                exclude_tools=[crashed_tool] if crashed_tool else None
+                            )
+                            if not launched:
+                                logger.error(
+                                    f"Timeout retry failed to launch {agent_type} "
+                                    f"for issue #{issue_num}"
+                                )
+                        except Exception as exc:
+                            logger.error(
+                                f"Exception during timeout retry for issue #{issue_num}: {exc}"
+                            )
 
         # --- Strategy 2: dead-process detection (catches crashed agents) ---
         _check_dead_agents()
@@ -847,14 +868,16 @@ def _check_dead_agents() -> None:
         project_name = _resolve_project_for_issue(issue_num)
         repo = get_github_repo(project_name) if project_name else get_github_repo()
 
+        crashed_tool = agent_data.get("tool", "")
         will_retry = AgentMonitor.should_retry(issue_num, agent_type)
         if will_retry:
             alert_sent = send_telegram_alert(
                 f"💀 **Agent Crashed → Retrying**\n\n"
                 f"Issue: [#{issue_num}](https://github.com/{repo}/issues/{issue_num})\n"
-                f"Agent: {agent_type} (PID {pid})\n"
+                f"Agent: {agent_type} (PID {pid}, tool: {crashed_tool})\n"
                 f"Tier: {tier}\n"
                 f"Status: Process exited without completion, retry scheduled"
+                + (" with Copilot" if crashed_tool == "gemini" else "")
             )
             if not alert_sent:
                 logger.warning(
@@ -867,6 +890,28 @@ def _check_dead_agents() -> None:
             # Remove from tracker so the retry can write a fresh entry
             del launched_agents[issue_num]
             dirty = True
+
+            # Actually relaunch — clear the LaunchGuard cooldown first so the
+            # retry is not blocked by the now-dead previous launch record.
+            # Exclude the tool that crashed so the next available tool is used.
+            clear_launch_guard(issue_num)
+            try:
+                launched = launch_next_agent(
+                    issue_num, agent_type, trigger_source="dead-agent-retry",
+                    exclude_tools=[crashed_tool] if crashed_tool else None
+                )
+                if launched:
+                    logger.info(
+                        f"🔄 Dead-agent retry launched: {agent_type} for issue #{issue_num}"
+                    )
+                else:
+                    logger.error(
+                        f"Dead-agent retry failed to launch {agent_type} for issue #{issue_num}"
+                    )
+            except Exception as exc:
+                logger.error(
+                    f"Exception during dead-agent retry for issue #{issue_num}: {exc}"
+                )
         else:
             alert_sent = send_telegram_alert(
                 f"💀 **Agent Crashed → Manual Intervention**\n\n"
@@ -1185,20 +1230,34 @@ def process_file(filepath):
         task_type = type_match.group(1).strip().lower() if type_match else "feature"
 
         # Determine project from filepath
-        # filepath is .../workspace/.nexus/inbox/file.md
-        # Find which project config has a workspace that matches this path
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(filepath)))
-        
-        # Look up project by matching workspace path
+        # filepath is .../workspace/.nexus/inbox/<project>/file.md
+        nexus_dir_name = get_nexus_dir_name()
+        marker = f"{os.sep}{nexus_dir_name}{os.sep}inbox{os.sep}"
         project_name = None
         config = None
-        for key, cfg in _iter_project_configs():
-            workspace = cfg.get("workspace")
-            if workspace:
+        project_root = None
+
+        if marker in filepath:
+            prefix, suffix = filepath.split(marker, 1)
+            project_name = suffix.split(os.sep, 1)[0] if suffix else None
+            project_root = prefix
+
+        if project_name and project_name in PROJECT_CONFIG:
+            cfg = PROJECT_CONFIG.get(project_name)
+            if isinstance(cfg, dict):
+                config = cfg
+
+        # Fallback: look up project by matching workspace path
+        if not config:
+            for key, cfg in _iter_project_configs():
+                workspace = cfg.get("workspace")
+                if not workspace:
+                    continue
                 workspace_abs = os.path.join(BASE_DIR, workspace)
-                if project_root == workspace_abs or project_root.startswith(workspace_abs + os.sep):
+                if filepath.startswith(workspace_abs + os.sep):
                     project_name = key
                     config = cfg
+                    project_root = workspace_abs
                     break
         
         if not config:
@@ -1234,14 +1293,14 @@ def process_file(filepath):
             if is_recent_launch(issue_number):
                 logger.info(f"⏭️ Skipping webhook launch for issue #{issue_number} — agent recently launched")
                 # Still move file to active so it's not re-processed
-                active_dir = get_tasks_active_dir(project_root)
+                active_dir = get_tasks_active_dir(project_root, project_name)
                 os.makedirs(active_dir, exist_ok=True)
                 new_filepath = os.path.join(active_dir, os.path.basename(filepath))
                 shutil.move(filepath, new_filepath)
                 return
             
             # Move file to project workspace active folder
-            active_dir = get_tasks_active_dir(project_root)
+            active_dir = get_tasks_active_dir(project_root, project_name)
             os.makedirs(active_dir, exist_ok=True)
             new_filepath = os.path.join(active_dir, os.path.basename(filepath))
             logger.info(f"Moving task to active: {new_filepath}")
@@ -1313,7 +1372,7 @@ def process_file(filepath):
         sop_checklist = sop_template
 
         # Move file to project workspace active folder
-        active_dir = get_tasks_active_dir(project_root)
+        active_dir = get_tasks_active_dir(project_root, project_name)
         os.makedirs(active_dir, exist_ok=True)
         new_filepath = os.path.join(active_dir, os.path.basename(filepath))
         logger.info(f"Moving task to active: {new_filepath}")
@@ -1362,6 +1421,29 @@ def process_file(filepath):
         )
 
         if issue_url:
+            # Rename task file from {task_type}_{telegram_msg_id}.md to
+            # {task_type}_{issue_num}.md so the GitHub issue number is visible
+            # in the filename instead of a random Telegram message ID.
+            issue_num = issue_url.split('/')[-1]
+            old_basename = os.path.basename(new_filepath)
+            new_basename = re.sub(r'_(\d+)\.md$', f'_{issue_num}.md', old_basename)
+            if new_basename != old_basename:
+                renamed_path = os.path.join(os.path.dirname(new_filepath), new_basename)
+                try:
+                    os.rename(new_filepath, renamed_path)
+                    logger.info(f"Renamed task file: {old_basename} → {new_basename}")
+                    # Keep the issue body consistent — update the Task File path
+                    corrected_body = issue_body.replace(new_filepath, renamed_path)
+                    subprocess.run(
+                        ["gh", "issue", "edit", issue_num,
+                         "--body", corrected_body,
+                         "--repo", config["github_repo"]],
+                        capture_output=True, timeout=15
+                    )
+                    new_filepath = renamed_path
+                except Exception as e:
+                    logger.error(f"Failed to rename task file to issue-number name: {e}")
+
             # Append issue URL to the task file
             try:
                 with open(new_filepath, 'a') as f:
@@ -1370,7 +1452,6 @@ def process_file(filepath):
                 logger.error(f"Failed to append issue URL: {e}")
             
             # Create nexus-core workflow
-            issue_num = issue_url.split('/')[-1]
             workflow_plugin = get_workflow_state_plugin(
                 **_WORKFLOW_STATE_PLUGIN_KWARGS,
                 cache_key="workflow:state-engine",
@@ -1444,9 +1525,9 @@ def main():
     check_interval = 60  # Check for stuck agents and comments every 60 seconds
     
     while True:
-        # Scan for md files in project/{nexus_dir}/inbox/*.md
+        # Scan for md files in project/{nexus_dir}/inbox/<project>/*.md
         nexus_dir_name = get_nexus_dir_name()
-        pattern = os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*.md")
+        pattern = os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*", "*.md")
         files = glob.glob(pattern, recursive=True)
 
         for filepath in files:

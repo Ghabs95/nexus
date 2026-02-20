@@ -117,7 +117,7 @@ Step through an interactive menu:
 python src/telegram_bot.py
 ```
 
-The bot will start polling and display: `Nexus (Google Edition) Online...`
+The bot will start polling and display: `Nexus Online...`
 
 #### Option 2: Systemd Service (Production - Recommended)
 
@@ -360,8 +360,8 @@ INBOX_DIR=./.github/inbox
 - Example bot commands and expected responses:
 
 ```
-/status      -> "Pending: 3 tasks (case_italia:2, wallible:1)"
-/active      -> "Active: copilot:1, alice:2"
+/status all  -> "Pending: 3 tasks (case_italia:2, wallible:1)"
+/active all  -> "Active: copilot:1, alice:2"
 /assign 42   -> "Assigned issue #42 to @me"
 /prepare 42  -> "Appended Copilot instructions to issue #42"
 /implement 42-> "Requested implementation; @ProjectLead notified for approval"
@@ -415,11 +415,17 @@ nexus/
 
 ## File Storage
 
-Tasks are saved as markdown files in:
+Tasks are saved as markdown files in project-scoped folders:
 
 ```
-/home/ubuntu/git/{project}/.github/inbox/{task_type}_{message_id}.md
+/home/ubuntu/git/{workspace}/.nexus/inbox/{project}/{task_type}_{message_id}.md
+/home/ubuntu/git/{workspace}/.nexus/tasks/{project}/active/*.md
+/home/ubuntu/git/{workspace}/.nexus/tasks/{project}/closed/*.md
+/home/ubuntu/git/{workspace}/.nexus/tasks/{project}/logs/*.log
 ```
+
+Legacy shared folders (`.nexus/inbox/*.md`, `.nexus/tasks/active/*`, etc.) should be migrated
+to this project-scoped structure during rollout.
 
 Example file content:
 

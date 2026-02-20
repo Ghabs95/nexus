@@ -29,7 +29,7 @@ from commands.workflow import (
     resume_handler as workflow_resume_handler,
     stop_handler as workflow_stop_handler,
 )
-from agent_launcher import invoke_copilot_agent
+from agent_launcher import invoke_copilot_agent, get_sop_tier_from_issue
 from inbox_processor import get_sop_tier, _normalize_agent_reference
 from nexus.core.completion import scan_for_completions
 from ai_orchestrator import get_orchestrator
@@ -156,7 +156,8 @@ def find_task_logs(task_file):
         else:
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
 
-        logs_dir = get_tasks_logs_dir(project_root)
+        project_key = _extract_project_from_nexus_path(task_file)
+        logs_dir = get_tasks_logs_dir(project_root, project_key)
         if not os.path.isdir(logs_dir):
             return []
 
@@ -230,10 +231,14 @@ def find_issue_log_files(issue_num, task_file=None):
 
     # If task file is known, search its project logs dir first
     if task_file:
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
-        logs_dir = get_tasks_logs_dir(project_root)
+        if "/.nexus/" in task_file:
+            project_root = task_file.split("/.nexus/")[0]
+        else:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(task_file)))
+        project_key = _extract_project_from_nexus_path(task_file)
+        logs_dir = get_tasks_logs_dir(project_root, project_key)
         if os.path.isdir(logs_dir):
-            pattern = os.path.join(logs_dir, "**", f"copilot_{issue_num}_*.log")
+            pattern = os.path.join(logs_dir, "**", f"*_{issue_num}_*.log")
             matches.extend(glob.glob(pattern, recursive=True))
 
     if matches:
@@ -246,9 +251,10 @@ def find_issue_log_files(issue_num, task_file=None):
         "**",
         nexus_dir_name,
         "tasks",
+        "*",
         "logs",
         "**",
-        f"copilot_{issue_num}_*.log"
+        f"*_{issue_num}_*.log"
     )
     return glob.glob(pattern, recursive=True)
 
@@ -310,8 +316,8 @@ def find_task_file_by_issue(issue_num):
     """Search for a task file that references the issue number."""
     nexus_dir_name = get_nexus_dir_name()
     patterns = [
-        os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "active", "*.md"),
-        os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*.md"),
+        os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "*", "active", "*.md"),
+        os.path.join(BASE_DIR, "**", nexus_dir_name, "inbox", "*", "*.md"),
     ]
     for pattern in patterns:
         for path in glob.glob(pattern, recursive=True):
@@ -387,8 +393,42 @@ def _get_project_logs_dir(project_key: str) -> Optional[str]:
     project_root = _get_project_root(project_key)
     if not project_root:
         return None
-    logs_dir = get_tasks_logs_dir(project_root)
+    logs_dir = get_tasks_logs_dir(project_root, project_key)
     return logs_dir if os.path.isdir(logs_dir) else None
+
+
+def _extract_project_from_nexus_path(path: str) -> Optional[str]:
+    if not path or "/.nexus/" not in path:
+        return None
+
+    normalized = path.replace("\\", "/")
+    match = re.search(r"/\.nexus/(?:tasks|inbox)/([^/]+)/", normalized)
+    if not match:
+        return None
+
+    project_key = _normalize_project_key(match.group(1))
+    if project_key and project_key in _iter_project_keys():
+        return project_key
+    return None
+
+
+async def _prompt_monitor_project_selection(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    command: str,
+) -> None:
+    keyboard = [[InlineKeyboardButton("All Projects", callback_data=f"pickmonitor:{command}:all")]]
+    keyboard.extend(
+        [InlineKeyboardButton(_get_project_label(key), callback_data=f"pickmonitor:{command}:{key}")]
+        for key in _iter_project_keys()
+    )
+    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
+
+    text = f"Select a project for /{command}:"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 def _list_project_issues(project_key: str, state: str = "open", limit: int = 10) -> List[dict]:
@@ -672,6 +712,27 @@ async def issue_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await _dispatch_command(update, context, command, project_key, issue_num)
 
 
+async def monitor_project_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle project selection for non-issue monitoring commands."""
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data or not query.data.startswith("pickmonitor:"):
+        return
+
+    _, command, project_key = query.data.split(":", 2)
+    context.args = [project_key]
+
+    if command == "status":
+        await status_handler(update, context)
+        return
+    if command == "active":
+        await active_handler(update, context)
+        return
+
+    await query.edit_message_text("Unsupported monitoring command.")
+
+
 async def close_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -706,8 +767,8 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• ✨ Feature → full (triage → design → develop → review → compliance → deploy → close)\n"
         "• ✨ Simple Feature → fast-track (skip design)\n\n"
         "📊 **Monitoring & Tracking:**\n"
-        "/status - View pending tasks in inbox\n"
-        "/active - View tasks currently being worked on\n"
+        "/status [project|all] - View pending tasks in inbox\n"
+        "/active [project|all] [cleanup] - View tasks currently being worked on\n"
         "/track <project> <issue#> - Track issue per-project\n"
         "/untrack <project> <issue#> - Stop tracking per-project\n"
         "/myissues - View all your tracked issues\n"
@@ -860,7 +921,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     welcome = (
-        "👋 Welcome to Nexus (Google Edition)!\n\n"
+        "👋 Welcome to Nexus!\n\n"
         "Use the menu buttons to create tasks or monitor queues.\n"
         "Send voice or text to create a task automatically.\n\n"
         "💡 **Workflow Tiers:**\n"
@@ -1045,7 +1106,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             logger.warning(f"Project '{project}' not in PROJECT_CONFIG, using as-is for workspace")
         
-        target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace))
+        target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace), project)
         logger.info(f"Target inbox dir: {target_dir}")
         os.makedirs(target_dir, exist_ok=True)
         filename = f"voice_task_{update.message.message_id}.md"
@@ -1163,7 +1224,7 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if project in PROJECT_CONFIG:
         workspace = PROJECT_CONFIG[project].get("workspace", project)
     
-    target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace))
+    target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace), project)
     os.makedirs(target_dir, exist_ok=True)
     filename = f"{task_type}_{update.message.message_id}.md"
 
@@ -1215,14 +1276,33 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
+    project_filter = None
+    if context.args:
+        raw = context.args[0].strip().lower()
+        if raw != "all":
+            project_filter = _normalize_project_key(raw)
+            if project_filter not in _iter_project_keys():
+                await update.effective_message.reply_text(f"❌ Unknown project '{raw}'.")
+                return
+    else:
+        await _prompt_monitor_project_selection(update, context, "status")
+        return
+
+    selected_projects = [project_filter] if project_filter else _iter_project_keys()
+
     status_text = "📥 Inbox Status (Pending Tasks)\n\n"
     total_tasks = 0
 
-    for project_key, project_name in PROJECTS.items():
-        inbox_dir = get_inbox_dir(os.path.join(BASE_DIR, project_key))
+    for project_key in selected_projects:
+        project_name = _get_project_label(project_key)
+        project_root = _get_project_root(project_key)
+        if not project_root:
+            continue
+        inbox_dir = get_inbox_dir(project_root, project_key)
         if os.path.exists(inbox_dir):
             files = [f for f in os.listdir(inbox_dir) if f.endswith(".md")]
             if files:
+                repo = PROJECT_CONFIG[project_key].get("github_repo", GITHUB_REPO)
                 status_text += f"{project_name}: {len(files)} task(s)\n"
                 total_tasks += len(files)
                 # Show first 3 files as preview
@@ -1232,7 +1312,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_path = os.path.join(inbox_dir, f)
                     issue_number = extract_issue_number_from_file(file_path)
                     if issue_number:
-                        issue_link = f"https://github.com/{GITHUB_REPO}/issues/{issue_number}"
+                        issue_link = f"https://github.com/{repo}/issues/{issue_number}"
                         issue_suffix = f" [#{issue_number}]({issue_link})"
                     else:
                         issue_suffix = " (issue ?)"
@@ -1246,7 +1326,11 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         status_text += f"Total: {total_tasks} pending task(s)"
 
-    await update.message.reply_text(status_text, parse_mode='Markdown', disable_web_page_preview=True)
+    await update.effective_message.reply_text(
+        status_text,
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
+    )
 
 
 async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1257,6 +1341,20 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     cleanup_mode = any(arg.lower() in {"cleanup", "--cleanup"} for arg in (context.args or []))
+    project_tokens = [arg for arg in (context.args or []) if arg.lower() not in {"cleanup", "--cleanup"}]
+    project_filter = None
+    if project_tokens:
+        raw = project_tokens[0].strip().lower()
+        if raw != "all":
+            project_filter = _normalize_project_key(raw)
+            if project_filter not in _iter_project_keys():
+                await update.effective_message.reply_text(f"❌ Unknown project '{raw}'.")
+                return
+    elif not cleanup_mode:
+        await _prompt_monitor_project_selection(update, context, "active")
+        return
+
+    selected_projects = [project_filter] if project_filter else _iter_project_keys()
 
     active_text = "🚀 Active Tasks (In Progress)\n\n"
     if cleanup_mode:
@@ -1269,12 +1367,12 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     issue_state_cache = {}
 
     # Check project workspace active folders
-    for project_key in _iter_project_keys():
+    for project_key in selected_projects:
         display_name = _get_project_label(project_key)
         project_root = _get_project_root(project_key)
         if not project_root:
             continue
-        active_dir = get_tasks_active_dir(project_root)
+        active_dir = get_tasks_active_dir(project_root, project_key)
         if os.path.exists(active_dir):
             files = [f for f in os.listdir(active_dir) if f.endswith(".md")]
             if files:
@@ -1307,7 +1405,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         stale_count += 1
                         if cleanup_mode:
                             try:
-                                closed_dir = get_tasks_closed_dir(project_root)
+                                closed_dir = get_tasks_closed_dir(project_root, project_key)
                                 os.makedirs(closed_dir, exist_ok=True)
                                 target_path = os.path.join(closed_dir, f)
                                 if os.path.exists(target_path):
@@ -1329,7 +1427,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         stale_count += 1
 
                 if not open_files:
-                    total_skipped_stale += stale_count
+                    total_skipped_closed += stale_count
                     continue
 
                 active_text += f"{display_name}: {len(open_files)} task(s)\n"
@@ -1359,7 +1457,11 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cleanup_mode:
         active_text += f"\n📦 Archived {total_archived} closed task file(s) to `tasks/closed`."
 
-    await update.message.reply_text(active_text, parse_mode='Markdown', disable_web_page_preview=True)
+    await update.effective_message.reply_text(
+        active_text,
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
+    )
 
 
 async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1772,7 +1874,7 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.effective_message.reply_text(f"📋 Fetching logs for issue #{issue_num}...")
 
-    # Task log files only (.nexus/tasks/logs/*.log)
+    # Task log files only (.nexus/tasks/<project>/logs/*.log)
     config = PROJECT_CONFIG[project_key]
     repo = config.get("github_repo", GITHUB_REPO)
     details = get_issue_details(issue_num, repo=repo)
@@ -2234,7 +2336,6 @@ async def reprocess_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Resolve tier: launched_agents tracker → issue labels → halt if unknown
     from state_manager import StateManager
-    from agent_launcher import get_sop_tier_from_issue
     tracker_tier = StateManager.get_last_tier_for_issue(issue_num)
     label_tier = get_sop_tier_from_issue(issue_num, project_name or project_key)
     tier_name = label_tier or tracker_tier
@@ -2378,7 +2479,13 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         agent_type = agent_type_match.group(1).strip() if agent_type_match else "triage"
         logger.info(f"Continue issue #{issue_num}: no prior completion found, starting with {agent_type}")
 
-    tier_name, _, _ = get_sop_tier(task_type)
+    # Prefer the workflow: label on the issue — task_type heuristic can be wrong
+    # (e.g. feature-simple maps to fast-track but issue may have workflow:shortened)
+    label_tier = get_sop_tier_from_issue(issue_num, project_name or project_key)
+    if label_tier:
+        tier_name = label_tier
+    else:
+        tier_name, _, _ = get_sop_tier(task_type)
     issue_url = f"https://github.com/{repo}/issues/{issue_num}"
 
     resume_info = f" (after {resumed_from})" if resumed_from else ""
@@ -3206,11 +3313,12 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r'^menu:'))
     app.add_handler(CallbackQueryHandler(project_picker_handler, pattern=r'^pickcmd:'))
     app.add_handler(CallbackQueryHandler(issue_picker_handler, pattern=r'^pickissue'))
+    app.add_handler(CallbackQueryHandler(monitor_project_picker_handler, pattern=r'^pickmonitor:'))
     app.add_handler(CallbackQueryHandler(close_flow_handler, pattern=r'^flow:close$'))
     # Inline keyboard callback handler (must be before ConversationHandler callbacks)
     app.add_handler(CallbackQueryHandler(inline_keyboard_handler, pattern=r'^(logs|logsfull|status|pause|resume|stop|audit|reprocess|respond|approve|reject)_'))
     # Exclude commands from the auto-router catch-all
     app.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & (~filters.COMMAND), hands_free_handler))
 
-    print("Nexus (Google Edition) Online...")
+    print("Nexus Online...")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)

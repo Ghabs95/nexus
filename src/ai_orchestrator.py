@@ -23,7 +23,7 @@ def _resolve_tasks_logs_dir(workspace: str, project: Optional[str] = None) -> st
     except Exception:
         logs_dir = os.path.join(workspace, ".nexus", "tasks", "logs")
         if project:
-            logs_dir = os.path.join(logs_dir, project)
+            logs_dir = os.path.join(workspace, ".nexus", "tasks", project, "logs")
         return logs_dir
 
 

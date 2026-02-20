@@ -129,6 +129,18 @@ def record_agent_launch(issue_number: str, pid: int = None) -> None:
     _launch_guard.record_launch(str(issue_number), agent_type="*", pid=pid)
 
 
+def clear_launch_guard(issue_number: str) -> int:
+    """Clear the LaunchGuard for an issue, allowing an immediate relaunch.
+
+    Used by the dead-agent retry path to bypass the cooldown window when
+    we intentionally want to relaunch a crashed agent.
+
+    Returns:
+        Number of cleared records.
+    """
+    return _launch_guard.clear(str(issue_number))
+
+
 def _resolve_workflow_path(project_name: str = None) -> str:
     """Resolve workflow definition path for project or global config."""
     workflow_path = ""
@@ -276,6 +288,7 @@ def invoke_copilot_agent(
     continuation=False,
     continuation_prompt=None,
     use_gemini=False,
+    exclude_tools=None,
     log_subdir=None,
     agent_type="triage",
     project_name=None
@@ -343,6 +356,7 @@ def invoke_copilot_agent(
             issue_url=issue_url,
             agent_name=agent_type,
             use_gemini=use_gemini,
+            exclude_tools=exclude_tools,
             log_subdir=log_subdir
         )
         
@@ -405,7 +419,7 @@ def invoke_copilot_agent(
         
         return None, None
 
-def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
+def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclude_tools=None):
     """
     Launch the next agent in the workflow chain.
     
@@ -514,6 +528,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown"):
         task_content=task_content,
         continuation=True,
         continuation_prompt=continuation_prompt,
+        exclude_tools=exclude_tools,
         log_subdir=project_root,
         agent_type=next_agent,
         project_name=project_root

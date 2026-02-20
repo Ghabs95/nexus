@@ -4,9 +4,9 @@ Agents running within the Nexus framework should write a structured `completion_
 
 ## File Location
 
-Write to: `.nexus/tasks/logs/completion_summary_{ISSUE_NUMBER}.json`
+Write to: `.nexus/tasks/completions/completion_summary_{ISSUE_NUMBER}.json`
 
-Example: `.nexus/tasks/logs/completion_summary_35.json`
+Example: `.nexus/tasks/completions/completion_summary_35.json`
 
 ## JSON Schema
 
@@ -128,7 +128,7 @@ _Automated comment from Nexus._
 
 ## Backward Compatibility
 
-If a `completion_summary.json` file is not found, the processor falls back to basic pattern matching on log files. However, structured JSON output ensures better GitHub comments and enables future automation (e.g., automatic agent routing based on "next_agent" field).
+If a `completion_summary.json` file is not found, the processor falls back to basic pattern matching on log files. For migration safety, legacy summaries under `.nexus/tasks/logs/` are still detected, but new summaries should be written under `.nexus/tasks/completions/`.
 
 ## Implementation in Python
 
@@ -139,10 +139,10 @@ from pathlib import Path
 
 def write_completion_summary(issue_number: int, data: dict) -> None:
     """Write completion summary JSON for an issue."""
-    log_dir = Path.home() / ".nexus" / "tasks" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    completion_dir = Path.home() / ".nexus" / "tasks" / "completions"
+    completion_dir.mkdir(parents=True, exist_ok=True)
     
-    summary_path = log_dir / f"completion_summary_{issue_number}.json"
+    summary_path = completion_dir / f"completion_summary_{issue_number}.json"
     with open(summary_path, "w") as f:
         json.dump(data, f, indent=2)
     
@@ -166,10 +166,10 @@ write_completion_summary(35, completion_data)
 ```bash
 #!/bin/bash
 ISSUE_NUMBER=35
-LOG_DIR="$HOME/.nexus/tasks/logs"
-mkdir -p "$LOG_DIR"
+COMPLETIONS_DIR="$HOME/.nexus/tasks/completions"
+mkdir -p "$COMPLETIONS_DIR"
 
-cat > "$LOG_DIR/completion_summary_${ISSUE_NUMBER}.json" <<EOF
+cat > "$COMPLETIONS_DIR/completion_summary_${ISSUE_NUMBER}.json" <<EOF
 {
   "status": "complete",
   "summary": "Feature implementation complete",

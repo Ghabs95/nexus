@@ -341,34 +341,55 @@ def get_nexus_dir(workspace: str = None) -> str:
     return os.path.join(workspace, nexus_dir_name)
 
 
-def get_inbox_dir(workspace: str = None) -> str:
+def get_inbox_dir(workspace: str = None, project: str = None) -> str:
     """Get inbox directory path for workflow tasks.
+
+    Args:
+        workspace: Workspace directory
+        project: Optional project key subdirectory under inbox
     
     Returns:
-        Path to {nexus_dir}/inbox directory
+        Path to {nexus_dir}/inbox or {nexus_dir}/inbox/{project}
     """
     nexus_dir = get_nexus_dir(workspace)
-    return os.path.join(nexus_dir, "inbox")
+    inbox_dir = os.path.join(nexus_dir, "inbox")
+    if project:
+        inbox_dir = os.path.join(inbox_dir, project)
+    return inbox_dir
 
 
-def get_tasks_active_dir(workspace: str = None) -> str:
+def get_tasks_active_dir(workspace: str = None, project: str = None) -> str:
     """Get active tasks directory path for in-progress work.
+
+    Args:
+        workspace: Workspace directory
+        project: Optional project key subdirectory under tasks
     
     Returns:
-        Path to {nexus_dir}/tasks/active directory
+        Path to {nexus_dir}/tasks/active or {nexus_dir}/tasks/{project}/active
     """
     nexus_dir = get_nexus_dir(workspace)
-    return os.path.join(nexus_dir, "tasks", "active")
+    tasks_root = os.path.join(nexus_dir, "tasks")
+    if project:
+        return os.path.join(tasks_root, project, "active")
+    return os.path.join(tasks_root, "active")
 
 
-def get_tasks_closed_dir(workspace: str = None) -> str:
+def get_tasks_closed_dir(workspace: str = None, project: str = None) -> str:
     """Get closed tasks directory path for archived work.
 
+    Args:
+        workspace: Workspace directory
+        project: Optional project key subdirectory under tasks
+
     Returns:
-        Path to {nexus_dir}/tasks/closed directory
+        Path to {nexus_dir}/tasks/closed or {nexus_dir}/tasks/{project}/closed
     """
     nexus_dir = get_nexus_dir(workspace)
-    return os.path.join(nexus_dir, "tasks", "closed")
+    tasks_root = os.path.join(nexus_dir, "tasks")
+    if project:
+        return os.path.join(tasks_root, project, "closed")
+    return os.path.join(tasks_root, "closed")
 
 
 def get_tasks_logs_dir(workspace: str = None, project: str = None) -> str:
@@ -379,15 +400,13 @@ def get_tasks_logs_dir(workspace: str = None, project: str = None) -> str:
         project: Optional project subdirectory within logs
         
     Returns:
-        Path to {nexus_dir}/tasks/logs or {nexus_dir}/tasks/logs/{project}
+        Path to {nexus_dir}/tasks/logs or {nexus_dir}/tasks/{project}/logs
     """
     nexus_dir = get_nexus_dir(workspace)
-    logs_dir = os.path.join(nexus_dir, "tasks", "logs")
-    
+    tasks_root = os.path.join(nexus_dir, "tasks")
     if project:
-        logs_dir = os.path.join(logs_dir, project)
-    
-    return logs_dir
+        return os.path.join(tasks_root, project, "logs")
+    return os.path.join(tasks_root, "logs")
 
 
 

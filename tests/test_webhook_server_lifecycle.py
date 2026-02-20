@@ -36,9 +36,11 @@ def _pr_payload(action: str, merged: bool = False) -> dict:
 
 @patch("webhook_server._notify_lifecycle", return_value=True)
 def test_issue_closed_sends_notification(mock_notify):
-    from webhook_server import handle_issue_opened
+    from webhook_server import handle_issue_opened, _get_webhook_policy
 
-    result = handle_issue_opened(_issue_payload("closed"))
+    payload = _issue_payload("closed")
+    event = _get_webhook_policy().parse_issue_event(payload)
+    result = handle_issue_opened(payload, event)
 
     assert result["status"] == "issue_closed_notified"
     mock_notify.assert_called_once()
@@ -46,9 +48,11 @@ def test_issue_closed_sends_notification(mock_notify):
 
 @patch("webhook_server._notify_lifecycle", return_value=True)
 def test_pr_opened_sends_notification(mock_notify):
-    from webhook_server import handle_pull_request
+    from webhook_server import handle_pull_request, _get_webhook_policy
 
-    result = handle_pull_request(_pr_payload("opened"))
+    payload = _pr_payload("opened")
+    event = _get_webhook_policy().parse_pull_request_event(payload)
+    result = handle_pull_request(payload, event)
 
     assert result["status"] == "pr_opened_notified"
     mock_notify.assert_called_once()
@@ -57,9 +61,11 @@ def test_pr_opened_sends_notification(mock_notify):
 @patch("webhook_server._effective_merge_policy", return_value="always")
 @patch("webhook_server._notify_lifecycle", return_value=True)
 def test_pr_merged_skips_when_manual_review_policy(mock_notify, mock_policy):
-    from webhook_server import handle_pull_request
+    from webhook_server import handle_pull_request, _get_webhook_policy
 
-    result = handle_pull_request(_pr_payload("closed", merged=True))
+    payload = _pr_payload("closed", merged=True)
+    event = _get_webhook_policy().parse_pull_request_event(payload)
+    result = handle_pull_request(payload, event)
 
     assert result["status"] == "pr_merged_skipped_manual_review"
     mock_policy.assert_called_once()
@@ -69,9 +75,11 @@ def test_pr_merged_skips_when_manual_review_policy(mock_notify, mock_policy):
 @patch("webhook_server._effective_merge_policy", return_value="never")
 @patch("webhook_server._notify_lifecycle", return_value=True)
 def test_pr_merged_notifies_when_policy_allows(mock_notify, mock_policy):
-    from webhook_server import handle_pull_request
+    from webhook_server import handle_pull_request, _get_webhook_policy
 
-    result = handle_pull_request(_pr_payload("closed", merged=True))
+    payload = _pr_payload("closed", merged=True)
+    event = _get_webhook_policy().parse_pull_request_event(payload)
+    result = handle_pull_request(payload, event)
 
     assert result["status"] == "pr_merged_notified"
     mock_policy.assert_called_once()

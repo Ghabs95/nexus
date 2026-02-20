@@ -7,8 +7,8 @@ def test_archive_closed_task_by_issue_url(tmp_path, monkeypatch):
     from inbox_processor import _archive_closed_task_files
 
     workspace = tmp_path / "workspace"
-    active_dir = workspace / ".nexus" / "tasks" / "active"
-    closed_dir = workspace / ".nexus" / "tasks" / "closed"
+    active_dir = workspace / ".nexus" / "tasks" / "nexus" / "active"
+    closed_dir = workspace / ".nexus" / "tasks" / "nexus" / "closed"
     active_dir.mkdir(parents=True)
 
     task = active_dir / "feature-simple_123.md"
@@ -40,8 +40,8 @@ def test_archive_closed_task_by_issue_filename(tmp_path, monkeypatch):
     from inbox_processor import _archive_closed_task_files
 
     workspace = tmp_path / "workspace"
-    active_dir = workspace / ".nexus" / "tasks" / "active"
-    closed_dir = workspace / ".nexus" / "tasks" / "closed"
+    active_dir = workspace / ".nexus" / "tasks" / "nexus" / "active"
+    closed_dir = workspace / ".nexus" / "tasks" / "nexus" / "closed"
     active_dir.mkdir(parents=True)
 
     task = active_dir / "issue_41.md"
@@ -69,8 +69,8 @@ def test_archive_closed_task_ignores_other_issues(tmp_path, monkeypatch):
     from inbox_processor import _archive_closed_task_files
 
     workspace = tmp_path / "workspace"
-    active_dir = workspace / ".nexus" / "tasks" / "active"
-    closed_dir = workspace / ".nexus" / "tasks" / "closed"
+    active_dir = workspace / ".nexus" / "tasks" / "nexus" / "active"
+    closed_dir = workspace / ".nexus" / "tasks" / "nexus" / "closed"
     active_dir.mkdir(parents=True)
 
     other_task = active_dir / "feature-simple_999.md"
