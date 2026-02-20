@@ -64,137 +64,108 @@ class SystemMetrics:
 
 
 class AuditLogParser:
-    """Parser for audit.log files to extract metrics and events."""
+    """Parser for JSONL audit events from nexus-core storage."""
     
-    def __init__(self, audit_log_path: str):
-        """Initialize parser with path to audit.log file.
-        
-        Args:
-            audit_log_path: Path to the audit.log file
-        """
-        self.audit_log_path = audit_log_path
+    def __init__(self):
+        """Initialize parser."""
         self.workflow_metrics: Dict[int, WorkflowMetrics] = {}
         self.agent_metrics: Dict[str, AgentMetrics] = defaultdict(
             lambda: AgentMetrics(agent_name="")
         )
-    
-    def parse_log_line(self, line: str) -> Optional[Tuple[datetime, int, str, str]]:
-        """Parse a single audit log line.
-        
-        Expected format: timestamp | Issue #N | EVENT_TYPE | details
-        
-        Returns:
-            Tuple of (timestamp, issue_num, event_type, details) or None if parse fails
-        """
-        try:
-            parts = line.strip().split(" | ", 3)
-            if len(parts) < 3:
-                return None
-            
-            # Parse timestamp
-            timestamp_str = parts[0]
-            timestamp = datetime.fromisoformat(timestamp_str)
-            
-            # Parse issue number
-            issue_match = re.search(r"Issue #(\d+)", parts[1])
-            if not issue_match:
-                return None
-            issue_num = int(issue_match.group(1))
-            
-            # Event type and details
-            event_type = parts[2] if len(parts) > 2 else ""
-            details = parts[3] if len(parts) > 3 else ""
-            
-            return (timestamp, issue_num, event_type, details)
-        
-        except Exception as e:
-            logger.debug(f"Failed to parse log line: {line[:80]}... Error: {e}")
-            return None
-    
-    def parse_log_file(self, lookback_days: int = 30) -> None:
-        """Parse the entire audit log file and build metrics.
+
+    @staticmethod
+    def _extract_issue_num(evt: dict) -> Optional[int]:
+        """Extract issue number from a JSONL audit event."""
+        data = evt.get("data", {})
+        if isinstance(data, dict) and "issue_number" in data:
+            try:
+                return int(data["issue_number"])
+            except (ValueError, TypeError):
+                pass
+        # Fallback: parse from workflow_id (format: project-N-tier)
+        wf_id = evt.get("workflow_id", "")
+        match = re.search(r"-(\d+)-", wf_id)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def parse_events(self, lookback_days: int = 30) -> None:
+        """Load and parse all JSONL audit events from nexus-core storage.
         
         Args:
             lookback_days: Only consider events from the last N days (default: 30)
         """
-        if not os.path.exists(self.audit_log_path):
-            logger.warning(f"Audit log not found: {self.audit_log_path}")
-            return
-        
-        # Use date-based cutoff to avoid time-of-day flakiness (include full days)
-        cutoff_time = (datetime.now() - timedelta(days=lookback_days)).replace(
-            hour=0, minute=0, second=0, microsecond=0
+        from state_manager import StateManager
+
+        events = StateManager.read_all_audit_events(
+            since_hours=lookback_days * 24,
         )
         
-        try:
-            with open(self.audit_log_path, 'r') as f:
-                for line in f:
-                    parsed = self.parse_log_line(line)
-                    if not parsed:
-                        continue
-                    
-                    timestamp, issue_num, event_type, details = parsed
-                    
-                    # Skip events outside lookback window
-                    if timestamp < cutoff_time:
-                        continue
-                    
-                    # Initialize workflow metrics if needed
-                    if issue_num not in self.workflow_metrics:
-                        self.workflow_metrics[issue_num] = WorkflowMetrics(issue_num=issue_num)
-                    
-                    wm = self.workflow_metrics[issue_num]
-                    
-                    # Process event
-                    if event_type == "WORKFLOW_STARTED":
-                        wm.start_time = timestamp
-                        # Extract tier if in details
-                        tier_match = re.search(r"tier: (\w+)", details, re.IGNORECASE)
-                        if tier_match:
-                            wm.workflow_tier = tier_match.group(1)
-                    
-                    elif event_type == "AGENT_LAUNCHED":
-                        wm.agents_launched += 1
-                        # Extract agent name
-                        agent_match = re.search(r"@?(\w+)", details)
-                        if agent_match:
-                            agent_name = agent_match.group(1)
-                            self.agent_metrics[agent_name].agent_name = agent_name
-                            self.agent_metrics[agent_name].launches += 1
-                    
-                    elif event_type == "AGENT_TIMEOUT_KILL":
-                        wm.timeouts += 1
-                        # Extract agent name
-                        agent_match = re.search(r"@?(\w+)", details)
-                        if agent_match:
-                            agent_name = agent_match.group(1)
-                            self.agent_metrics[agent_name].timeouts += 1
-                    
-                    elif event_type == "AGENT_RETRY":
-                        wm.retries += 1
-                        # Extract agent name
-                        agent_match = re.search(r"@?(\w+)", details)
-                        if agent_match:
-                            agent_name = agent_match.group(1)
-                            self.agent_metrics[agent_name].retries += 1
-                    
-                    elif event_type == "AGENT_FAILED":
-                        wm.failures += 1
-                        # Extract agent name
-                        agent_match = re.search(r"@?(\w+)", details)
-                        if agent_match:
-                            agent_name = agent_match.group(1)
-                            self.agent_metrics[agent_name].failures += 1
-                    
-                    elif event_type == "WORKFLOW_COMPLETED":
-                        wm.completed = True
-                        wm.end_time = timestamp
-                        if wm.start_time:
-                            delta = wm.end_time - wm.start_time
-                            wm.duration_seconds = delta.total_seconds()
-        
-        except Exception as e:
-            logger.error(f"Error parsing audit log: {e}", exc_info=True)
+        for evt in events:
+            try:
+                timestamp = datetime.fromisoformat(evt.get("timestamp", ""))
+            except (ValueError, TypeError):
+                continue
+
+            issue_num = self._extract_issue_num(evt)
+            if issue_num is None:
+                continue
+
+            event_type = evt.get("event_type", "")
+            data = evt.get("data", {}) or {}
+            details = data.get("details", "") if isinstance(data, str) is False else ""
+
+            # Initialize workflow metrics if needed
+            if issue_num not in self.workflow_metrics:
+                self.workflow_metrics[issue_num] = WorkflowMetrics(issue_num=issue_num)
+
+            wm = self.workflow_metrics[issue_num]
+
+            if event_type in ("WORKFLOW_STARTED", "WORKFLOW_CREATED"):
+                if wm.start_time is None:
+                    wm.start_time = timestamp
+                tier_match = re.search(r"tier[:\s]+(\w+)", str(details), re.IGNORECASE)
+                if tier_match:
+                    wm.workflow_tier = tier_match.group(1)
+                # Also try to extract tier from workflow_id
+                if not wm.workflow_tier:
+                    wf_id = evt.get("workflow_id", "")
+                    for tier in ("full", "shortened", "fast-track"):
+                        if wf_id.endswith(f"-{tier}"):
+                            wm.workflow_tier = tier
+                            break
+
+            elif event_type == "AGENT_LAUNCHED":
+                wm.agents_launched += 1
+                agent_match = re.search(r"@?(\w+)", str(details))
+                if agent_match:
+                    agent_name = agent_match.group(1)
+                    self.agent_metrics[agent_name].agent_name = agent_name
+                    self.agent_metrics[agent_name].launches += 1
+
+            elif event_type == "AGENT_TIMEOUT_KILL":
+                wm.timeouts += 1
+                agent_match = re.search(r"@?(\w+)", str(details))
+                if agent_match:
+                    self.agent_metrics[agent_match.group(1)].timeouts += 1
+
+            elif event_type == "AGENT_RETRY":
+                wm.retries += 1
+                agent_match = re.search(r"@?(\w+)", str(details))
+                if agent_match:
+                    self.agent_metrics[agent_match.group(1)].retries += 1
+
+            elif event_type == "AGENT_FAILED":
+                wm.failures += 1
+                agent_match = re.search(r"@?(\w+)", str(details))
+                if agent_match:
+                    self.agent_metrics[agent_match.group(1)].failures += 1
+
+            elif event_type == "WORKFLOW_COMPLETED":
+                wm.completed = True
+                wm.end_time = timestamp
+                if wm.start_time:
+                    wm.duration_seconds = (wm.end_time - wm.start_time).total_seconds()
     
     def get_system_metrics(self) -> SystemMetrics:
         """Calculate overall system metrics from parsed data.
@@ -324,16 +295,15 @@ class AuditLogParser:
         return report
 
 
-def get_stats_report(audit_log_path: str, lookback_days: int = 30) -> str:
-    """Generate a statistics report from audit log.
+def get_stats_report(lookback_days: int = 30) -> str:
+    """Generate a statistics report from JSONL audit events.
     
     Args:
-        audit_log_path: Path to audit.log file
         lookback_days: Number of days to include in analysis
     
     Returns:
         Formatted statistics report
     """
-    parser = AuditLogParser(audit_log_path)
-    parser.parse_log_file(lookback_days=lookback_days)
+    parser = AuditLogParser()
+    parser.parse_events(lookback_days=lookback_days)
     return parser.format_stats_report()

@@ -106,12 +106,26 @@ class NexusAgentRuntime(AgentRuntime):
     # ------------------------------------------------------------------
 
     def get_workflow_state(self, issue_number: str) -> Optional[str]:
-        from models import WorkflowState
+        """Read workflow state directly from nexus-core FileStorage on disk."""
+        import json
+        import os
+        from config import NEXUS_CORE_STORAGE_DIR
         from state_manager import StateManager
 
-        state = StateManager.get_workflow_state(str(issue_number))
-        if state not in (WorkflowState.ACTIVE, None):
-            return state.value.upper()
+        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
+        if not workflow_id:
+            return None
+        wf_file = os.path.join(
+            NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json"
+        )
+        try:
+            with open(wf_file, "r") as f:
+                state_str = json.load(f).get("state", "")
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+        # WorkflowEngine stores: "active", "paused", "cancelled", "completed", "pending"
+        if state_str in ("paused", "cancelled"):
+            return state_str.upper()
         return None
 
     def is_process_running(self, issue_number: str) -> bool:

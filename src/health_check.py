@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from flask import Flask, jsonify, request
 from rate_limiter import get_rate_limiter
 from state_manager import StateManager
-from config import DATA_DIR, LOGS_DIR, AUDIT_LOG_FILE
+from config import DATA_DIR, LOGS_DIR
 
 # Configure logging
 logging.basicConfig(
@@ -108,36 +108,20 @@ def get_recent_audit_activity(hours: int = 1) -> dict:
         Dict with event counts
     """
     try:
-        if not os.path.exists(AUDIT_LOG_FILE):
-            return {"error": "Audit log not found"}
-        
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-        event_counts = {}
-        total_events = 0
-        
-        with open(AUDIT_LOG_FILE, 'r') as f:
-            for line in f:
-                try:
-                    # Parse timestamp from line (format: 2026-02-16T10:00:00 | ...)
-                    timestamp_str = line.split('|')[0].strip()
-                    timestamp = datetime.fromisoformat(timestamp_str)
-                    
-                    if timestamp >= cutoff_time:
-                        # Count event types
-                        parts = line.split('|')
-                        if len(parts) >= 3:
-                            event_type = parts[2].strip()
-                            event_counts[event_type] = event_counts.get(event_type, 0) + 1
-                            total_events += 1
-                except:
-                    continue
-        
+        events = StateManager.read_all_audit_events(since_hours=hours)
+        if not events:
+            return {"total_events": 0, "event_types": {}, "time_window_hours": hours}
+
+        event_counts: dict = {}
+        for evt in events:
+            et = evt.get("event_type", "UNKNOWN")
+            event_counts[et] = event_counts.get(et, 0) + 1
+
         return {
-            "total_events": total_events,
+            "total_events": len(events),
             "event_types": event_counts,
-            "time_window_hours": hours
+            "time_window_hours": hours,
         }
-    
     except Exception as e:
         logger.error(f"Error reading audit log: {e}")
         return {"error": str(e)}

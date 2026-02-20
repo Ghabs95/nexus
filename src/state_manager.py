@@ -3,10 +3,9 @@ import logging
 import time
 from typing import Dict, Optional, List
 from datetime import datetime
-from models import WorkflowState
 from config import (
-    WORKFLOW_STATE_FILE, LAUNCHED_AGENTS_FILE, TRACKED_ISSUES_FILE,
-    AUDIT_LOG_FILE, DATA_DIR, AGENT_RECENT_WINDOW, ensure_data_dir, ensure_logs_dir
+    LAUNCHED_AGENTS_FILE, TRACKED_ISSUES_FILE,
+    DATA_DIR, AGENT_RECENT_WINDOW, ensure_data_dir, ensure_logs_dir
 )
 from plugin_runtime import get_profiled_plugin
 
@@ -69,46 +68,6 @@ class StateManager:
         if not plugin:
             return []
         return plugin.read_lines(path)
-
-    @staticmethod
-    def load_workflow_state() -> Dict[str, dict]:
-        """Load workflow state (paused/stopped issues) from persistent storage."""
-        return StateManager._load_json_state(WORKFLOW_STATE_FILE, default={})
-
-    @staticmethod
-    def save_workflow_state(data: Dict[str, dict]) -> None:
-        """Save workflow state to persistent storage."""
-        StateManager._save_json_state(
-            WORKFLOW_STATE_FILE,
-            data,
-            context="workflow state",
-        )
-
-    @staticmethod
-    def set_workflow_state(issue_num: str, state: WorkflowState) -> None:
-        """Set workflow state for an issue (ACTIVE, PAUSED, or STOPPED)."""
-        data = StateManager.load_workflow_state()
-        if state == WorkflowState.ACTIVE:
-            data.pop(str(issue_num), None)  # Remove entry to mark as active
-        else:
-            data[str(issue_num)] = {
-                "state": state.value,
-                "timestamp": time.time()
-            }
-        StateManager.save_workflow_state(data)
-        logger.info(f"Set workflow state for issue #{issue_num}: {state.value}")
-
-    @staticmethod
-    def get_workflow_state(issue_num: str) -> WorkflowState:
-        """Get workflow state for an issue. Returns ACTIVE, PAUSED, STOPPED, or None."""
-        data = StateManager.load_workflow_state()
-        state_str = data.get(str(issue_num), {}).get("state")
-        if state_str:
-            try:
-                return WorkflowState[state_str.upper()]
-            except KeyError:
-                return WorkflowState.ACTIVE
-        return WorkflowState.ACTIVE
 
     @staticmethod
     def load_launched_agents(recent_only: bool = True) -> Dict[str, dict]:
@@ -208,31 +167,130 @@ class StateManager:
 
     @staticmethod
     def audit_log(issue_num: int, event: str, details: Optional[str] = None) -> None:
-        """Log an audit event for workflow tracking."""
+        """Log an audit event in nexus-core JSONL format.
+
+        Writes to ``{NEXUS_CORE_STORAGE_DIR}/audit/{workflow_id}.jsonl``, the
+        same directory and format used by :class:`WorkflowEngine`.  Falls back
+        to ``_nexus_system.jsonl`` when no workflow mapping exists.
+        """
+        import json
+        import os
+        from config import NEXUS_CORE_STORAGE_DIR
+
         try:
             timestamp = datetime.now().isoformat()
-            log_entry = f"{timestamp} | Issue #{issue_num} | {event}"
-            if details:
-                log_entry += f" | {details}"
-            log_entry += "\n"
+            workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
+            if not workflow_id:
+                workflow_id = "_nexus_system"
 
-            StateManager._append_line(AUDIT_LOG_FILE, log_entry, context="audit log")
-            logger.debug(f"Audit: {log_entry.strip()}")
+            audit_dir = os.path.join(NEXUS_CORE_STORAGE_DIR, "audit")
+            os.makedirs(audit_dir, exist_ok=True)
+            audit_file = os.path.join(audit_dir, f"{workflow_id}.jsonl")
+
+            entry = {
+                "workflow_id": workflow_id,
+                "timestamp": timestamp,
+                "event_type": event,
+                "data": {
+                    "issue_number": issue_num,
+                    "details": details,
+                },
+                "user_id": None,
+            }
+            with open(audit_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+
+            logger.debug(f"Audit: #{issue_num} {event} -> {audit_file}")
         except Exception as e:
             logger.error(f"Failed to write audit log: {e}")
 
     @staticmethod
-    def get_audit_history(issue_num: int, limit: int = 50) -> List[str]:
-        """Get recent audit history for an issue."""
+    def get_audit_history(issue_num: int, limit: int = 50) -> List[dict]:
+        """Get recent audit events for an issue from JSONL audit files.
+
+        Returns a list of parsed dicts (newest last, capped at *limit*).
+        Each dict has keys: ``workflow_id``, ``timestamp``, ``event_type``,
+        ``data``, ``user_id``.
+        """
+        import json
+        import os
+        from config import NEXUS_CORE_STORAGE_DIR
+
         try:
-            entries = []
-            for line in StateManager._read_lines(AUDIT_LOG_FILE):
-                if f"Issue #{issue_num}" in line:
-                    entries.append(line.strip())
-            return entries[-limit:]  # Return last 'limit' entries
+            workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
+            if not workflow_id:
+                return []
+            audit_file = os.path.join(
+                NEXUS_CORE_STORAGE_DIR, "audit", f"{workflow_id}.jsonl"
+            )
+            if not os.path.exists(audit_file):
+                return []
+            entries: List[dict] = []
+            with open(audit_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        evt = json.loads(line)
+                        entries.append(evt)
+                    except json.JSONDecodeError:
+                        continue
+            return entries[-limit:]
         except Exception as e:
             logger.error(f"Failed to read audit log: {e}")
             return []
+
+    @staticmethod
+    def read_all_audit_events(
+        since_hours: Optional[int] = None,
+    ) -> List[dict]:
+        """Read ALL audit events across every JSONL file in the audit dir.
+
+        Optional *since_hours* restricts to events within the last N hours.
+        Returns a flat list of dicts sorted by timestamp (oldest first).
+        """
+        import json
+        import os
+        from config import NEXUS_CORE_STORAGE_DIR
+
+        audit_dir = os.path.join(NEXUS_CORE_STORAGE_DIR, "audit")
+        if not os.path.isdir(audit_dir):
+            return []
+
+        cutoff = None
+        if since_hours is not None:
+            from datetime import timedelta
+            cutoff = datetime.now() - timedelta(hours=since_hours)
+
+        events: List[dict] = []
+        for fname in os.listdir(audit_dir):
+            if not fname.endswith(".jsonl"):
+                continue
+            fpath = os.path.join(audit_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            evt = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if cutoff:
+                            try:
+                                ts = datetime.fromisoformat(evt.get("timestamp", ""))
+                                if ts < cutoff:
+                                    continue
+                            except (ValueError, TypeError):
+                                continue
+                        events.append(evt)
+            except Exception:
+                continue
+
+        events.sort(key=lambda e: e.get("timestamp", ""))
+        return events
     # --- NEXUS-CORE INTEGRATION ---
     
     @staticmethod

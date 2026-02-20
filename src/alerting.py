@@ -15,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 from state_manager import StateManager
-from config import AUDIT_LOG_FILE, LOGS_DIR
+from config import LOGS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -164,33 +164,9 @@ class AlertingSystem:
             Number of errors found
         """
         try:
-            if not os.path.exists(AUDIT_LOG_FILE):
-                return 0
-            
-            cutoff_time = datetime.now() - timedelta(hours=hours)
-            error_count = 0
-            
-            error_events = ['AGENT_FAILED', 'AGENT_TIMEOUT_KILL', 'ERROR', 'WORKFLOW_ERROR']
-            
-            with open(AUDIT_LOG_FILE, 'r') as f:
-                for line in f:
-                    try:
-                        # Parse timestamp
-                        timestamp_str = line.split('|')[0].strip()
-                        timestamp = datetime.fromisoformat(timestamp_str)
-                        
-                        if timestamp >= cutoff_time:
-                            # Check if line contains error event
-                            parts = line.split('|')
-                            if len(parts) >= 3:
-                                event_type = parts[2].strip()
-                                if event_type in error_events:
-                                    error_count += 1
-                    except:
-                        continue
-            
-            return error_count
-        
+            error_events = {'AGENT_FAILED', 'AGENT_TIMEOUT_KILL', 'ERROR', 'WORKFLOW_ERROR'}
+            events = StateManager.read_all_audit_events(since_hours=hours)
+            return sum(1 for e in events if e.get("event_type") in error_events)
         except Exception as e:
             logger.error(f"Error counting recent errors: {e}")
             return 0
@@ -251,33 +227,9 @@ class AlertingSystem:
             Number of agent failures
         """
         try:
-            if not os.path.exists(AUDIT_LOG_FILE):
-                return 0
-            
-            cutoff_time = datetime.now() - timedelta(hours=hours)
-            failure_count = 0
-            
-            failure_events = ['AGENT_FAILED', 'AGENT_TIMEOUT_KILL']
-            
-            with open(AUDIT_LOG_FILE, 'r') as f:
-                for line in f:
-                    try:
-                        # Parse timestamp
-                        timestamp_str = line.split('|')[0].strip()
-                        timestamp = datetime.fromisoformat(timestamp_str)
-                        
-                        if timestamp >= cutoff_time:
-                            # Check if line contains failure event
-                            parts = line.split('|')
-                            if len(parts) >= 3:
-                                event_type = parts[2].strip()
-                                if event_type in failure_events:
-                                    failure_count += 1
-                    except:
-                        continue
-            
-            return failure_count
-        
+            failure_events = {'AGENT_FAILED', 'AGENT_TIMEOUT_KILL'}
+            events = StateManager.read_all_audit_events(since_hours=hours)
+            return sum(1 for e in events if e.get("event_type") in failure_events)
         except Exception as e:
             logger.error(f"Error counting agent failures: {e}")
             return 0

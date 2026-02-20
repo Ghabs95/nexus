@@ -3,7 +3,6 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
-from models import WorkflowState
 from config import ALLOWED_USER_ID, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
 from plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 
@@ -85,7 +84,6 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    StateManager.set_workflow_state(issue_num, WorkflowState.PAUSED)
     StateManager.audit_log(int(issue_num), "WORKFLOW_PAUSED", "via nexus-core")
 
     status = await workflow_plugin.get_workflow_status(issue_num)
@@ -133,7 +131,6 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    StateManager.set_workflow_state(issue_num, WorkflowState.ACTIVE)
     StateManager.audit_log(int(issue_num), "WORKFLOW_RESUMED", "via nexus-core")
 
     status = await workflow_plugin.get_workflow_status(issue_num)
@@ -190,7 +187,6 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if not paused_for_stop:
         logger.warning(f"Could not pause workflow for issue #{issue_num} before closing")
-    StateManager.set_workflow_state(issue_num, WorkflowState.STOPPED)
     StateManager.audit_log(int(issue_num), "WORKFLOW_STOPPED")
 
     # Remove from launched_agents tracker to prevent false dead-agent alerts

@@ -2220,7 +2220,7 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         msg = await update.effective_message.reply_text(f"📊 Fetching audit trail for issue #{issue_num}...", parse_mode="Markdown")
         
-        # Get audit history from StateManager
+        # Get audit history from StateManager (now returns structured dicts)
         audit_history = StateManager.get_audit_history(issue_num, limit=100)
         
         if not audit_history:
@@ -2231,39 +2231,40 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Format audit trail
+        # Format audit trail from structured JSONL events
         timeline = f"📊 **Audit Trail for Issue #{issue_num}**\n"
         timeline += "=" * 40 + "\n\n"
-        
-        for event in audit_history:
-            # Format: timestamp | Issue #N | EVENT_TYPE | details
+
+        _EVENT_EMOJI = {
+            "AGENT_LAUNCHED": "🚀",
+            "AGENT_TIMEOUT_KILL": "⏱️",
+            "AGENT_RETRY": "🔄",
+            "AGENT_FAILED": "❌",
+            "WORKFLOW_PAUSED": "⏸️",
+            "WORKFLOW_RESUMED": "▶️",
+            "WORKFLOW_STOPPED": "🛑",
+            "AGENT_COMPLETION": "✅",
+            "WORKFLOW_STARTED": "🎬",
+            "WORKFLOW_CREATED": "📋",
+            "STEP_STARTED": "▶️",
+            "STEP_COMPLETED": "✅",
+        }
+
+        for evt in audit_history:
             try:
-                parts = event.split(" | ", 3)
-                timestamp = parts[0] if len(parts) > 0 else "?"
-                issue_ref = parts[1] if len(parts) > 1 else "?"
-                event_type = parts[2] if len(parts) > 2 else "?"
-                details = parts[3] if len(parts) > 3 else ""
-                
-                # Format event with emoji based on type
-                event_emoji = {
-                    "AGENT_LAUNCHED": "🚀",
-                    "AGENT_TIMEOUT_KILL": "⏱️",
-                    "AGENT_RETRY": "🔄",
-                    "AGENT_FAILED": "❌",
-                    "WORKFLOW_PAUSED": "⏸️",
-                    "WORKFLOW_RESUMED": "▶️",
-                    "WORKFLOW_STOPPED": "🛑",
-                    "AGENT_COMPLETION": "✅",
-                    "WORKFLOW_STARTED": "🎬"
-                }.get(event_type, "•")
-                
-                timeline += f"{event_emoji} **{event_type}** ({timestamp})\n"
+                event_type = evt.get("event_type", "?")
+                timestamp = evt.get("timestamp", "?")
+                data = evt.get("data", {})
+                details = data.get("details", "") if isinstance(data, dict) else ""
+                emoji = _EVENT_EMOJI.get(event_type, "•")
+
+                timeline += f"{emoji} **{event_type}** ({timestamp})\n"
                 if details:
                     timeline += f"   {details}\n"
                 timeline += "\n"
             except Exception as e:
-                logger.warning(f"Error parsing audit event: {e}")
-                timeline += f"• {event}\n\n"
+                logger.warning(f"Error formatting audit event: {e}")
+                timeline += f"• {evt}\n\n"
         
         # Telegram message limit safety
         max_len = 3500
@@ -2303,9 +2304,6 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text("📊 Generating analytics report...", parse_mode="Markdown")
     
     try:
-        # Get audit log path from config
-        audit_log_path = os.path.join(DATA_DIR, "audit.log")
-        
         # Parse optional lookback days argument
         lookback_days = 30  # default
         if context.args and len(context.args) > 0:
@@ -2319,7 +2317,7 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lookback_days = 30
         
         # Generate report
-        report = get_stats_report(audit_log_path, lookback_days=lookback_days)
+        report = get_stats_report(lookback_days=lookback_days)
         
         # Send report (handle Telegram message length limits)
         max_len = 3500
@@ -3366,7 +3364,6 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"Workflow has been stopped.",
                 parse_mode='Markdown'
             )
-            StateManager.set_workflow_state(real_issue, WorkflowState.STOPPED)
         except Exception as e:
             await query.edit_message_text(f"❌ Error denying workflow step: {e}")
 

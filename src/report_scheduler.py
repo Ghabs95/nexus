@@ -10,7 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from telegram import Bot
 from state_manager import StateManager
 from user_manager import get_user_manager
-from config import DATA_DIR, AUDIT_LOG_FILE
+from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -150,36 +150,20 @@ class ReportScheduler:
             Dict with activity statistics
         """
         try:
-            if not os.path.exists(AUDIT_LOG_FILE):
-                return {"error": "Audit log not found"}
-            
-            cutoff_time = datetime.now() - timedelta(hours=hours)
-            event_counts = {}
-            total_events = 0
-            
-            with open(AUDIT_LOG_FILE, 'r') as f:
-                for line in f:
-                    try:
-                        # Parse timestamp
-                        timestamp_str = line.split('|')[0].strip()
-                        timestamp = datetime.fromisoformat(timestamp_str)
-                        
-                        if timestamp >= cutoff_time:
-                            # Count event types
-                            parts = line.split('|')
-                            if len(parts) >= 3:
-                                event_type = parts[2].strip()
-                                event_counts[event_type] = event_counts.get(event_type, 0) + 1
-                                total_events += 1
-                    except:
-                        continue
-            
+            events = StateManager.read_all_audit_events(since_hours=hours)
+            if not events:
+                return {"total_events": 0, "event_types": {}, "time_window_hours": hours}
+
+            event_counts: dict = {}
+            for evt in events:
+                et = evt.get("event_type", "UNKNOWN")
+                event_counts[et] = event_counts.get(et, 0) + 1
+
             return {
-                "total_events": total_events,
+                "total_events": len(events),
                 "event_types": event_counts,
-                "time_window_hours": hours
+                "time_window_hours": hours,
             }
-        
         except Exception as e:
             logger.error(f"Error reading audit log: {e}")
             return {"error": str(e)}
