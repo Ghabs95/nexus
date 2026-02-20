@@ -732,7 +732,7 @@ def check_stuck_agents():
         # --- Strategy 1: stale log file detection (kills still-running agents) ---
         nexus_dir_name = get_nexus_dir_name()
         log_files = glob.glob(
-            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "logs", "**", "*_*.log"),
+            os.path.join(BASE_DIR, "**", nexus_dir_name, "tasks", "*", "logs", "*_*.log"),
             recursive=True
         )
 
@@ -818,7 +818,6 @@ def _check_dead_agents() -> None:
         return
 
     current_time = time.time()
-    dirty = False
 
     for issue_num, agent_data in list(launched_agents.items()):
         pid = agent_data.get("pid")
@@ -890,9 +889,10 @@ def _check_dead_agents() -> None:
                 continue
 
             _dead_agent_alerted.add(alert_key)
-            # Remove from tracker so the retry can write a fresh entry
+            # Remove from tracker before retrying so launch_next_agent's own
+            # save writes the fresh entry cleanly (no post-loop clobber).
             del launched_agents[issue_num]
-            dirty = True
+            save_launched_agents(launched_agents)
 
             # Actually relaunch — clear the LaunchGuard cooldown first so the
             # retry is not blocked by the now-dead previous launch record.
@@ -934,10 +934,7 @@ def _check_dead_agents() -> None:
             _dead_agent_alerted.add(alert_key)
             AgentMonitor.mark_failed(issue_num, agent_type, "Agent process exited without completion")
             del launched_agents[issue_num]
-            dirty = True
-
-    if dirty:
-        save_launched_agents(launched_agents)
+            save_launched_agents(launched_agents)
 
 
 def _resolve_project_for_issue(issue_num: str) -> Optional[str]:

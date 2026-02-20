@@ -555,8 +555,9 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
         try:
             project_label = project_root.replace("_", " ").title()
             notify_agent_completed(
-                issue_number=int(issue_number),
-                agent_name=next_agent,
+                issue_number=str(issue_number),
+                completed_agent=trigger_source,
+                next_agent=next_agent,
                 project=project_label
             )
         except Exception as e:
