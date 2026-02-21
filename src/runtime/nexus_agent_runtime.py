@@ -155,6 +155,15 @@ class NexusAgentRuntime(AgentRuntime):
             exclude_tools=exclude_tools,
         )
 
+        state = self.get_workflow_state(str(issue_number))
+        if state in {"COMPLETED", "FAILED", "CANCELLED"}:
+            logger.info(
+                "Skipping launch for issue #%s (%s): workflow is terminal (%s)",
+                issue_number,
+                agent_type,
+                state,
+            )
+            return None, None
     def load_launched_agents(self, recent_only: bool = True) -> Dict[str, dict]:
         from state_manager import StateManager
 
@@ -443,9 +452,10 @@ class NexusAgentRuntime(AgentRuntime):
                 state_str = json.load(f).get("state", "")
         except (FileNotFoundError, json.JSONDecodeError):
             return None
-        # WorkflowEngine stores: "active", "paused", "cancelled", "completed", "pending"
-        if state_str in ("paused", "cancelled"):
-            return state_str.upper()
+        # WorkflowEngine stores e.g. "running", "paused", "cancelled", "completed", "failed"
+        normalized = str(state_str).strip().lower()
+        if normalized in {"paused", "cancelled", "completed", "failed"}:
+            return normalized.upper()
         return None
 
     def should_retry_dead_agent(self, issue_number: str, agent_type: str) -> bool:
