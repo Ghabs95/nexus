@@ -73,6 +73,7 @@ GEMINI_PREFERRED = {
 ```bash
 # AI Orchestrator settings
 GEMINI_CLI_PATH="gemini"              # Path to gemini-cli
+GEMINI_MODEL="gemini-3-pro"           # Optional: force specific Gemini model (uses CLI auto-routing when empty)
 COPILOT_CLI_PATH="copilot"            # Path to copilot-cli
 AI_FALLBACK_ENABLED="true"            # Enable fallback support
 AI_RATE_LIMIT_TTL="3600"              # Rate limit timeout (seconds)
@@ -93,6 +94,7 @@ AI_TOOL_PREFERENCES = {
 
 ORCHESTRATOR_CONFIG = {
     "gemini_cli_path": os.getenv("GEMINI_CLI_PATH", "gemini"),
+   "gemini_model": os.getenv("GEMINI_MODEL", "").strip(),
     "copilot_cli_path": os.getenv("COPILOT_CLI_PATH", "copilot"),
     "tool_preferences": AI_TOOL_PREFERENCES,
     "fallback_enabled": True,
@@ -102,6 +104,12 @@ ORCHESTRATOR_CONFIG = {
    "refine_description_timeout": int(os.getenv("AI_REFINE_DESCRIPTION_TIMEOUT", "90")),
 }
 ```
+
+### Gemini Model Selection
+
+- When `GEMINI_MODEL` is empty, Gemini CLI uses its default/auto model routing.
+- When `GEMINI_MODEL` is set, Nexus passes `--model <value>` to Gemini CLI for agent launches.
+- Example values (subject to account availability): `gemini-3-flash`, `gemini-3-pro`, `gemini-3.1-pro`.
 
 ## Usage Patterns
 
@@ -148,7 +156,7 @@ result = orchestrator.run_text_to_speech_analysis(
     types=["feature", "bug-fix", "improvement"]
 )
 
-# Returns: {"project": "case-italia", "type": "feature", "issue_name": "user-auth-impl"}
+# Returns: {"project": "case-italia", "type": "feature", "task_name": "user-auth-impl"}
 ```
 
 ## Fallback & Rate Limiting

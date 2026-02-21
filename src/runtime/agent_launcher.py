@@ -56,6 +56,8 @@ def _completed_agent_from_trigger(trigger_source: str) -> str | None:
     source = str(trigger_source or "").strip().lstrip("@").strip()
     if not source:
         return None
+    if source.lower().startswith("manual-"):
+        return None
     normalized = source.lower()
     if normalized in _NON_AGENT_TRIGGER_SOURCES:
         return None
@@ -190,6 +192,53 @@ def _get_launch_policy_plugin():
     if plugin:
         _launch_policy_plugin = plugin
     return plugin
+
+
+def _merge_excluded_tools(*tool_lists) -> list[str]:
+    """Merge tool names preserving first-seen order."""
+    merged: list[str] = []
+    for tools in tool_lists:
+        if not tools:
+            continue
+        for tool in tools:
+            value = str(tool or "").strip().lower()
+            if value and value not in merged:
+                merged.append(value)
+    return merged
+
+
+def _tool_is_rate_limited(orchestrator, tool_name: str) -> bool:
+    """Return True when orchestrator has an active rate-limit cooldown for tool."""
+    try:
+        rate_limits = getattr(orchestrator, "_rate_limits", {})
+        if not isinstance(rate_limits, dict):
+            return False
+        info = rate_limits.get(str(tool_name or "").strip().lower())
+        if not isinstance(info, dict):
+            return False
+        until = float(info.get("until", 0) or 0)
+        return until > time.time()
+    except Exception:
+        return False
+
+
+def _persist_issue_excluded_tools(issue_num: str, tools: list[str]) -> None:
+    """Persist issue-level excluded tools in launched_agents state."""
+    if not issue_num or issue_num == "unknown":
+        return
+    merged = _merge_excluded_tools(tools)
+    if not merged:
+        return
+
+    launched_agents = StateManager.load_launched_agents(recent_only=False)
+    previous_entry = launched_agents.get(str(issue_num), {})
+    if not isinstance(previous_entry, dict):
+        previous_entry = {}
+
+    entry = dict(previous_entry)
+    entry["exclude_tools"] = _merge_excluded_tools(previous_entry.get("exclude_tools", []), merged)
+    launched_agents[str(issue_num)] = entry
+    StateManager.save_launched_agents(launched_agents)
 
 
 def _pgrep_and_logfile_guard(issue_id: str, agent_type: str) -> bool:
@@ -372,7 +421,7 @@ def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
         return False
 
 
-def get_sop_tier_from_issue(issue_number, project="nexus"):
+def get_sop_tier_from_issue(issue_number, project="nexus", repo_override: str | None = None):
     """Get workflow tier from issue labels.
 
     Delegates to nexus-core's GitHubPlatform.get_workflow_type_from_issue().
@@ -387,7 +436,7 @@ def get_sop_tier_from_issue(issue_number, project="nexus"):
     from orchestration.nexus_core_helpers import get_git_platform
 
     try:
-        repo = get_github_repo(project)
+        repo = repo_override or get_github_repo(project)
         platform_type = get_project_platform(project)
 
         if platform_type == "github":
@@ -406,7 +455,7 @@ def get_sop_tier_from_issue(issue_number, project="nexus"):
             return "full"
         return None
     except Exception as e:
-        logger.error(f"Failed to get tier from issue #{issue_number} in {project}: {e}")
+        logger.error(f"Failed to get tier from issue #{issue_number} in {project} ({repo}): {e}")
         return None
 
 
@@ -511,6 +560,10 @@ def invoke_copilot_agent(
         
         # Save to launched agents tracker
         if issue_num != "unknown":
+            dynamic_exclusions = []
+            if _tool_is_rate_limited(orchestrator, "gemini"):
+                dynamic_exclusions.append("gemini")
+
             launched_agents = StateManager.load_launched_agents()
             previous_entry = launched_agents.get(str(issue_num), {})
             if not isinstance(previous_entry, dict):
@@ -524,7 +577,11 @@ def invoke_copilot_agent(
                 'mode': mode,
                 'tool': tool_used.value,
                 'agent_type': agent_type,
-                'exclude_tools': list(exclude_tools) if exclude_tools else []
+                'exclude_tools': _merge_excluded_tools(
+                    previous_entry.get("exclude_tools", []),
+                    list(exclude_tools) if exclude_tools else [],
+                    dynamic_exclusions,
+                )
             })
             launched_agents[str(issue_num)] = entry
             StateManager.save_launched_agents(launched_agents)
@@ -547,6 +604,17 @@ def invoke_copilot_agent(
         
         issue_match = re.search(r"/issues/(\d+)", issue_url or "")
         issue_num = issue_match.group(1) if issue_match else "unknown"
+        message = str(e).lower()
+        if (
+            "gemini(rate-limited)" in message
+            or "no capacity available" in message
+            or _tool_is_rate_limited(orchestrator, "gemini")
+        ):
+            _persist_issue_excluded_tools(issue_num, ["gemini"])
+            logger.info(
+                "Persisted issue-level exclusion for Gemini on issue #%s due to rate-limit failure",
+                issue_num,
+            )
         if issue_num != "unknown":
             AuditStore.audit_log(
                 int(issue_num),
@@ -658,9 +726,9 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
     
     # Get workflow tier: launched_agents tracker → issue labels → halt if unknown
     from state_manager import StateManager
-    repo = get_github_repo(project_root)
+    repo = resolved_repo or get_github_repo(project_root)
     tracker_tier = StateManager.get_last_tier_for_issue(issue_number)
-    label_tier = get_sop_tier_from_issue(issue_number, project_root)
+    label_tier = get_sop_tier_from_issue(issue_number, project_root, repo_override=repo)
     tier_name = label_tier or tracker_tier
     if not tier_name:
         logger.error(

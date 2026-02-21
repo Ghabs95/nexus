@@ -32,6 +32,12 @@ def prepare_continue_context(
     get_sop_tier: Callable[[str], Tuple[str, Any, Any]],
 ) -> Dict[str, Any]:
     """Build context for /continue and return either a terminal state or launch payload."""
+    def _looks_like_agent_ref(token: str) -> bool:
+        value = str(token or "").strip()
+        if not value:
+            return False
+        return bool(re.fullmatch(r"@?[A-Za-z0-9][A-Za-z0-9_-]*", value))
+
     forced_agent = None
     filtered_rest: List[str] = []
     for token in (rest_tokens or []):
@@ -39,6 +45,10 @@ def prepare_continue_context(
             forced_agent = token[5:].strip()
         else:
             filtered_rest.append(token)
+
+    if not forced_agent and filtered_rest and _looks_like_agent_ref(filtered_rest[0]):
+        forced_agent = filtered_rest[0]
+        filtered_rest = filtered_rest[1:]
 
     continuation_prompt = " ".join(filtered_rest) if filtered_rest else "Please continue with the next step."
 
@@ -159,24 +169,24 @@ def prepare_continue_context(
     expected_running_agent = get_expected_running_agent_from_workflow(str(issue_num))
     normalized_expected = normalize_agent_reference(expected_running_agent) if expected_running_agent else None
     normalized_requested = normalize_agent_reference(agent_type) if agent_type else None
-    if normalized_expected and normalized_requested and normalized_expected != normalized_requested:
+    if (
+        not forced_agent
+        and normalized_expected
+        and normalized_requested
+        and normalized_expected != normalized_requested
+    ):
         logger.warning(
             "Continue issue #%s: requested agent '%s' does not match workflow RUNNING step '%s'; "
-            "blocking launch",
+            "auto-aligning to workflow state",
             issue_num,
             agent_type,
             expected_running_agent,
         )
-        return {
-            "status": "mismatch",
-            "message": (
-                f"⚠️ Workflow-state mismatch for issue #{issue_num}.\n\n"
-                f"Requested next agent: `{normalized_requested}`\n"
-                f"Workflow RUNNING step: `{normalized_expected}`\n\n"
-                "Launch blocked to avoid routing drift. Reconcile workflow state first, "
-                "then run /continue again."
-            ),
-        }
+        agent_type = normalized_expected
+        normalized_requested = normalized_expected
+
+    if not agent_type and normalized_expected:
+        agent_type = normalized_expected
 
     label_tier = get_sop_tier_from_issue(issue_num, project_name or project_key)
     if label_tier:
@@ -192,6 +202,7 @@ def prepare_continue_context(
         "issue_num": issue_num,
         "repo": repo,
         "agent_type": agent_type,
+        "forced_agent_override": bool(forced_agent),
         "resumed_from": resumed_from,
         "continuation_prompt": continuation_prompt,
         "agents_abs": os.path.join(base_dir, config["agents_dir"]),

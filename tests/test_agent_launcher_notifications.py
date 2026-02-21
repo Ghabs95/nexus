@@ -6,6 +6,7 @@ def test_returns_none_for_system_trigger_sources():
     assert _completed_agent_from_trigger("timeout-retry") is None
     assert _completed_agent_from_trigger("completion-scan") is None
     assert _completed_agent_from_trigger("github_webhook") is None
+    assert _completed_agent_from_trigger("manual-recover") is None
 
 
 def test_returns_agent_name_for_agent_like_trigger():

@@ -135,7 +135,7 @@ def _resolve_tier_for_issue(
         returned, a Telegram alert has already been sent.
     """
     tracker_tier = StateManager.get_last_tier_for_issue(issue_num)
-    label_tier = get_sop_tier_from_issue(issue_num, project_name)
+    label_tier = get_sop_tier_from_issue(issue_num, project_name, repo_override=repo)
 
     if tracker_tier and label_tier:
         # Both sources available — prefer label (canonical), but warn on mismatch
@@ -678,6 +678,32 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
     Called when the last agent finishes (next_agent is 'none' or empty).
     Delegates PR creation and issue closing to nexus-core GitHubPlatform.
     """
+    try:
+        workflow_plugin = get_workflow_state_plugin(
+            **_WORKFLOW_STATE_PLUGIN_KWARGS,
+            cache_key="workflow:state-engine",
+        )
+        if workflow_plugin and hasattr(workflow_plugin, "get_workflow_status"):
+            status = asyncio.run(workflow_plugin.get_workflow_status(str(issue_num)))
+            state = str((status or {}).get("state", "")).strip().lower()
+            if state and state not in {"completed", "failed", "cancelled"}:
+                logger.warning(
+                    "Skipping finalize for issue #%s: workflow state is non-terminal (%s)",
+                    issue_num,
+                    state,
+                )
+                send_telegram_alert(
+                    "⚠️ Finalization blocked for "
+                    f"issue #{issue_num}: workflow state is `{state}` (expected terminal)."
+                )
+                return
+    except Exception as exc:
+        logger.warning(
+            "Could not verify workflow state before finalize for issue #%s: %s",
+            issue_num,
+            exc,
+        )
+
     def _create_pr_from_changes(**kwargs):
         platform = get_git_platform(kwargs["repo"], project_name=project_name)
         pr_result = asyncio.run(
@@ -1204,6 +1230,24 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
             labels=labels,
         )
         if issue_url:
+            issue_num = issue_url.rstrip("/").split("/")[-1]
+            for label in labels:
+                if label.startswith("workflow:"):
+                    color = "0E8A16"
+                    description = "Workflow tier"
+                elif label.startswith("type:"):
+                    color = "1D76DB"
+                    description = "Task type"
+                else:
+                    color = "5319E7"
+                    description = "Project key"
+
+                try:
+                    creator.ensure_label(label, color, description)
+                except Exception:
+                    pass
+                creator.add_label(issue_num, label)
+
             logger.info("📋 Issue created via plugin")
             return issue_url
 
@@ -1213,13 +1257,13 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
 
 
 def generate_issue_name(content, project_name):
-    """Generate a concise issue name using orchestrator (CLI only).
+    """Generate a concise task name using orchestrator (CLI only).
     
-    Returns a slugified name in format: "this-is-the-issue-name"
+    Returns a slugified name in format: "this-is-the-task-name"
     Falls back to slugified content if AI tools are unavailable.
     """
     try:
-        logger.info("Generating concise issue name with orchestrator...")
+        logger.info("Generating concise task name with orchestrator...")
         result = orchestrator.run_text_to_speech_analysis(
             text=content[:500],
             task="generate_name",
@@ -1434,13 +1478,13 @@ def process_file(filepath):
             return  # Done processing webhook task
         
         # Standard task processing (create new GitHub issue)
-        # Check if issue name was already generated (in telegram_bot)
-        issue_name_match = re.search(r'\*\*Issue Name:\*\*\s*(.+)', content)
-        if issue_name_match:
-            slug = slugify(issue_name_match.group(1).strip())
-            logger.info(f"✅ Using pre-generated issue name: {slug}")
+        # Check if task name was already generated (in telegram_bot)
+        task_name_match = re.search(r'\*\*Task Name:\*\*\s*(.+)', content)
+        if task_name_match:
+            slug = slugify(task_name_match.group(1).strip())
+            logger.info(f"✅ Using pre-generated task name: {slug}")
         else:
-            # Fallback: Generate concise issue name using Gemini AI
+            # Fallback: Generate concise task name using Gemini AI
             slug = generate_issue_name(content, project_name)
 
         # Determine SOP tier using intelligent routing (pass content for WorkflowRouter analysis)

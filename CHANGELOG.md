@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- **Voice Transcription Support** — Added `WhisperTranscriptionProvider` for voice-to-text transcription, supporting various audio formats including OGG. Integrated the transcription adapter into the `AdapterRegistry` for seamless use.
+
 ---
 
 ## [2026-02-18] — Workflow Approval Gate

@@ -122,6 +122,34 @@ logging.basicConfig(
 )
 
 
+def _extract_json_dict(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+
+    candidates: List[str] = [text.strip()]
+
+    fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    candidates.extend(block.strip() for block in fenced_blocks if block.strip())
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        candidates.append(text[first_brace:last_brace + 1].strip())
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 class _SecretRedactingFilter(logging.Filter):
     """Redact sensitive values from log messages."""
 
@@ -198,6 +226,7 @@ def _workflow_handler_deps() -> WorkflowHandlerDeps:
         prepare_continue_context=prepare_continue_context,
         kill_issue_agent=kill_issue_agent,
         get_runtime_ops_plugin=get_runtime_ops_plugin,
+        get_workflow_state_plugin=get_workflow_state_plugin,
         scan_for_completions=scan_for_completions,
         normalize_agent_reference=_normalize_agent_reference,
         get_expected_running_agent_from_workflow=_get_expected_running_agent_from_workflow,
@@ -984,6 +1013,7 @@ def _command_handler_map():
         "stop": stop_handler,
         "track": track_handler,
         "untrack": untrack_handler,
+        "agents": agents_handler,
     }
 
 
@@ -995,7 +1025,11 @@ async def _dispatch_command(
     issue_num: str,
     rest: Optional[List[str]] = None,
 ) -> None:
-    context.args = [project_key, issue_num] + (rest or [])
+    project_only_commands = {"agents"}
+    if command in project_only_commands:
+        context.args = [project_key] + (rest or [])
+    else:
+        context.args = [project_key, issue_num] + (rest or [])
     handler = _command_handler_map().get(command)
     if handler:
         await handler(update, context)
@@ -1260,12 +1294,59 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
             return
 
-        if await _handle_pending_issue_input(update, context):
+        if (not update.message.voice) and await _handle_pending_issue_input(update, context):
             return
 
         # Guard: Don't process commands as tasks
         if update.message.text and update.message.text.startswith('/'):
             logger.info(f"Ignoring command in hands_free_handler: {update.message.text}")
+            return
+
+        pending_project = context.user_data.get("pending_task_project_resolution")
+        if pending_project:
+            selected = _normalize_project_key((update.message.text or "").strip())
+            if not selected or selected not in PROJECTS:
+                options = ", ".join(sorted(PROJECTS.keys()))
+                await update.message.reply_text(
+                    f"Please reply with a valid project key: {options}"
+                )
+                return
+
+            context.user_data.pop("pending_task_project_resolution", None)
+            project = selected
+            task_type = str(pending_project.get("task_type", "feature"))
+            if task_type not in TYPES:
+                task_type = "feature"
+            text = str(pending_project.get("raw_text", "")).strip()
+            content = str(pending_project.get("content", text)).strip()
+            task_name = str(pending_project.get("task_name", "")).strip()
+
+            status_msg = await update.message.reply_text("⚡ Project selected. Routing task...")
+
+            workspace = project
+            if project in PROJECT_CONFIG:
+                workspace = PROJECT_CONFIG[project].get("workspace", project)
+            target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace), project)
+            os.makedirs(target_dir, exist_ok=True)
+            filename = f"voice_task_{update.message.message_id}.md"
+            filepath = os.path.join(target_dir, filename)
+            with open(filepath, "w") as f:
+                f.write(
+                    f"# {TYPES.get(task_type, 'Task')}\n"
+                    f"**Project:** {PROJECTS.get(project, project)}\n"
+                    f"**Type:** {task_type}\n"
+                    f"**Task Name:** {task_name}\n"
+                    f"**Status:** Pending\n\n"
+                    f"{content}\n\n"
+                    f"---\n"
+                    f"**Raw Input:**\n{text}"
+                )
+
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=status_msg.message_id,
+                text=f"✅ Routed to `{project}`\n📝 *{content}*"
+            )
             return
 
         text = ""
@@ -1307,12 +1388,29 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Parse Result
         try:
-            if isinstance(result, dict) and result.get("parse_error") and result.get("text"):
-                result = json.loads(result["text"].replace("```json", "").replace("```", ""))
+            if isinstance(result, dict) and result.get("text"):
+                needs_reparse = result.get("parse_error") or "project" not in result
+                if needs_reparse:
+                    reparsed = _extract_json_dict(result["text"])
+                    if reparsed:
+                        result = reparsed
 
             project = result.get("project")
             if not project or project not in PROJECTS:
-                error_msg = f"❌ Could not classify project. Received: '{project}'\n\nPlease use /new command to manually select project."
+                task_type = result.get("type", "feature")
+                if task_type not in TYPES:
+                    task_type = "feature"
+                context.user_data["pending_task_project_resolution"] = {
+                    "raw_text": text or "",
+                    "content": result.get("text", text or ""),
+                    "task_type": task_type,
+                    "task_name": result.get("task_name", ""),
+                }
+                options = ", ".join(sorted(PROJECTS.keys()))
+                error_msg = (
+                    f"❌ Could not classify project (received: '{project}').\n\n"
+                    f"Reply with a project key: {options}"
+                )
                 logger.error(f"Project classification failed: project={project}, valid={list(PROJECTS.keys())}")
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
@@ -1327,8 +1425,8 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 task_type = "feature"
             
             content = result.get("text", text or "")
-            issue_name = result.get("issue_name", "")
-            logger.info(f"Parsed: project={project}, type={task_type}, issue_name={issue_name}")
+            task_name = result.get("task_name", "")
+            logger.info(f"Parsed: project={project}, type={task_type}, task_name={task_name}")
         except Exception as e:
             logger.error(f"JSON parsing error: {e}", exc_info=True)
             await context.bot.edit_message_text(
@@ -1358,7 +1456,15 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"Writing to file: {filepath}")
         with open(filepath, "w") as f:
             f.write(
-                f"# {TYPES.get(task_type, 'Task')}\n**Project:** {PROJECTS.get(project, project)}\n**Type:** {task_type}\n**Issue Name:** {issue_name}\n**Status:** Pending\n\n{content}")
+                f"# {TYPES.get(task_type, 'Task')}\n"
+                f"**Project:** {PROJECTS.get(project, project)}\n"
+                f"**Type:** {task_type}\n"
+                f"**Task Name:** {task_name}\n"
+                f"**Status:** Pending\n\n"
+                f"{content}\n\n"
+                f"---\n"
+                f"**Raw Input:**\n{text}"
+            )
 
         logger.info(f"✅ File saved: {filepath}")
         await context.bot.edit_message_text(
@@ -1447,19 +1553,19 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Failed to refine description: {e}")
 
-    # Generate issue name using orchestrator (CLI only)
-    issue_name = ""
+    # Generate task name using orchestrator (CLI only)
+    task_name = ""
     try:
-        logger.info("Generating issue name with orchestrator (len=%s)", len(refined_text))
+        logger.info("Generating task name with orchestrator (len=%s)", len(refined_text))
         name_result = orchestrator.run_text_to_speech_analysis(
             text=refined_text[:300],
             task="generate_name",
             project_name=PROJECTS.get(project)
         )
-        issue_name = name_result.get("text", "").strip().strip('"`\'')
+        task_name = name_result.get("text", "").strip().strip('"`\'')
     except Exception as e:
-        logger.warning(f"Failed to generate issue name: {e}")
-        issue_name = ""
+        logger.warning(f"Failed to generate task name: {e}")
+        task_name = ""
 
     # Write File
     # Map project name to workspace (e.g., "nexus" → "ghabs")
@@ -1472,10 +1578,10 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"{task_type}_{update.message.message_id}.md"
 
     with open(os.path.join(target_dir, filename), "w") as f:
-        issue_name_line = f"**Issue Name:** {issue_name}\n" if issue_name else ""
+        task_name_line = f"**Task Name:** {task_name}\n" if task_name else ""
         f.write(
             f"# {TYPES[task_type]}\n**Project:** {PROJECTS[project]}\n**Type:** {task_type}\n"
-            f"{issue_name_line}**Status:** Pending\n\n"
+            f"{task_name_line}**Status:** Pending\n\n"
             f"{refined_text}\n\n"
             f"---\n"
             f"**Raw Input:**\n{text}"

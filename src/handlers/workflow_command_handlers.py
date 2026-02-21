@@ -34,6 +34,7 @@ class WorkflowHandlerDeps:
     prepare_continue_context: Callable[..., Dict[str, Any]]
     kill_issue_agent: Callable[..., Dict[str, Any]]
     get_runtime_ops_plugin: Callable[..., Any]
+    get_workflow_state_plugin: Callable[..., Any]
     scan_for_completions: Callable[[str], List[Any]]
     normalize_agent_reference: Callable[[Optional[str]], Optional[str]]
     get_expected_running_agent_from_workflow: Callable[[str], Optional[str]]
@@ -235,6 +236,32 @@ async def continue_handler(
             f"⚠️ Unexpected continue state: {continue_ctx['status']}"
         )
         return
+
+    if continue_ctx.get("forced_agent_override"):
+        workflow_plugin = deps.get_workflow_state_plugin(
+            **deps.workflow_state_plugin_kwargs,
+            cache_key="workflow:state-engine",
+        )
+        reset_ok = False
+        if workflow_plugin:
+            try:
+                reset_ok = await workflow_plugin.reset_to_agent_for_issue(
+                    issue_num,
+                    continue_ctx["agent_type"],
+                )
+            except Exception as exc:
+                deps.logger.error(
+                    "Failed to reset workflow state for issue #%s to %s: %s",
+                    issue_num,
+                    continue_ctx["agent_type"],
+                    exc,
+                    exc_info=True,
+                )
+        if not reset_ok:
+            await update.effective_message.reply_text(
+                f"❌ Could not reset workflow to `{continue_ctx['agent_type']}` for issue #{issue_num}."
+            )
+            return
 
     resume_info = f" (after {continue_ctx['resumed_from']})" if continue_ctx["resumed_from"] else ""
     msg = await update.effective_message.reply_text(

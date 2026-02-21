@@ -189,7 +189,7 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         return
 
     if not context.args:
-        await update.effective_message.reply_text("⚠️ Usage: /agents <project>\n\nExample: /agents case_italia")
+        await deps.prompt_project_selection(update, context, "agents")
         return
 
     project = context.args[0].lower()

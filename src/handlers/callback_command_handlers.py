@@ -36,6 +36,12 @@ async def project_picker_handler(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["pending_command"] = command
     context.user_data["pending_project"] = project_key
 
+    if command == "agents":
+        context.user_data.pop("pending_command", None)
+        context.user_data.pop("pending_project", None)
+        await deps.dispatch_command(update, context, command, project_key, "")
+        return
+
     pending_issue = context.user_data.get("pending_issue")
     if pending_issue and command != "respond":
         context.user_data.pop("pending_issue", None)

@@ -312,6 +312,7 @@ def get_workflow_policy_plugin(
     *,
     resolve_git_dir: Optional[Callable[[str], Optional[str]]] = None,
     create_pr_from_changes: Optional[Callable[..., Optional[str]]] = None,
+    find_existing_pr: Optional[Callable[..., Optional[str]]] = None,
     close_issue: Optional[Callable[..., bool]] = None,
     send_notification: Optional[Callable[[str], None]] = None,
     build_workflow_complete_message: Optional[Callable[..., str]] = None,
@@ -323,6 +324,8 @@ def get_workflow_policy_plugin(
         overrides["resolve_git_dir"] = resolve_git_dir
     if create_pr_from_changes is not None:
         overrides["create_pr_from_changes"] = create_pr_from_changes
+    if find_existing_pr is not None:
+        overrides["find_existing_pr"] = find_existing_pr
     if close_issue is not None:
         overrides["close_issue"] = close_issue
     if send_notification is not None:
