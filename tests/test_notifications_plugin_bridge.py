@@ -11,7 +11,7 @@ class _FakePlugin:
 
 
 def test_send_telegram_alert_uses_plugin(monkeypatch):
-    import notifications
+    import integrations.notifications as notifications
 
     fake = _FakePlugin()
 

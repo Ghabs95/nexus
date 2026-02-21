@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 import sys
 sys.path.insert(0, '/home/ubuntu/git/ghabs/nexus/src')
-from notifications import (
+from integrations.notifications import (
     InlineKeyboard,
     send_notification,
     notify_agent_needs_input,
@@ -79,9 +79,9 @@ class TestInlineKeyboard:
 class TestNotificationFunctions:
     """Tests for notification helper functions."""
     
-    @patch('notifications._get_notification_plugin')
-    @patch('notifications.TELEGRAM_TOKEN', 'test_token')
-    @patch('notifications.TELEGRAM_CHAT_ID', '12345')
+    @patch('integrations.notifications._get_notification_plugin')
+    @patch('integrations.notifications.TELEGRAM_TOKEN', 'test_token')
+    @patch('integrations.notifications.TELEGRAM_CHAT_ID', '12345')
     def test_send_notification_success(self, mock_get_plugin):
         """Test successful notification send."""
         plugin = MagicMock()
@@ -97,9 +97,9 @@ class TestNotificationFunctions:
             reply_markup=None,
         )
     
-    @patch('notifications._get_notification_plugin')
-    @patch('notifications.TELEGRAM_TOKEN', 'test_token')
-    @patch('notifications.TELEGRAM_CHAT_ID', '12345')
+    @patch('integrations.notifications._get_notification_plugin')
+    @patch('integrations.notifications.TELEGRAM_TOKEN', 'test_token')
+    @patch('integrations.notifications.TELEGRAM_CHAT_ID', '12345')
     def test_send_notification_with_keyboard(self, mock_get_plugin):
         """Test notification with inline keyboard."""
         plugin = MagicMock()
@@ -114,15 +114,15 @@ class TestNotificationFunctions:
         assert 'reply_markup' in kwargs
         assert 'inline_keyboard' in kwargs['reply_markup']
     
-    @patch('notifications.TELEGRAM_TOKEN', None)
+    @patch('integrations.notifications.TELEGRAM_TOKEN', None)
     def test_send_notification_no_credentials(self):
         """Test notification when credentials not configured."""
         result = send_notification("Test")
         assert result is False
     
-    @patch('notifications._get_notification_plugin')
-    @patch('notifications.TELEGRAM_TOKEN', 'test_token')
-    @patch('notifications.TELEGRAM_CHAT_ID', '12345')
+    @patch('integrations.notifications._get_notification_plugin')
+    @patch('integrations.notifications.TELEGRAM_TOKEN', 'test_token')
+    @patch('integrations.notifications.TELEGRAM_CHAT_ID', '12345')
     def test_send_notification_plugin_error(self, mock_get_plugin):
         """Test notification when plugin returns failure."""
         plugin = MagicMock()
@@ -132,7 +132,7 @@ class TestNotificationFunctions:
         result = send_notification("Test")
         assert result is False
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_agent_needs_input(self, mock_send):
         """Test agent needs input notification."""
         mock_send.return_value = True
@@ -147,7 +147,7 @@ class TestNotificationFunctions:
         assert "TestAgent" in message
         assert "Preview text" in message
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_workflow_started(self, mock_send):
         """Test workflow started notification."""
         mock_send.return_value = True
@@ -163,7 +163,7 @@ class TestNotificationFunctions:
         assert "full" in message
         assert "feature" in message
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_agent_completed(self, mock_send):
         """Test agent completed notification."""
         mock_send.return_value = True
@@ -177,7 +177,7 @@ class TestNotificationFunctions:
         assert "OldAgent" in message
         assert "NewAgent" in message
 
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_agent_completed_legacy_agent_name_kwarg(self, mock_send):
         """Legacy agent_name kwarg should map to completed agent."""
         mock_send.return_value = True
@@ -194,7 +194,7 @@ class TestNotificationFunctions:
         assert "LegacyAgent" in message
         assert "NewAgent" in message
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_agent_timeout_with_retry(self, mock_send):
         """Test agent timeout notification when retry will happen."""
         mock_send.return_value = True
@@ -208,7 +208,7 @@ class TestNotificationFunctions:
         assert "#111" in message
         assert "TimeoutAgent" in message
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_agent_timeout_no_retry(self, mock_send):
         """Test agent timeout notification when no retry."""
         mock_send.return_value = True
@@ -222,7 +222,7 @@ class TestNotificationFunctions:
         assert "#222" in message
         assert "FailedAgent" in message
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_workflow_completed(self, mock_send):
         """Test workflow completed notification."""
         mock_send.return_value = True
@@ -235,7 +235,7 @@ class TestNotificationFunctions:
         assert "#333" in message
         assert "my-project" in message
     
-    @patch('notifications.send_notification')
+    @patch('integrations.notifications.send_notification')
     def test_notify_implementation_requested(self, mock_send):
         """Test implementation requested notification."""
         mock_send.return_value = True

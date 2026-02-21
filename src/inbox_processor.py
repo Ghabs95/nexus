@@ -10,6 +10,8 @@ import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+import yaml
+
 # Nexus Core framework imports — orchestration handled by ProcessOrchestrator
 
 # Import centralized configuration
@@ -22,13 +24,18 @@ from config import (
 )
 from state_manager import StateManager
 from models import WorkflowState
-from agent_monitor import AgentMonitor, WorkflowRouter
-from agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
-from ai_orchestrator import get_orchestrator
-from nexus_core_helpers import get_git_platform, get_workflow_definition_path, complete_step_for_issue
-from nexus_agent_runtime import NexusAgentRuntime
+from runtime.agent_monitor import AgentMonitor, WorkflowRouter
+from runtime.agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
+from orchestration.ai_orchestrator import get_orchestrator
+from orchestration.nexus_core_helpers import (
+    get_git_platform,
+    get_workflow_definition_path,
+    complete_step_for_issue,
+    start_workflow,
+)
+from runtime.nexus_agent_runtime import NexusAgentRuntime
 from nexus.core.process_orchestrator import ProcessOrchestrator
-from plugin_runtime import (
+from orchestration.plugin_runtime import (
     get_workflow_monitor_policy_plugin,
     get_profiled_plugin,
     get_runtime_ops_plugin,
@@ -39,12 +46,21 @@ from error_handling import (
     run_command_with_retry,
     RetryExhaustedError
 )
-from notifications import (
+from integrations.notifications import (
     notify_agent_needs_input,
     notify_agent_completed,
     notify_agent_timeout,
     notify_workflow_completed,
     send_telegram_alert
+)
+
+_STEP_COMPLETE_COMMENT_RE = re.compile(
+    r"^\s*##\s+.+?\bcomplete\b\s+—\s+([a-zA-Z0-9_-]+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_READY_FOR_COMMENT_RE = re.compile(
+    r"\bready\s+for\s+(?:\*\*)?`?@?([a-zA-Z0-9_-]+)",
+    re.IGNORECASE,
 )
 
 # Helper to get issue repo (currently defaults to nexus, should be extended for multi-project)
@@ -466,6 +482,161 @@ def _normalize_agent_reference(agent_ref: str) -> str:
     value = (agent_ref or "").strip()
     value = value.lstrip("@").strip()
     return value.strip("`").strip()
+
+
+def _extract_repo_from_issue_url(issue_url: str) -> str:
+    """Extract owner/repo from a GitHub issue URL."""
+    try:
+        parsed = urlparse(str(issue_url or "").strip())
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+    except Exception:
+        pass
+    return ""
+
+
+def _read_latest_local_completion(issue_num: str) -> Optional[dict]:
+    """Return latest local completion summary for issue, if present."""
+    nexus_dir_name = get_nexus_dir_name()
+    pattern = os.path.join(
+        BASE_DIR,
+        "**",
+        nexus_dir_name,
+        "tasks",
+        "*",
+        "completions",
+        f"completion_summary_{issue_num}.json",
+    )
+    matches = glob.glob(pattern, recursive=True)
+    if not matches:
+        return None
+
+    latest = max(matches, key=os.path.getmtime)
+    try:
+        with open(latest, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+
+    return {
+        "file": latest,
+        "mtime": os.path.getmtime(latest),
+        "agent_type": _normalize_agent_reference(str(payload.get("agent_type", ""))).lower(),
+        "next_agent": _normalize_agent_reference(str(payload.get("next_agent", ""))).lower(),
+    }
+
+
+def _read_latest_structured_comment(issue_num: str, repo: str, project_name: str) -> Optional[dict]:
+    """Return latest structured (non-automated) agent comment signal from GitHub."""
+    try:
+        platform = get_git_platform(repo, project_name=project_name)
+        comments = asyncio.run(platform.get_comments(str(issue_num)))
+    except Exception as exc:
+        logger.debug(f"Startup drift check skipped for issue #{issue_num}: {exc}")
+        return None
+
+    for comment in reversed(comments or []):
+        body = str(getattr(comment, "body", "") or "")
+        if "_Automated comment from Nexus._" in body:
+            continue
+
+        complete_match = _STEP_COMPLETE_COMMENT_RE.search(body)
+        next_match = _READY_FOR_COMMENT_RE.search(body)
+        if not (complete_match and next_match):
+            continue
+
+        return {
+            "comment_id": getattr(comment, "id", None),
+            "created_at": str(getattr(comment, "created_at", "") or ""),
+            "completed_agent": _normalize_agent_reference(complete_match.group(1)).lower(),
+            "next_agent": _normalize_agent_reference(next_match.group(1)).lower(),
+        }
+
+    return None
+
+
+def reconcile_completion_signals_on_startup() -> None:
+    """Audit workflow/comment/local completion alignment and alert on drift.
+
+    Safe startup check only: emits alerts when signals diverge, does not mutate
+    workflow state or completion files.
+    """
+    mappings = StateManager.load_workflow_mapping()
+    if not mappings:
+        return
+
+    for issue_num, workflow_id in mappings.items():
+        wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
+        try:
+            with open(wf_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+
+        state = str(payload.get("state", "")).strip().lower()
+        if state not in {"running", "paused"}:
+            continue
+
+        expected_running_agent = ""
+        for step in payload.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            if str(step.get("status", "")).strip().lower() != "running":
+                continue
+            agent = step.get("agent")
+            if not isinstance(agent, dict):
+                continue
+            expected_running_agent = _normalize_agent_reference(
+                str(agent.get("name") or agent.get("display_name") or "")
+            ).lower()
+            if expected_running_agent:
+                break
+
+        if not expected_running_agent:
+            continue
+
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        issue_url = str(metadata.get("github_issue_url", "") or "")
+        repo = _extract_repo_from_issue_url(issue_url)
+        project_name = str(metadata.get("project_name", "") or "")
+
+        local_signal = _read_latest_local_completion(str(issue_num))
+        comment_signal = (
+            _read_latest_structured_comment(str(issue_num), repo, project_name)
+            if repo
+            else None
+        )
+
+        drifts = []
+        local_next = (local_signal or {}).get("next_agent", "")
+        comment_next = (comment_signal or {}).get("next_agent", "")
+
+        if local_next and local_next != expected_running_agent:
+            drifts.append(f"local next={local_next}")
+        if comment_next and comment_next != expected_running_agent:
+            drifts.append(f"comment next={comment_next}")
+        if local_next and comment_next and local_next != comment_next:
+            drifts.append("local/comment disagree")
+
+        if not drifts:
+            continue
+
+        details = (
+            f"expected RUNNING={expected_running_agent}; "
+            f"local={local_next or 'n/a'}; "
+            f"comment={comment_next or 'n/a'}"
+        )
+        logger.warning(
+            f"Startup signal drift for issue #{issue_num} ({', '.join(drifts)}): {details}"
+        )
+        send_telegram_alert(
+            f"⚠️ Startup routing drift detected for issue #{issue_num}\n"
+            f"Workflow RUNNING: `{expected_running_agent}`\n"
+            f"Local completion next: `{local_next or 'n/a'}`\n"
+            f"Latest structured comment next: `{comment_next or 'n/a'}`\n\n"
+            "No automatic state changes were made. Reconcile manually before /continue."
+        )
 
 
 def _is_terminal_agent_reference(agent_ref: str) -> bool:
@@ -901,31 +1072,72 @@ def check_completed_agents():
     _post_completion_comments_from_logs()
 
 
-# SOP Checklist Templates
-SOP_FULL = """## SOP Checklist — New Feature
-- [ ] 1. **Vision & Scope** — Define requirements
-- [ ] 2. **Technical Feasibility** — Assess approach and timeline
-- [ ] 3. **Architecture Design** — Create ADR + breakdown
-- [ ] 4. **UX Design** — Design wireframes
-- [ ] 5. **Implementation** — Write code + tests
-- [ ] 6. **Quality Gate** — Verify coverage
-- [ ] 7. **Compliance Gate** — PIA (if user data)
-- [ ] 8. **Deployment** — Deploy to production
-- [ ] 9. **Documentation** — Update changelog + docs"""
+def _render_checklist_from_workflow(project_name: str, tier_name: str) -> str:
+    """Render checklist directly from workflow YAML step definitions.
 
-SOP_SHORTENED = """## SOP Checklist — Bug Fix
-- [ ] 1. **Triage** — Severity + routing
-- [ ] 2. **Root Cause Analysis** — Investigate issue
-- [ ] 3. **Fix** — Code + regression test
-- [ ] 4. **Verify** — Regression suite
-- [ ] 5. **Deploy** — Deploy to production
-- [ ] 6. **Document** — Update changelog"""
+    Returns empty string when the workflow file cannot be read/resolved.
+    """
+    from nexus.core.workflow import WorkflowDefinition
 
-SOP_FAST_TRACK = """## SOP Checklist — Fast-Track
-- [ ] 1. **Triage** — Route to repo
-- [ ] 2. **Implementation** — Code + tests
-- [ ] 3. **Verify** — Quick check
-- [ ] 4. **Deploy** — Deploy changes"""
+    workflow_path = get_workflow_definition_path(project_name)
+    if not workflow_path or not os.path.exists(workflow_path):
+        return ""
+
+    try:
+        with open(workflow_path, "r", encoding="utf-8") as handle:
+            definition = yaml.safe_load(handle)
+    except Exception:
+        return ""
+
+    workflow_type = WorkflowDefinition.normalize_workflow_type(
+        tier_name,
+        default=str(tier_name or "shortened"),
+    )
+    steps = WorkflowDefinition._resolve_steps(definition, workflow_type)
+    if not steps:
+        return ""
+
+    title_by_tier = {
+        "full": "Full Flow",
+        "shortened": "Shortened Flow",
+        "fast-track": "Fast-Track",
+    }
+    title = title_by_tier.get(workflow_type, str(workflow_type).replace("_", " ").title())
+    lines = [f"## SOP Checklist — {title}"]
+
+    rendered_index = 1
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("agent_type") == "router":
+            continue
+
+        step_name = str(step.get("name") or step.get("id") or f"Step {rendered_index}").strip()
+        step_desc = str(step.get("description") or "").strip()
+
+        if step_desc:
+            lines.append(f"- [ ] {rendered_index}. **{step_name}** — {step_desc}")
+        else:
+            lines.append(f"- [ ] {rendered_index}. **{step_name}**")
+        rendered_index += 1
+
+    return "\n".join(lines) if rendered_index > 1 else ""
+
+
+def _render_fallback_checklist(tier_name: str) -> str:
+    """Render minimal fallback checklist when workflow YAML cannot be resolved."""
+    heading_map = {
+        "full": "Full Flow",
+        "shortened": "Shortened Flow",
+        "fast-track": "Fast-Track",
+    }
+    heading = heading_map.get(str(tier_name), str(tier_name).replace("_", " ").title())
+    return (
+        f"## SOP Checklist — {heading}\n"
+        "- [ ] 1. **Implementation** — Complete required workflow steps\n"
+        "- [ ] 2. **Verification** — Validate results\n"
+        "- [ ] 3. **Documentation** — Record outcome"
+    )
 
 
 def get_sop_tier(task_type, title=None, body=None):
@@ -948,21 +1160,21 @@ def get_sop_tier(task_type, title=None, body=None):
             if suggested_label:
                 logger.info(f"🤖 WorkflowRouter suggestion: {suggested_label}")
                 if "fast-track" in suggested_label:
-                    return "fast-track", SOP_FAST_TRACK, "workflow:fast-track"
+                    return "fast-track", "", "workflow:fast-track"
                 elif "shortened" in suggested_label:
-                    return "shortened", SOP_SHORTENED, "workflow:shortened"
+                    return "shortened", "", "workflow:shortened"
                 elif "full" in suggested_label:
-                    return "full", SOP_FULL, "workflow:full"
+                    return "full", "", "workflow:full"
         except Exception as e:
             logger.warning(f"WorkflowRouter suggestion failed: {e}, falling back to task_type")
     
     # Fallback: Original task_type-based routing
     if any(t in task_type for t in ["hotfix", "chore", "simple"]):
-        return "fast-track", SOP_FAST_TRACK, "workflow:fast-track"
+        return "fast-track", "", "workflow:fast-track"
     elif "bug" in task_type:
-        return "shortened", SOP_SHORTENED, "workflow:shortened"
+        return "shortened", "", "workflow:shortened"
     else:
-        return "full", SOP_FULL, "workflow:full"
+        return "full", "", "workflow:full"
 
 
 def create_github_issue(title, body, project, workflow_label, task_type, tier_name, github_repo):
@@ -1225,7 +1437,8 @@ def process_file(filepath):
             title=slug,  # Use slug as preliminary title
             body=content  # Pass full content for intelligent routing
         )
-        sop_checklist = sop_template
+        workflow_checklist = _render_checklist_from_workflow(project_name, tier_name)
+        sop_checklist = workflow_checklist or sop_template or _render_fallback_checklist(tier_name)
 
         # Move file to project workspace active folder
         active_dir = get_tasks_active_dir(project_root, project_name)
@@ -1325,6 +1538,12 @@ def process_file(filepath):
             )
             if workflow_id:
                 logger.info(f"✅ Created nexus-core workflow: {workflow_id}")
+                started = asyncio.run(start_workflow(workflow_id, issue_num))
+                if not started:
+                    logger.warning(
+                        f"Created workflow {workflow_id} for issue #{issue_num} "
+                        "but failed to start it"
+                    )
                 try:
                     with open(new_filepath, 'a') as f:
                         f.write(f"**Workflow ID:** {workflow_id}\n")
@@ -1378,6 +1597,10 @@ def main():
     logger.info(f"Inbox Processor started on {BASE_DIR}")
     logger.info(f"Stuck agent monitoring enabled (threshold: {STUCK_AGENT_THRESHOLD}s)")
     logger.info(f"Agent comment monitoring enabled")
+    try:
+        reconcile_completion_signals_on_startup()
+    except Exception as e:
+        logger.error(f"Startup completion-signal drift check failed: {e}")
     last_check = time.time()
     check_interval = 60  # Check for stuck agents and comments every 60 seconds
     

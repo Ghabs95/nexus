@@ -20,7 +20,7 @@ from config import (
 )
 from state_manager import StateManager
 from audit_store import AuditStore
-from plugin_runtime import get_workflow_state_plugin
+from orchestration.plugin_runtime import get_workflow_state_plugin
 from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
 from nexus.adapters.git.gitlab import GitLabPlatform
@@ -157,7 +157,7 @@ async def create_workflow_for_issue(
             "Cannot create workflow without a YAML definition."
         )
         logger.error(msg)
-        from notifications import send_telegram_alert
+        from integrations.notifications import send_telegram_alert
         send_telegram_alert(f"❌ {msg}")
     elif not os.path.exists(workflow_definition_path):
         msg = (
@@ -165,7 +165,7 @@ async def create_workflow_for_issue(
             f"(project: {project_name})"
         )
         logger.error(msg)
-        from notifications import send_telegram_alert
+        from integrations.notifications import send_telegram_alert
         send_telegram_alert(f"❌ {msg}")
     return None
 
@@ -269,7 +269,7 @@ async def handle_approval_gate(
         project: Project name
     """
     def _notify_approval_required(**kwargs):
-        from notifications import notify_approval_required
+        from integrations.notifications import notify_approval_required
 
         notify_approval_required(**kwargs)
 

@@ -30,13 +30,38 @@ from config import (
 )
 from state_manager import StateManager
 from audit_store import AuditStore
-from notifications import notify_agent_completed, send_telegram_alert
-from ai_orchestrator import get_orchestrator, ToolUnavailableError
-from plugin_runtime import get_profiled_plugin
+from integrations.notifications import notify_agent_completed, send_telegram_alert
+from orchestration.ai_orchestrator import get_orchestrator, ToolUnavailableError
+from orchestration.plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
 _issue_plugin_cache = {}
 _launch_policy_plugin = None
+
+_NON_AGENT_TRIGGER_SOURCES = {
+    "unknown",
+    "github_webhook",
+    "push_completion",
+    "pr_opened",
+    "completion-scan",
+    "orchestrator",
+    "dead-agent-retry",
+    "orphan-timeout-retry",
+    "timeout-retry",
+}
+
+
+def _completed_agent_from_trigger(trigger_source: str) -> str | None:
+    """Return completed-agent label only when trigger_source is agent-like."""
+    source = str(trigger_source or "").strip().lstrip("@").strip()
+    if not source:
+        return None
+    normalized = source.lower()
+    if normalized in _NON_AGENT_TRIGGER_SOURCES:
+        return None
+    if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", source):
+        return None
+    return normalized
 
 
 def _get_issue_plugin(repo: str):
@@ -358,7 +383,7 @@ def get_sop_tier_from_issue(issue_number, project="nexus"):
     Returns: tier_name (full/shortened/fast-track) or None
     """
     from nexus.adapters.git.github import GitHubPlatform
-    from nexus_core_helpers import get_git_platform
+    from orchestration.nexus_core_helpers import get_git_platform
 
     try:
         repo = get_github_repo(project)
@@ -486,7 +511,12 @@ def invoke_copilot_agent(
         # Save to launched agents tracker
         if issue_num != "unknown":
             launched_agents = StateManager.load_launched_agents()
-            launched_agents[str(issue_num)] = {
+            previous_entry = launched_agents.get(str(issue_num), {})
+            if not isinstance(previous_entry, dict):
+                previous_entry = {}
+
+            entry = dict(previous_entry)
+            entry.update({
                 'timestamp': time.time(),
                 'pid': pid,
                 'tier': tier_name,
@@ -494,7 +524,8 @@ def invoke_copilot_agent(
                 'tool': tool_used.value,
                 'agent_type': agent_type,
                 'exclude_tools': list(exclude_tools) if exclude_tools else []
-            }
+            })
+            launched_agents[str(issue_num)] = entry
             StateManager.save_launched_agents(launched_agents)
             
             # Record in LaunchGuard for dedup
@@ -678,17 +709,17 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
             f"✅ Successfully launched @{next_agent} for issue #{issue_number} "
             f"(PID: {pid}, tool: {tool_used})"
         )
-        # Send notification
-        try:
-            project_label = project_root.replace("_", " ").title()
-            notify_agent_completed(
-                issue_number=str(issue_number),
-                completed_agent=trigger_source,
-                next_agent=next_agent,
-                project=project_label
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send notification: {e}")
+        completed_agent = _completed_agent_from_trigger(trigger_source)
+        if completed_agent:
+            try:
+                notify_agent_completed(
+                    issue_number=str(issue_number),
+                    completed_agent=completed_agent,
+                    next_agent=next_agent,
+                    project=project_root,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send notification: {e}")
         return pid, tool_used
     else:
         logger.error(f"❌ Failed to launch @{next_agent} for issue #{issue_number}")

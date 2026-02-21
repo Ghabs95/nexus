@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Dict, List, Optional
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, get_github_repo
-from plugin_runtime import get_profiled_plugin
+from orchestration.plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
 

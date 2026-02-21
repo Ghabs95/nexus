@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 from datetime import datetime
 from audit_store import AuditStore
 from config import STUCK_AGENT_THRESHOLD
-from plugin_runtime import get_runtime_ops_plugin
+from orchestration.plugin_runtime import get_runtime_ops_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,12 @@ class AgentMonitor:
     # Track retry counts per issue+agent
     retry_counters = {}
     MAX_RETRIES = 2  # Retry up to 2 times before giving up
+
+    @staticmethod
+    def _retry_key(issue_num: str, agent_name: str) -> str:
+        normalized_issue = str(issue_num or "").strip()
+        normalized_agent = str(agent_name or "").strip().lstrip("@").strip().lower()
+        return f"{normalized_issue}_{normalized_agent}"
 
     @staticmethod
     def check_timeout(issue_num: str, log_file: str) -> Tuple[bool, Optional[int]]:
@@ -67,7 +73,7 @@ class AgentMonitor:
     @staticmethod
     def should_retry(issue_num: str, agent_name: str) -> bool:
         """Check if we should retry this agent."""
-        key = f"{issue_num}_{agent_name}"
+        key = AgentMonitor._retry_key(issue_num, agent_name)
         retry_count = AgentMonitor.retry_counters.get(key, 0)
 
         if retry_count < AgentMonitor.MAX_RETRIES:
@@ -92,13 +98,13 @@ class AgentMonitor:
     def mark_failed(issue_num: str, agent_name: str, reason: str) -> None:
         """Mark an agent as permanently failed."""
         AuditStore.audit_log(int(issue_num), "AGENT_FAILED", reason)
-        key = f"{issue_num}_{agent_name}"
+        key = AgentMonitor._retry_key(issue_num, agent_name)
         AgentMonitor.retry_counters.pop(key, None)
 
     @staticmethod
     def reset_retries(issue_num: str, agent_name: str) -> None:
         """Reset retry counter for an issue+agent (called on success)."""
-        key = f"{issue_num}_{agent_name}"
+        key = AgentMonitor._retry_key(issue_num, agent_name)
         AgentMonitor.retry_counters.pop(key, None)
 
 

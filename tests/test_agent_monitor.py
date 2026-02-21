@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import patch, MagicMock
-from agent_monitor import AgentMonitor, WorkflowRouter
+from runtime.agent_monitor import AgentMonitor, WorkflowRouter
 
 
 class TestAgentMonitor:
@@ -15,13 +15,13 @@ class TestAgentMonitor:
         
         result = AgentMonitor.should_retry("42", "@ProjectLead")
         assert result is True
-        assert AgentMonitor.retry_counters["42_@ProjectLead"] == 1
+        assert AgentMonitor.retry_counters["42_projectlead"] == 1
     
     def test_should_retry_at_limit(self):
         """Test should_retry returns False when at retry limit."""
         # Reset and set to max retries
         AgentMonitor.retry_counters.clear()
-        AgentMonitor.retry_counters["42_@Copilot"] = AgentMonitor.MAX_RETRIES
+        AgentMonitor.retry_counters["42_copilot"] = AgentMonitor.MAX_RETRIES
         
         result = AgentMonitor.should_retry("42", "@Copilot")
         assert result is False
@@ -31,28 +31,36 @@ class TestAgentMonitor:
         AgentMonitor.retry_counters.clear()
         
         AgentMonitor.should_retry("42", "@Architect")
-        assert AgentMonitor.retry_counters["42_@Architect"] == 1
+        assert AgentMonitor.retry_counters["42_architect"] == 1
         
         AgentMonitor.should_retry("42", "@Architect")
-        assert AgentMonitor.retry_counters["42_@Architect"] == 2
+        assert AgentMonitor.retry_counters["42_architect"] == 2
     
     def test_reset_retries(self):
         """Test reset_retries clears counter for issue+agent."""
         AgentMonitor.retry_counters.clear()
-        AgentMonitor.retry_counters["42_@ProjectLead"] = 2
+        AgentMonitor.retry_counters["42_projectlead"] = 2
         
         AgentMonitor.reset_retries("42", "@ProjectLead")
-        assert "42_@ProjectLead" not in AgentMonitor.retry_counters
+        assert "42_projectlead" not in AgentMonitor.retry_counters
     
     def test_mark_failed(self):
         """Test mark_failed removes retry counter."""
         AgentMonitor.retry_counters.clear()
-        AgentMonitor.retry_counters["42_@Copilot"] = 1
+        AgentMonitor.retry_counters["42_copilot"] = 1
         
         AgentMonitor.mark_failed("42", "@Copilot", "Test failure")
-        assert "42_@Copilot" not in AgentMonitor.retry_counters
+        assert "42_copilot" not in AgentMonitor.retry_counters
+
+    def test_should_retry_uses_normalized_key(self):
+        """@prefix/case differences must share one retry counter."""
+        AgentMonitor.retry_counters.clear()
+
+        assert AgentMonitor.should_retry("42", "@Debug") is True
+        assert AgentMonitor.should_retry("42", "debug") is True
+        assert AgentMonitor.should_retry("42", " DEBUG ") is False
     
-    @patch('agent_monitor.get_runtime_ops_plugin')
+    @patch('runtime.agent_monitor.get_runtime_ops_plugin')
     def test_kill_agent_success(self, mock_get_runtime_ops):
         """Test kill_agent successfully terminates via runtime-ops plugin."""
         runtime_ops = MagicMock()
@@ -63,7 +71,7 @@ class TestAgentMonitor:
         assert result is True
         runtime_ops.kill_process.assert_called_once_with(12345, force=True)
     
-    @patch('agent_monitor.get_runtime_ops_plugin')
+    @patch('runtime.agent_monitor.get_runtime_ops_plugin')
     def test_kill_agent_failure(self, mock_get_runtime_ops):
         """Test kill_agent handles plugin kill failures gracefully."""
         runtime_ops = MagicMock()
@@ -73,7 +81,7 @@ class TestAgentMonitor:
         result = AgentMonitor.kill_agent(12345, "42")
         assert result is False
     
-    @patch('agent_monitor.get_runtime_ops_plugin')
+    @patch('runtime.agent_monitor.get_runtime_ops_plugin')
     @patch('os.path.getmtime')
     @patch('time.time')
     def test_check_timeout_detected(self, mock_time, mock_getmtime, mock_get_runtime_ops):
@@ -91,7 +99,7 @@ class TestAgentMonitor:
         assert timed_out is True
         assert pid == 12345
     
-    @patch('agent_monitor.get_runtime_ops_plugin')
+    @patch('runtime.agent_monitor.get_runtime_ops_plugin')
     @patch('os.path.getmtime')
     @patch('time.time')
     def test_check_timeout_not_detected(self, mock_time, mock_getmtime, mock_get_runtime_ops):

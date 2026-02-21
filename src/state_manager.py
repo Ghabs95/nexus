@@ -6,7 +6,7 @@ from config import (
     LAUNCHED_AGENTS_FILE, TRACKED_ISSUES_FILE,
     AGENT_RECENT_WINDOW, ensure_data_dir, ensure_logs_dir
 )
-from plugin_runtime import get_profiled_plugin
+from orchestration.plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
 

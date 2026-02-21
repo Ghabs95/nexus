@@ -38,6 +38,25 @@ Example: `.nexus/tasks/completions/completion_summary_35.json`
 | `verdict` | string | ❌ | Quality assessment or readiness statement |
 | `next_agent` | string | ❌ | `agent_type` string for the next agent in the workflow (e.g., "architect", "code_reviewer", "triage") |
 
+## Reviewer/QA Completion Checklist
+
+When the completing agent is a reviewer or QA gate (`reviewer`, `qa`, `code_reviewer`, etc.), include this in the completion summary before setting an approved status:
+
+- Full regression evidence is present (CI link or explicit full-suite command output).
+- Regression status is clearly stated in `key_findings` and/or `verdict`.
+- If regression is missing or failing, do **not** mark approval; set `approval_status`/`verification_status` to a non-approved value and route back to implementation.
+
+## Implementation Completion Checklist
+
+When the completing agent is an implementation executor (`developer`, `execution-lead`, `implementer`, etc.), include validation evidence before setting `status: "complete"`:
+
+- Run at least one syntax/static check command appropriate to the stack.
+  - Python: `python3 -m py_compile ...` and/or `pytest -q`
+  - Node/TS: `npm run lint` and/or project test command
+  - Flutter: `flutter analyze` (minimum expectation for Flutter apps)
+- Record exact command(s) and pass/fail outcome in `key_findings` and/or `verdict`.
+- If checks fail or cannot run in the environment, set `status` to `blocked` or `in-progress` and explain why; do **not** report completion.
+
 ## Example: Feature Implementation
 
 ```json

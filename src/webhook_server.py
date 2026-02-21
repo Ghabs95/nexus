@@ -33,9 +33,9 @@ from config import (
     WEBHOOK_SECRET,
     LOGS_DIR
 )
-from agent_launcher import launch_next_agent
-from plugin_runtime import get_github_webhook_policy_plugin
-from notifications import (
+from runtime.agent_launcher import launch_next_agent
+from orchestration.plugin_runtime import get_github_webhook_policy_plugin
+from integrations.notifications import (
     send_notification,
     notify_workflow_completed,
     send_telegram_alert

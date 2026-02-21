@@ -92,7 +92,7 @@ def test_webhook_blocks_unmapped_repository(mock_alert):
 
 
 def test_agent_launcher_resolves_issue_body_from_matching_project_repo(monkeypatch):
-    import agent_launcher
+    import runtime.agent_launcher as agent_launcher
 
     class PluginA:
         def get_issue(self, issue_number, fields):

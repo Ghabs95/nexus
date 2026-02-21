@@ -2,14 +2,15 @@
 
 import subprocess
 
-from ai_orchestrator import AIOrchestrator, AIProvider, RateLimitedError
+from orchestration.ai_orchestrator import AIOrchestrator, AIProvider, RateLimitedError
 
 
 class _FakeCompletedProcess:
-    def __init__(self, stdout: str = "{\"text\": \"ok\"}"):
+    def __init__(self, stdout: str = "{\"text\": \"ok\"}", returncode: int = 0):
         self.returncode = 0
         self.stdout = stdout
         self.stderr = ""
+        self.returncode = returncode
 
 
 def test_refine_description_default_keeps_original_text(monkeypatch):
@@ -66,3 +67,15 @@ def test_copilot_analysis_timeout_respects_config(monkeypatch):
 
     assert captured["timeout"] == 45
     assert result["project"] == "nexus"
+
+
+def test_check_tool_available_requires_successful_version_exit(monkeypatch):
+    orchestrator = AIOrchestrator()
+
+    def _fake_run(*_args, **_kwargs):
+        return _FakeCompletedProcess(stdout="error", returncode=1)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    orchestrator._tool_available.clear()
+
+    assert orchestrator.check_tool_available(AIProvider.GEMINI) is False

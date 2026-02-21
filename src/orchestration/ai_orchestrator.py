@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, Mapping, Optional
 
-from plugin_runtime import clear_cached_plugin, get_profiled_plugin
+from orchestration.plugin_runtime import clear_cached_plugin, get_profiled_plugin
 from nexus.plugins.builtin.ai_runtime_plugin import (
     AIOrchestrator,
     AIProvider,

@@ -5,7 +5,7 @@ from telegram.ext import ContextTypes
 from state_manager import StateManager
 from audit_store import AuditStore
 from config import ALLOWED_USER_ID, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
-from plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
+from orchestration.plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,8 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.effective_message.reply_text(
         f"▶️ **Workflow resumed for issue #{issue_num}**{status_text}\n\n"
-        f"Auto-chaining is re-enabled. The next agent will be launched when the current step completes.\n"
+        f"Auto-chaining is re-enabled. This command does not launch an agent immediately.\n"
+        f"Use /continue {project_key} {issue_num} to launch the next agent now, or wait for the current step to complete.\n"
         f"Check /active to see current progress."
     )
 
