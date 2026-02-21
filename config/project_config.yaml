@@ -96,10 +96,10 @@ wallible:
   workspace: wallible
   git_platform: gitlab
   gitlab_base_url: https://gitlab.com
-  git_repo: wallible/backend
+  git_repo: Ghabs95/agents
   git_repos:
-    - wallible/backend
-    - wallible/mobile-app
+    - wallible/wlbl-ecos
+    - wallible/wlbl-app
 
 biome:
   agents_dir: ghabs/agents/bm-agents
@@ -110,6 +110,9 @@ nexus:
   agents_dir: ghabs/nexus-core/examples/agents
   workspace: ghabs
   git_repo: Ghabs95/nexus-core
+  git_repos:
+    - Ghabs95/nexus-core
+    - Ghabs95/nexus
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
   workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
   # AI tool preferences for enterprise workflow agent types

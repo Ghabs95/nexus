@@ -59,12 +59,15 @@ class AgentMonitor:
             if not runtime_ops or not runtime_ops.kill_process(pid, force=True):
                 logger.error(f"Failed to kill agent PID {pid}")
                 return False
-            logger.warning(f"Killed stuck agent PID {pid} for issue #{issue_num}")
-            AuditStore.audit_log(
-                int(issue_num),
-                "AGENT_TIMEOUT_KILL",
-                f"Killed agent process PID {pid} after timeout"
-            )
+            issue_text = str(issue_num or "").strip()
+            issue_label = issue_text if issue_text else "unknown"
+            logger.warning(f"Killed stuck agent PID {pid} for issue #{issue_label}")
+            if issue_text.isdigit():
+                AuditStore.audit_log(
+                    int(issue_text),
+                    "AGENT_TIMEOUT_KILL",
+                    f"Killed agent process PID {pid} after timeout"
+                )
             return True
         except Exception as e:
             logger.error(f"Failed to kill agent PID {pid}: {e}")
@@ -160,7 +163,7 @@ class WorkflowRouter:
 
         if any(word in content for word in ["critical", "urgent", "hotfix", "asap"]):
             return "workflow:fast-track"
-        elif any(word in content for word in ["bug", "fix", "issue", "problem"]):
+        elif any(word in content for word in ["bug", "fix", "problem"]):
             return "workflow:shortened"
         elif any(
             word in content for word in ["feature", "add", "enhancement", "improvement", "new"]

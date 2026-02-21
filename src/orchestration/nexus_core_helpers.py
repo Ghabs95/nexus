@@ -300,6 +300,7 @@ async def complete_step_for_issue(
     issue_number: str,
     completed_agent_type: str,
     outputs: Dict[str, Any],
+    event_id: str = "",
 ):
     """Mark the current running step for *issue_number* as complete.
 
@@ -312,6 +313,7 @@ async def complete_step_for_issue(
         completed_agent_type: The ``agent_type`` that just finished.
         outputs: Structured outputs from the completion summary (use
             ``CompletionSummary.to_dict()`` or pass a raw dict).
+        event_id: Optional deduplication token (comment id / completion hash).
 
     Returns:
         Updated :class:`~nexus.core.models.Workflow` (inspect ``.state`` and
@@ -326,4 +328,5 @@ async def complete_step_for_issue(
         issue_number=str(issue_number),
         completed_agent_type=completed_agent_type,
         outputs=outputs,
+        event_id=event_id,
     )

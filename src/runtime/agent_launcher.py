@@ -239,19 +239,20 @@ _launch_guard = LaunchGuard(
 )
 
 
-def is_recent_launch(issue_number: str) -> bool:
+def is_recent_launch(issue_number: str, agent_type: str = "*") -> bool:
     """Check if an agent was recently launched for this issue.
 
     Delegates to nexus-core's LaunchGuard (cooldown + pgrep + logfile checks).
     Returns True if launched within cooldown window.
     """
-    # Use wildcard agent_type since callers don't differentiate
-    return not _launch_guard.can_launch(str(issue_number), agent_type="*")
+    normalized_agent = str(agent_type or "*").strip() or "*"
+    return not _launch_guard.can_launch(str(issue_number), agent_type=normalized_agent)
 
 
-def record_agent_launch(issue_number: str, pid: int = None) -> None:
+def record_agent_launch(issue_number: str, agent_type: str = "*", pid: int = None) -> None:
     """Record a successful agent launch in the LaunchGuard."""
-    _launch_guard.record_launch(str(issue_number), agent_type="*", pid=pid)
+    normalized_agent = str(agent_type or "*").strip() or "*"
+    _launch_guard.record_launch(str(issue_number), agent_type=normalized_agent, pid=pid)
 
 
 def clear_launch_guard(issue_number: str) -> int:
@@ -529,7 +530,7 @@ def invoke_copilot_agent(
             StateManager.save_launched_agents(launched_agents)
             
             # Record in LaunchGuard for dedup
-            record_agent_launch(issue_num, pid=pid)
+            record_agent_launch(issue_num, agent_type=agent_type, pid=pid)
             
             # Audit log
             AuditStore.audit_log(
@@ -581,15 +582,17 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
         exclude_tools: List of tool names to exclude from this launch attempt.
 
     Returns:
-        ``(pid, tool_name)`` on success, ``(None, None)`` on failure.
+        ``(pid, tool_name)`` on success.
+        ``(None, "duplicate-suppressed")`` when a duplicate launch is intentionally skipped.
+        ``(None, None)`` on failure.
     """
     issue_number = str(issue_number)
     logger.info(f"🔗 Launching next agent @{next_agent} for issue #{issue_number} (trigger: {trigger_source})")
     
     # Check for duplicate launches
-    if is_recent_launch(issue_number):
-        logger.info(f"⏭️ Skipping duplicate launch for issue #{issue_number}")
-        return None, None
+    if is_recent_launch(issue_number, next_agent):
+        logger.info(f"⏭️ Skipping duplicate launch for issue #{issue_number} agent @{next_agent}")
+        return None, "duplicate-suppressed"
 
     # Get issue details from the repo matching this issue's task-file project
     try:

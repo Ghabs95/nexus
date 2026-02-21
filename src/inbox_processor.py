@@ -695,9 +695,21 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
         platform = get_git_platform(kwargs["repo"], project_name=project_name)
         return bool(asyncio.run(platform.close_issue(kwargs["issue_number"], comment=kwargs["comment"])))
 
+    def _find_existing_pr(**kwargs):
+        platform = get_git_platform(kwargs["repo"], project_name=project_name)
+        issue_number = str(kwargs["issue_number"])
+        linked = asyncio.run(platform.search_linked_prs(issue_number))
+        if not linked:
+            return None
+
+        open_pr = next((pr for pr in linked if str(pr.state).lower() == "open"), None)
+        selected = open_pr or linked[0]
+        return selected.url
+
     workflow_policy = get_workflow_policy_plugin(
         resolve_git_dir=_resolve_git_dir,
         create_pr_from_changes=_create_pr_from_changes,
+        find_existing_pr=_find_existing_pr,
         close_issue=_close_issue,
         send_notification=send_telegram_alert,
         cache_key="workflow-policy:finalize",

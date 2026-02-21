@@ -146,15 +146,6 @@ class NexusAgentRuntime(AgentRuntime):
         trigger_source: str = "orchestrator",
         exclude_tools: Optional[List[str]] = None,
     ) -> Tuple[Optional[int], Optional[str]]:
-        from runtime.agent_launcher import launch_next_agent
-
-        return launch_next_agent(
-            issue_number=issue_number,
-            next_agent=agent_type,
-            trigger_source=trigger_source,
-            exclude_tools=exclude_tools,
-        )
-
         state = self.get_workflow_state(str(issue_number))
         if state in {"COMPLETED", "FAILED", "CANCELLED"}:
             logger.info(
@@ -163,7 +154,16 @@ class NexusAgentRuntime(AgentRuntime):
                 agent_type,
                 state,
             )
-            return None, None
+            return None, "workflow-terminal"
+
+        from runtime.agent_launcher import launch_next_agent
+
+        return launch_next_agent(
+            issue_number=issue_number,
+            next_agent=agent_type,
+            trigger_source=trigger_source,
+            exclude_tools=exclude_tools,
+        )
     def load_launched_agents(self, recent_only: bool = True) -> Dict[str, dict]:
         from state_manager import StateManager
 
@@ -537,6 +537,77 @@ class NexusAgentRuntime(AgentRuntime):
                 return name
             if display_name:
                 return display_name
+        return None
+
+    def get_agent_timeout_seconds(
+        self,
+        issue_number: str,
+        agent_type: Optional[str] = None,
+    ) -> Optional[int]:
+        """Return workflow-defined timeout for issue/agent when available."""
+        import json
+        from config import NEXUS_CORE_STORAGE_DIR
+        from state_manager import StateManager
+
+        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
+        if not workflow_id:
+            return None
+
+        wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
+        try:
+            with open(wf_file, "r") as f:
+                payload = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+        steps = payload.get("steps", [])
+        if not isinstance(steps, list):
+            return None
+
+        requested = str(agent_type or "").strip().lower()
+
+        def _step_agent_name(step: dict) -> str:
+            agent = step.get("agent")
+            if not isinstance(agent, dict):
+                return ""
+            return str(agent.get("name", "")).strip().lower()
+
+        def _timeout_from_step(step: dict) -> Optional[int]:
+            step_timeout = step.get("timeout")
+            if isinstance(step_timeout, (int, float)) and int(step_timeout) > 0:
+                return int(step_timeout)
+            agent = step.get("agent")
+            if not isinstance(agent, dict):
+                return None
+            agent_timeout = agent.get("timeout")
+            if isinstance(agent_timeout, (int, float)) and int(agent_timeout) > 0:
+                return int(agent_timeout)
+            return None
+
+        prioritized_steps = []
+        if requested:
+            prioritized_steps.extend(
+                step for step in steps
+                if isinstance(step, dict)
+                and str(step.get("status", "")).strip().upper() == "RUNNING"
+                and _step_agent_name(step) == requested
+            )
+        prioritized_steps.extend(
+            step for step in steps
+            if isinstance(step, dict)
+            and str(step.get("status", "")).strip().upper() == "RUNNING"
+        )
+        if requested:
+            prioritized_steps.extend(
+                step for step in steps
+                if isinstance(step, dict) and _step_agent_name(step) == requested
+            )
+
+        for step in prioritized_steps:
+            timeout = _timeout_from_step(step)
+            if timeout:
+                return timeout
+
         return None
 
     def is_process_running(self, issue_number: str) -> bool:

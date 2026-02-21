@@ -17,6 +17,18 @@ if os.path.exists(SECRET_FILE):
 else:
     logging.info(f"No {SECRET_FILE} found, relying on shell environment")
 
+
+def _get_int_env(name: str, default: int) -> int:
+    """Return integer environment variable value or fallback default."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER")) if os.getenv("ALLOWED_USER") else None
@@ -571,7 +583,9 @@ def get_tasks_logs_dir(workspace: str, project: str) -> str:
 # --- TIMING CONFIGURATION ---
 INBOX_CHECK_INTERVAL = 10  # seconds - how often to check for new completions
 SLEEP_INTERVAL = INBOX_CHECK_INTERVAL  # Alias for backward compatibility
-STUCK_AGENT_THRESHOLD = 60  # seconds - alert if no log activity for this long
+STUCK_AGENT_THRESHOLD = _get_int_env(
+    "NEXUS_STUCK_AGENT_THRESHOLD_SECONDS", 180
+)  # seconds - alert if no log activity for this long
 AGENT_RECENT_WINDOW = 120   # seconds - consider agent "recently launched" within this window
 AUTO_CHAIN_CYCLE = 60       # seconds - frequency of auto-chain polling
 

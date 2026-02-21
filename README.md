@@ -231,13 +231,13 @@ flowchart TD
 
 The system automatically detects and recovers from stuck agents:
 
-- **Detection**: Monitors log files for agents stuck >60 seconds without updates
+- **Detection**: Monitors log files for agents stuck beyond `STUCK_AGENT_THRESHOLD` (default: 180 seconds)
 - **Recovery**: Automatically kills unresponsive processes
 - **Retry Logic**: Up to 3 attempts per agent per issue (MAX_RETRIES=2)
 - **Tracking**: Per-issue, per-agent retry counters reset on success
 - **Audit Logging**: All timeouts, kills, and retries logged to audit trail
 
-**Implementation**: [src/agent_monitor.py](src/agent_monitor.py) - `AgentMonitor` class
+**Implementation**: [src/runtime/agent_monitor.py](src/runtime/agent_monitor.py) - `AgentMonitor` class
 
 ### 🎯 Conditional Workflow Routing
 
@@ -251,7 +251,7 @@ Issues are intelligently routed to the appropriate workflow tier:
 - **Fallback**: Uses task type if content analysis unavailable
 - **Integration**: Applied when issue is created in `process_file()`
 
-**Implementation**: [src/agent_monitor.py](src/agent_monitor.py) - `WorkflowRouter` class
+**Implementation**: [src/runtime/agent_monitor.py](src/runtime/agent_monitor.py) - `WorkflowRouter` class
 
 ### 📊 Audit Trail System
 
@@ -354,7 +354,7 @@ sudo systemctl status nexus-bot.service
 TELEGRAM_TOKEN=...
 GITHUB_TOKEN=...
 PROJECT_CONFIG_PATH=config/project_config.yaml
-INBOX_DIR=./.github/inbox
+NEXUS_STUCK_AGENT_THRESHOLD_SECONDS=180
 ```
 
 - Example bot commands and expected responses:
@@ -527,7 +527,7 @@ Edit the following dictionaries in [src/telegram_bot.py](src/telegram_bot.py) to
 Core configuration is centralized in [src/config.py](src/config.py):
 
 - **PROJECT_CONFIG**: Map projects to workspace, agent directories, and workflow definitions
-- **STUCK_AGENT_THRESHOLD**: Timeout threshold in seconds (default: 60)
+- **STUCK_AGENT_THRESHOLD**: Timeout threshold in seconds (default: 180, env: `NEXUS_STUCK_AGENT_THRESHOLD_SECONDS`)
 - **DATA_DIR**: Location for persistent state and audit logs
 
 Workflow orchestration is defined in YAML files (see `ghabs_org_workflow.yaml` in agents repo).
@@ -616,12 +616,12 @@ The system is split into focused, reusable modules:
 - Get workflow history with timestamps
 - Persist across service restarts
 
-**[src/agent_monitor.py](src/agent_monitor.py)**
+**[src/runtime/agent_monitor.py](src/runtime/agent_monitor.py)**
 - AgentMonitor: Timeout detection, process killing, retry tracking
 - WorkflowRouter: Label detection, NLP-based tier suggestions
 - Pluggable into any monitoring loop
 
-**[src/orchestration.py](src/orchestration.py)**
+**[src/orchestration/](src/orchestration/)**
 - WorkflowOrchestrator: Agent sequencing and tier detection
 - CompletionDetector: Parse completion markers from logs
 - Determine who finishes next in workflow
@@ -675,7 +675,7 @@ process_file() in inbox_processor.py
   
 Agent runs in background
   ↓
-inbox_processor.py polling loops (every 30 seconds)
+inbox_processor.py polling loops (every 10 seconds)
   ├─ check_stuck_agents()
   │  ├─ AgentMonitor.check_timeout()
   │  ├─ AgentMonitor.kill_agent() if stuck
@@ -708,8 +708,8 @@ See [requirements.txt](requirements.txt) for all dependencies.
 
 ### Timeout & Retry Issues
 
-- **Agent keeps timing out**: Check if process is actually running with `pgrep -af "copilot.*<issue#>"`. If not, check logs in `.github/tasks/logs/`.
-- **Retries not working**: Verify MAX_RETRIES=2 in [src/agent_monitor.py](src/agent_monitor.py). Check audit trail with `/audit <issue#>`.
+- **Agent keeps timing out**: Check if process is actually running with `pgrep -af "copilot.*<issue#>"`. If not, check logs in `.nexus/tasks/<project>/logs/`.
+- **Retries not working**: Verify MAX_RETRIES=2 in [src/runtime/agent_monitor.py](src/runtime/agent_monitor.py). Check audit trail with `/audit <issue#>`.
 - **Retry counter stuck**: Kill the service (`sudo systemctl restart nexus-processor`) to reset in-memory counters.
 
 ### Audit Trail Issues
