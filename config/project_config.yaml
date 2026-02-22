@@ -61,35 +61,24 @@ github_issue_triage:
 #     agent_type: "triage"       # This agent handles type: triage
 #     provider_preference: null  # Will use value from ai_tool_preferences
 ai_tool_preferences:
-  # Abstract agent types (used by nexus-core example workflows)
-  triage: copilot          # Initial issue analysis
-  debug: copilot           # Bug root cause analysis
-  escalation: copilot      # Urgent issues (escalate to senior agent)
-  design: copilot          # Architecture and design proposals
-  reviewer: copilot        # PR reviews
-  developer: copilot       # Code implementation
-  docs: gemini             # Documentation updates (faster)
-  summarizer: gemini       # Workflow summaries (faster)
-
-  # Ghabs org agent types (synchronized)
-  ceo: copilot               # Ghabs — vision & scope
-  cto: copilot               # Atlas — technical feasibility
-  advisor: copilot           # Business — strategic advisor
-  architect: copilot         # Architect — architecture design
-  ux-designer: copilot       # ProductDesigner — UX design
-  triage: copilot            # ProjectLead — triage & orchestration
-  backend-lead: copilot      # BackendLead — implementation & bug fixing
-  mobile-lead: copilot       # MobileLead
-  frontend-lead: copilot     # FrontendLead
-  quant-architect: copilot   # QuantArchitect
-  cloud-arch: copilot        # CloudArch
-  growth-lead: copilot       # GrowthLead
-  web-director: copilot      # WebDirector
-  content-lead: copilot      # ContentLead
-  reviewer: copilot          # QAGuard — quality gate & verification
-  compliance: copilot        # Privacy — compliance review
-  deployer: copilot          # OpsCommander — deployment & ops
-  docs: gemini               # Scribe — documentation (faster)
+  # Functional patterns (synchronized across all projects)
+  triage: copilot            # Initial issue analysis and routing
+  debug: copilot             # Bug root cause analysis
+  escalation: copilot        # Urgent issues
+  architect: copilot         # System design and architecture
+  developer: copilot         # Code implementation (leads, etc.)
+  marketing: copilot         # Growth, SEO, and content
+  reviewer: copilot          # PR reviews and verification (QA)
+  deployer: copilot          # Deployment and ops
+  compliance: copilot        # Security and privacy audits
+  designer: copilot          # UX/UI and product design
+  docs: gemini               # Documentation and scribing (faster)
+  summarizer: gemini         # Workflow summaries (faster)
+  
+  # Leadership/Advisory roles
+  ceo: copilot               # Vision and scope approval
+  cto: copilot               # Strategic technical feasibility
+  advisor: copilot           # Business strategy
 
 # Project configurations
 case_italia:
@@ -99,7 +88,7 @@ case_italia:
 
 wallible:
   agents_dir: wallible/wlbl-workflow-os/agents
-  workflow_definition_path: wallible/wlbl-workflow-os/workflows/wlbl_workflows.yaml
+  workflow_definition_path: wallible/wlbl-workflow-os/workflows/master.yaml
   workspace: wallible
   git_platform: gitlab
   git_repo: wallible/wlbl-workflow-os
@@ -127,11 +116,11 @@ nexus:
   # AI tool preferences for enterprise workflow agent types
   ai_tool_preferences:
     triage: copilot          # Triage agent - issue classification
-    design: copilot          # Design agent - architecture proposals
+    designer: copilot        # Design agent - architecture proposals
     debug: copilot           # Debug agent - root cause analysis
-    developer: copilot       # Developer agent - code implementation
-    reviewer: copilot        # Reviewer agent - PR reviews
+    developer: copilot       # Develop agent - code implementation
+    reviewer: copilot        # Review agent - PR reviews
     compliance: copilot      # Compliance agent - security/privacy review
-    deployer: copilot        # Deployer agent - merge & release
-    writer: gemini           # Writer agent - docs & close (faster)
-    finalizer: gemini        # Finalizer agent - rejected issue close (faster)
+    deployer: copilot        # Deploy agent - merge & release
+    writer: gemini           # Write agent - docs & close (faster)
+    finalizer: gemini        # Finalize agent - rejected issue close (faster)

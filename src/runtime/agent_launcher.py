@@ -348,19 +348,6 @@ def _build_agent_search_dirs(agents_dir: str) -> list:
     return dirs
 
 
-def _get_copilot_translator_path() -> str:
-    """Resolve the to_copilot.py translator path."""
-    env_path = os.getenv("COPILOT_TRANSLATOR_PATH")
-    if env_path:
-        return env_path
-    return os.path.join(
-        BASE_DIR,
-        "ghabs",
-        "nexus-core",
-        "examples",
-        "translator",
-        "to_copilot.py",
-    )
 
 
 def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
@@ -379,38 +366,19 @@ def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
         if os.path.getmtime(agent_md_path) >= os.path.getmtime(yaml_path):
             return True
 
-    translator_path = _get_copilot_translator_path()
-    if not os.path.exists(translator_path):
-        logger.error(f"Missing translator script: {translator_path}")
-        send_telegram_alert(
-            f"Missing translator script: {translator_path}."
-        )
-        return False
-
     try:
-        result = subprocess.run(
-            ["python3", translator_path, yaml_path],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.error(
-                "Translator failed: %s",
-                result.stderr.strip() or result.stdout.strip(),
-            )
-            send_telegram_alert(
-                f"Translator failed for agent_type '{agent_type}'."
-            )
-            return False
-        if not result.stdout.strip():
+        from nexus.translators.to_copilot import translate_agent_to_copilot
+        
+        md_content = translate_agent_to_copilot(yaml_path)
+        if not md_content or not md_content.strip():
             logger.error(f"Translator produced empty output for {yaml_path}")
             send_telegram_alert(
                 f"Translator produced empty output for agent_type '{agent_type}'."
             )
             return False
+            
         with open(agent_md_path, "w", encoding="utf-8") as handle:
-            handle.write(result.stdout)
+            handle.write(md_content)
         logger.info(f"✅ Generated agent instructions: {agent_md_path}")
         return True
     except Exception as e:
