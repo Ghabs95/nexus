@@ -29,10 +29,22 @@ def _get_int_env(name: str, default: int) -> int:
         return default
     return value if value > 0 else default
 
+def _parse_int_list(name: str) -> List[int]:
+    raw = os.getenv(name, "")
+    return [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER")) if os.getenv("ALLOWED_USER") else None
-TELEGRAM_CHAT_ID = ALLOWED_USER_ID  # Same as allowed user (for alerts)
+
+TELEGRAM_ALLOWED_USER_IDS = _parse_int_list("TELEGRAM_ALLOWED_USER_IDS")
+if not TELEGRAM_ALLOWED_USER_IDS and os.getenv("ALLOWED_USER"):
+    TELEGRAM_ALLOWED_USER_IDS = [int(os.getenv("ALLOWED_USER").strip())]
+TELEGRAM_CHAT_ID = TELEGRAM_ALLOWED_USER_IDS[0] if TELEGRAM_ALLOWED_USER_IDS else None
+
+# --- DISCORD CONFIGURATION ---
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_ALLOWED_USER_IDS = _parse_int_list("DISCORD_ALLOWED_USER_IDS")
+DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID")) if os.getenv("DISCORD_GUILD_ID") else None
 
 # --- PATHS & DIRECTORIES ---
 BASE_DIR = os.getenv("BASE_DIR", "/home/ubuntu/git")
@@ -44,6 +56,15 @@ WORKFLOW_STATE_FILE = os.path.join(DATA_DIR, "workflow_state.json")
 AUDIT_LOG_FILE = os.path.join(LOGS_DIR, "audit.log")
 INBOX_PROCESSOR_LOG_FILE = os.path.join(LOGS_DIR, "inbox_processor.log")
 TELEGRAM_BOT_LOG_FILE = os.path.join(LOGS_DIR, "telegram_bot.log")
+
+# --- AI CONFIGURATION ---
+AI_PERSONA = os.getenv(
+    "AI_PERSONA", 
+    "You are Nexus, a brilliant business advisor and technical architect (like Jarvis from Iron Man). The user is Ghabs, an ambitious CEO and Founder of many projects.\n\nAnswer the following question or brainstorm ideas directly and concisely. Keep your tone professional, highly capable, and slightly witty but always helpful."
+)
+
+# --- REDIS CONFIGURATION ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # --- GIT PLATFORM CONFIGURATION ---
 # Note: PROJECT_CONFIG_PATH is read from environment each time it's needed (for testing with monkeypatch)
@@ -616,8 +637,8 @@ def validate_configuration():
     if not TELEGRAM_TOKEN:
         errors.append("TELEGRAM_TOKEN is missing! Set it in vars.secret or environment.")
     
-    if not ALLOWED_USER_ID:
-        warnings.append("ALLOWED_USER is missing! Bot will not respond to anyone.")
+    if not TELEGRAM_ALLOWED_USER_IDS:
+        warnings.append("TELEGRAM_ALLOWED_USER_IDS are missing! Bot will not respond to anyone.")
     
     # Validate PROJECT_CONFIG (when loaded)
     try:

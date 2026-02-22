@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
 from audit_store import AuditStore
-from config import ALLOWED_USER_ID, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
+from config import TELEGRAM_ALLOWED_USER_IDS, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
 from orchestration.plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def _get_issue_plugin(repo: str):
 
 async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause auto-chaining for a workflow."""
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         return
 
     if not context.args or len(context.args) < 2:
@@ -102,7 +102,7 @@ async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resume auto-chaining for a paused workflow."""
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         return
 
     if not context.args or len(context.args) < 2:
@@ -150,7 +150,7 @@ async def resume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop a workflow and close the issue."""
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         return
 
     if not context.args or len(context.args) < 2:

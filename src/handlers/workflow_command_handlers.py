@@ -19,7 +19,7 @@ from runtime.agent_launcher import clear_launch_guard
 @dataclass
 class WorkflowHandlerDeps:
     logger: Any
-    allowed_user_id: Optional[int]
+    allowed_user_ids: List[int]
     base_dir: str
     default_repo: str
     project_config: Dict[str, Dict[str, Any]]
@@ -60,7 +60,7 @@ async def reprocess_handler(
     deps: WorkflowHandlerDeps,
 ) -> None:
     deps.logger.info(f"Reprocess requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -170,7 +170,7 @@ async def continue_handler(
     deps: WorkflowHandlerDeps,
 ) -> None:
     deps.logger.info(f"Continue requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -313,7 +313,7 @@ async def kill_handler(
     deps: WorkflowHandlerDeps,
 ) -> None:
     deps.logger.info(f"Kill requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -354,7 +354,7 @@ async def reconcile_handler(
     deps: WorkflowHandlerDeps,
 ) -> None:
     deps.logger.info(f"Reconcile requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -411,7 +411,7 @@ async def wfstate_handler(
     deps: WorkflowHandlerDeps,
 ) -> None:
     deps.logger.info(f"Wfstate requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -565,7 +565,7 @@ async def forget_handler(
     deps: WorkflowHandlerDeps,
 ) -> None:
     deps.logger.info(f"Forget requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 

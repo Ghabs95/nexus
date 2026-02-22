@@ -17,14 +17,16 @@ from telegram.ext import (
 
 # Import configuration from centralized config module
 from config import (
-    TELEGRAM_TOKEN, ALLOWED_USER_ID, BASE_DIR,
+    TELEGRAM_TOKEN, TELEGRAM_ALLOWED_USER_IDS, BASE_DIR,
     DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, get_github_repos, get_default_github_repo,
     get_default_project,
     PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
     get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir, get_tasks_logs_dir, get_nexus_dir_name,
+    AI_PERSONA,
     NEXUS_CORE_STORAGE_DIR,
 )
+from services.memory_service import get_chat_history, append_message
 from state_manager import StateManager
 from audit_store import AuditStore
 from models import WorkflowState
@@ -103,12 +105,15 @@ from handlers.callback_command_handlers import (
     monitor_project_picker_handler as callback_monitor_project_picker_handler,
     project_picker_handler as callback_project_picker_handler,
 )
+from handlers.chat_command_handlers import chat_menu_handler, chat_callback_handler
 from error_handling import format_error_for_user, run_command_with_retry
 from analytics import get_stats_report
 from rate_limiter import get_rate_limiter, RateLimit
 from report_scheduler import ReportScheduler
 from user_manager import get_user_manager
 from alerting import init_alerting_system
+from handlers.inbox_routing_handler import process_inbox_task, save_resolved_task, PROJECTS, TYPES
+
 
 # --- LOGGING ---
 logger = logging.getLogger(__name__)
@@ -208,9 +213,7 @@ _WORKFLOW_STATE_PLUGIN_KWARGS = {
 
 def _workflow_handler_deps() -> WorkflowHandlerDeps:
     return WorkflowHandlerDeps(
-        logger=logger,
-        allowed_user_id=ALLOWED_USER_ID,
-        base_dir=BASE_DIR,
+        allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
         default_repo=GITHUB_REPO,
         project_config=PROJECT_CONFIG,
         workflow_state_plugin_kwargs=_WORKFLOW_STATE_PLUGIN_KWARGS,
@@ -248,7 +251,7 @@ def _monitoring_handler_deps() -> MonitoringHandlerDeps:
 
     return MonitoringHandlerDeps(
         logger=logger,
-        allowed_user_id=ALLOWED_USER_ID,
+        allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
         base_dir=BASE_DIR,
         project_config=PROJECT_CONFIG,
         types_map=TYPES,
@@ -288,7 +291,7 @@ def _monitoring_handler_deps() -> MonitoringHandlerDeps:
 def _issue_handler_deps() -> IssueHandlerDeps:
     return IssueHandlerDeps(
         logger=logger,
-        allowed_user_id=ALLOWED_USER_ID,
+        allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
         base_dir=BASE_DIR,
         default_repo=GITHUB_REPO,
         prompt_project_selection=_prompt_project_selection,
@@ -315,7 +318,7 @@ def _issue_handler_deps() -> IssueHandlerDeps:
 def _ops_handler_deps() -> OpsHandlerDeps:
     return OpsHandlerDeps(
         logger=logger,
-        allowed_user_id=ALLOWED_USER_ID,
+        allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
         base_dir=BASE_DIR,
         project_config=PROJECT_CONFIG,
         prompt_project_selection=_prompt_project_selection,
@@ -413,6 +416,8 @@ def save_tracked_issues(data):
     """Save tracked issues to file."""
     StateManager.save_tracked_issues(data)
 
+
+# Moved `_extract_json_dict` and `_refine_task_description` to inbox_routing_handler.py
 
 def get_issue_details(issue_num, repo: str = None):
     """Query GitHub API for issue details."""
@@ -682,22 +687,6 @@ def find_task_file_by_issue(issue_num):
 
 
 # --- DATA ---
-PROJECTS = {
-    "case_italia": "Case Italia",
-    "wallible": "Wallible",
-    "biome": "Biome",
-    "nexus": "Nexus Core"
-}
-TYPES = {
-    "feature": "✨ Feature (full)",
-    "feature-simple": "✨ Simple Feature (fast-track)",
-    "bug": "🩹 Bug Fix (shortened)",
-    "hotfix": "🔥 Hotfix (fast-track)",
-    "release": "📦 Release (full)",
-    "chore": "🧹 Chore (fast-track)",
-    "improvement": "🚀 Improvement (full)",
-    "improvement-simple": "🚀 Simple Improvement (fast-track)"
-}
 
 PROJECT_ALIASES = {
     "casit": "case_italia",
@@ -1066,7 +1055,7 @@ active_tail_tasks: dict[tuple[int, int], asyncio.Task] = {}
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists available commands and usage info."""
     logger.info(f"Help triggered by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -1133,7 +1122,7 @@ def build_menu_keyboard(button_rows, include_back=True):
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the main menu with submenus."""
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -1160,7 +1149,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome message and persistent reply keyboard."""
     logger.info(f"Start triggered by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -1315,7 +1304,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             bool(update.message and update.message.voice),
             bool(update.message and update.message.text),
         )
-        if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
             logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
             return
 
@@ -1338,47 +1327,19 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
 
             context.user_data.pop("pending_task_project_resolution", None)
-            project = selected
-            task_type = str(pending_project.get("task_type", "feature"))
-            if task_type not in TYPES:
-                task_type = "feature"
-            text = str(pending_project.get("raw_text", "")).strip()
-            content = str(pending_project.get("content", text)).strip()
-            content = _refine_task_description(content, project)
-            task_name = str(pending_project.get("task_name", "")).strip()
-
-            status_msg = await update.message.reply_text("⚡ Project selected. Routing task...")
-
-            workspace = project
-            if project in PROJECT_CONFIG:
-                workspace = PROJECT_CONFIG[project].get("workspace", project)
-            target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace), project)
-            os.makedirs(target_dir, exist_ok=True)
-            filename = f"voice_task_{update.message.message_id}.md"
-            filepath = os.path.join(target_dir, filename)
-            with open(filepath, "w") as f:
-                f.write(
-                    f"# {TYPES.get(task_type, 'Task')}\n"
-                    f"**Project:** {PROJECTS.get(project, project)}\n"
-                    f"**Type:** {task_type}\n"
-                    f"**Task Name:** {task_name}\n"
-                    f"**Status:** Pending\n\n"
-                    f"{content}\n\n"
-                    f"---\n"
-                    f"**Raw Input:**\n{text}"
-                )
-
+            result = await save_resolved_task(pending_project, selected, str(update.message.message_id))
+            
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=status_msg.message_id,
-                text=f"✅ Routed to `{project}`\n📝 *{content}*"
+                text=result["message"]
             )
             return
 
         text = ""
         status_msg = await update.message.reply_text("⚡ AI Listening...")
 
-        # A. Handle Audio
+        # Get text from Audio or Text
         if update.message.voice:
             logger.info("Processing voice message...")
             text = await process_audio_with_gemini(update.message.voice.file_id, context)
@@ -1390,114 +1351,62 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     text="⚠️ Transcription failed"
                 )
                 return
-
-            logger.info("Running analysis on transcribed text...")
-            result = orchestrator.run_text_to_speech_analysis(
-                text=text,
-                task="classify",
-                projects=list(PROJECTS.keys()),
-                types=list(TYPES.keys())
-            )
-
-        # B. Handle Text
         else:
-            logger.info(f"Processing text for auto-routing... text={update.message.text[:50]}")
+            logger.info(f"Processing text input... text={update.message.text[:50]}")
             text = update.message.text
-            result = orchestrator.run_text_to_speech_analysis(
-                text=text,
-                task="classify",
-                projects=list(PROJECTS.keys()),
-                types=list(TYPES.keys())
-            )
 
-        logger.info(f"Analysis result: {result}")
+        logger.info(f"Detecting intent for: {text[:50]}...")
+        intent_result = orchestrator.run_text_to_speech_analysis(text=text, task="detect_intent")
+        
+        if isinstance(intent_result, dict) and intent_result.get("text"):
+            needs_reparse = intent_result.get("parse_error") or "intent" not in intent_result
+            if needs_reparse:
+                reparsed = _extract_json_dict(intent_result["text"])
+                if reparsed:
+                    intent_result = reparsed
 
-        # Parse Result
-        try:
-            if isinstance(result, dict) and result.get("text"):
-                needs_reparse = result.get("parse_error") or "project" not in result
-                if needs_reparse:
-                    reparsed = _extract_json_dict(result["text"])
-                    if reparsed:
-                        result = reparsed
-
-            project = result.get("project")
-            if not project or project not in PROJECTS:
-                task_type = result.get("type", "feature")
-                if task_type not in TYPES:
-                    task_type = "feature"
-                context.user_data["pending_task_project_resolution"] = {
-                    "raw_text": text or "",
-                    "content": result.get("text", text or ""),
-                    "task_type": task_type,
-                    "task_name": result.get("task_name", ""),
-                }
-                options = ", ".join(sorted(PROJECTS.keys()))
-                error_msg = (
-                    f"❌ Could not classify project (received: '{project}').\n\n"
-                    f"Reply with a project key: {options}"
-                )
-                logger.error(f"Project classification failed: project={project}, valid={list(PROJECTS.keys())}")
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=status_msg.message_id,
-                    text=error_msg
-                )
-                return
+        intent = intent_result.get("intent", "task")
+        
+        if intent == "conversation":
+            user_id = update.effective_user.id
+            history = get_chat_history(user_id)
+            append_message(user_id, "user", text)
             
-            task_type = result.get("type", "feature")
-            if task_type not in TYPES:
-                logger.warning(f"Type '{task_type}' not in TYPES, defaulting to 'feature'")
-                task_type = "feature"
-            
-            content = result.get("text", text or "")
-            content = _refine_task_description(content, project)
-            task_name = result.get("task_name", "")
-            logger.info(f"Parsed: project={project}, type={task_type}, task_name={task_name}")
-        except Exception as e:
-            logger.error(f"JSON parsing error: {e}", exc_info=True)
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=status_msg.message_id,
-                text="⚠️ JSON Error"
+                text="🤖 *Nexus:* Thinking...",
+                parse_mode="Markdown"
+            )
+            
+            chat_result = orchestrator.run_text_to_speech_analysis(
+                text=text, 
+                task="business_chat",
+                history=history,
+                persona=AI_PERSONA
+            )
+            
+            reply_text = chat_result.get("text", "I'm offline right now, how can I help later?")
+            append_message(user_id, "assistant", reply_text)
+            
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=status_msg.message_id,
+                text=f"🤖 *Nexus*: \n\n{reply_text}",
+                parse_mode="Markdown"
             )
             return
 
-        # Save to File
-        logger.info(f"Getting inbox dir for project: {project}")
+        result = await process_inbox_task(text, orchestrator, str(update.message.message_id))
         
-        # Map project name to workspace (e.g., "nexus" → "ghabs")
-        workspace = project
-        if project in PROJECT_CONFIG:
-            workspace = PROJECT_CONFIG[project].get("workspace", project)
-            logger.info(f"Mapped project '{project}' → workspace '{workspace}'")
-        else:
-            logger.warning(f"Project '{project}' not in PROJECT_CONFIG, using as-is for workspace")
-        
-        target_dir = get_inbox_dir(os.path.join(BASE_DIR, workspace), project)
-        logger.info(f"Target inbox dir: {target_dir}")
-        os.makedirs(target_dir, exist_ok=True)
-        filename = f"voice_task_{update.message.message_id}.md"
-        filepath = os.path.join(target_dir, filename)
-
-        logger.info(f"Writing to file: {filepath}")
-        with open(filepath, "w") as f:
-            f.write(
-                f"# {TYPES.get(task_type, 'Task')}\n"
-                f"**Project:** {PROJECTS.get(project, project)}\n"
-                f"**Type:** {task_type}\n"
-                f"**Task Name:** {task_name}\n"
-                f"**Status:** Pending\n\n"
-                f"{content}\n\n"
-                f"---\n"
-                f"**Raw Input:**\n{text}"
-            )
-
-        logger.info(f"✅ File saved: {filepath}")
+        if not result["success"]:
+            if "pending_resolution" in result:
+                context.user_data["pending_task_project_resolution"] = result["pending_resolution"]
+            
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=status_msg.message_id,
-            text=f"✅ Routed to `{project}`\n📝 *{content}*"
+            text=result["message"]
         )
     except Exception as e:
         logger.error(f"Unexpected error in hands_free_handler: {e}", exc_info=True)
@@ -1511,7 +1420,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # (Steps 1 & 2 are purely Telegram UI, no AI needed)
 
 async def start_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID: return
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS: return
     keyboard = [[InlineKeyboardButton(name, callback_data=code)] for code, name in PROJECTS.items()]
     keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
     await update.message.reply_text("📂 **Select Project:**", reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1650,7 +1559,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show active issues with current workflow step, agent type, tool, and duration."""
     logger.info(f"Progress requested by user: {update.effective_user.id}")
-    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -1985,7 +1894,9 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("assign", assign_handler))
     app.add_handler(CommandHandler("implement", implement_handler))
     app.add_handler(CommandHandler("prepare", prepare_handler))
+    app.add_handler(CommandHandler("chat", chat_menu_handler))
     # Menu navigation callbacks
+    app.add_handler(CallbackQueryHandler(chat_callback_handler, pattern=r'^chat:'))
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r'^menu:'))
     app.add_handler(CallbackQueryHandler(project_picker_handler, pattern=r'^pickcmd:'))
     app.add_handler(CallbackQueryHandler(issue_picker_handler, pattern=r'^pickissue'))

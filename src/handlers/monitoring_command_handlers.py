@@ -16,7 +16,7 @@ from telegram.ext import ContextTypes
 @dataclass
 class MonitoringHandlerDeps:
     logger: Any
-    allowed_user_id: Optional[int]
+    allowed_user_ids: List[int]
     base_dir: str
     project_config: Dict[str, Dict[str, Any]]
     types_map: Dict[str, str]
@@ -56,7 +56,7 @@ class MonitoringHandlerDeps:
 
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Status triggered by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -184,7 +184,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 
 async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Active triggered by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -320,7 +320,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 
 async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Logs requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -413,7 +413,7 @@ async def logsfull_handler(
     deps: MonitoringHandlerDeps,
 ) -> None:
     deps.logger.info(f"Logsfull requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -487,7 +487,7 @@ async def logsfull_handler(
 
 async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Tail requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -621,7 +621,7 @@ async def tailstop_handler(
     deps: MonitoringHandlerDeps,
 ) -> None:
     deps.logger.info(f"Tailstop requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -639,7 +639,7 @@ async def tailstop_handler(
 
 async def fuse_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Fuse status requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 

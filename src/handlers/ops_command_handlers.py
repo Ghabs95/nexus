@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 @dataclass
 class OpsHandlerDeps:
     logger: Any
-    allowed_user_id: Optional[int]
+    allowed_user_ids: List[int]
     base_dir: str
     project_config: Dict[str, Dict[str, Any]]
     prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
@@ -32,7 +32,7 @@ class OpsHandlerDeps:
 
 async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Audit trail requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -118,7 +118,7 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Stats requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -184,7 +184,7 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
 
 async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Agents requested by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
@@ -224,7 +224,7 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 
 async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Direct request by user: {update.effective_user.id}")
-    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
         deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 

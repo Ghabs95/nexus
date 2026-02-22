@@ -71,19 +71,25 @@ ai_tool_preferences:
   docs: gemini             # Documentation updates (faster)
   summarizer: gemini       # Workflow summaries (faster)
 
-  # Ghabs org agent types (used by ghabs_org_workflow.yaml)
+  # Ghabs org agent types (synchronized)
   ceo: copilot               # Ghabs — vision & scope
   cto: copilot               # Atlas — technical feasibility
-  business-advisor: copilot  # Business — strategic advisor
+  advisor: copilot           # Business — strategic advisor
   architect: copilot         # Architect — architecture design
-  product-designer: copilot  # ProductDesigner — UX design
-  project-lead: copilot      # ProjectLead — triage & orchestration
-  execution-lead: copilot    # ExecutionLead — implementation & bug fixing
-  qa: copilot                # QAGuard — quality gate & verification
-  privacy-advisor: copilot   # Privacy — compliance review
-  ops: copilot               # OpsCommander — deployment & ops
-  scribe: gemini             # Scribe — documentation (faster)
-  developer: copilot         # Developer — fast-track implementation
+  ux-designer: copilot       # ProductDesigner — UX design
+  triage: copilot            # ProjectLead — triage & orchestration
+  backend-lead: copilot      # BackendLead — implementation & bug fixing
+  mobile-lead: copilot       # MobileLead
+  frontend-lead: copilot     # FrontendLead
+  quant-architect: copilot   # QuantArchitect
+  cloud-arch: copilot        # CloudArch
+  growth-lead: copilot       # GrowthLead
+  web-director: copilot      # WebDirector
+  content-lead: copilot      # ContentLead
+  reviewer: copilot          # QAGuard — quality gate & verification
+  compliance: copilot        # Privacy — compliance review
+  deployer: copilot          # OpsCommander — deployment & ops
+  docs: gemini               # Scribe — documentation (faster)
 
 # Project configurations
 case_italia:
@@ -92,14 +98,18 @@ case_italia:
   git_repo: Ghabs95/agents
 
 wallible:
-  agents_dir: ghabs/agents/wlbl-agents
+  agents_dir: wallible/wlbl-workflow-os/agents
+  workflow_definition_path: wallible/wlbl-workflow-os/workflows/wlbl_workflows.yaml
   workspace: wallible
   git_platform: gitlab
   gitlab_base_url: https://gitlab.com
-  git_repo: Ghabs95/agents
+  git_repo: wallible/wlbl-workflow-os
   git_repos:
     - wallible/wlbl-ecos
     - wallible/wlbl-app
+    - wallible/wlbl-business-os
+    - wallible/wlbl-marketing-os
+    - wallible/wlbl-workflow-os
 
 biome:
   agents_dir: ghabs/agents/bm-agents
