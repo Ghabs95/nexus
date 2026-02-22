@@ -102,7 +102,6 @@ wallible:
   workflow_definition_path: wallible/wlbl-workflow-os/workflows/wlbl_workflows.yaml
   workspace: wallible
   git_platform: gitlab
-  gitlab_base_url: https://gitlab.com
   git_repo: wallible/wlbl-workflow-os
   git_repos:
     - wallible/wlbl-ecos
