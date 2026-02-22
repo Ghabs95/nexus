@@ -341,7 +341,7 @@ class TestNexusAgentRuntimePostCompletionComment:
         mock_platform.add_comment = AsyncMock(return_value=True)
         mock_platform.get_comments = AsyncMock(return_value=[])
 
-        with patch("nexus_core_helpers.get_git_platform", return_value=mock_platform):
+        with patch("orchestration.nexus_core_helpers.get_git_platform", return_value=mock_platform):
             result = runtime.post_completion_comment("44", "owner/repo", "body")
 
         assert result is True
@@ -363,7 +363,7 @@ class TestNexusAgentRuntimePostCompletionComment:
         mock_platform.get_comments = AsyncMock(return_value=[recent_comment])
         mock_platform.add_comment = AsyncMock(return_value=True)
 
-        with patch("nexus_core_helpers.get_git_platform", return_value=mock_platform):
+        with patch("orchestration.nexus_core_helpers.get_git_platform", return_value=mock_platform):
             result = runtime.post_completion_comment("44", "owner/repo", "body")
 
         assert result is True
@@ -386,7 +386,7 @@ class TestNexusAgentRuntimePostCompletionComment:
         mock_platform.get_comments = AsyncMock(return_value=[recent_comment])
         mock_platform.add_comment = AsyncMock(return_value=True)
 
-        with patch("nexus_core_helpers.get_git_platform", return_value=mock_platform):
+        with patch("orchestration.nexus_core_helpers.get_git_platform", return_value=mock_platform):
             result = runtime.post_completion_comment("44", "owner/repo", "body")
 
         assert result is True
@@ -411,7 +411,7 @@ class TestNexusAgentRuntimePostCompletionComment:
         mock_platform.get_comments = AsyncMock(return_value=[older_comment])
         mock_platform.add_comment = AsyncMock(return_value=True)
 
-        with patch("nexus_core_helpers.get_git_platform", return_value=mock_platform):
+        with patch("orchestration.nexus_core_helpers.get_git_platform", return_value=mock_platform):
             result = runtime.post_completion_comment("44", "owner/repo", "body")
 
         assert result is True
@@ -436,7 +436,7 @@ class TestNexusAgentRuntimePostCompletionComment:
         mock_platform.get_comments = AsyncMock(return_value=[older_comment])
         mock_platform.add_comment = AsyncMock(return_value=True)
 
-        with patch("nexus_core_helpers.get_git_platform", return_value=mock_platform):
+        with patch("orchestration.nexus_core_helpers.get_git_platform", return_value=mock_platform):
             result = runtime.post_completion_comment("44", "owner/repo", "body")
 
         assert result is True
@@ -447,7 +447,7 @@ class TestNexusAgentRuntimePostCompletionComment:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("nexus_core_helpers.get_git_platform", side_effect=RuntimeError("boom")):
+        with patch("orchestration.nexus_core_helpers.get_git_platform", side_effect=RuntimeError("boom")):
             result = runtime.post_completion_comment("44", "owner/repo", "body")
 
         assert result is False

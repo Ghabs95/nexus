@@ -186,6 +186,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             "- /wfstate <project> <issue#> — Show workflow state + drift\n"
             "- /reconcile <project> <issue#> — Reconcile workflow/comment/local state\n"
             "- /continue <project> <issue#> — Resume a stuck agent\n"
+            "- /forget <project> <issue#> — Purge local state for a stale/deleted issue\n"
             "- /kill <project> <issue#> — Stop a running agent\n"
             "- /pause <project> <issue#> — Pause auto-chaining\n"
             "- /resume <project> <issue#> — Resume auto-chaining\n"

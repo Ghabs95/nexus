@@ -285,6 +285,12 @@ def _get_orchestrator_config():
             "fallback_enabled": os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true",
             "rate_limit_ttl": int(os.getenv("AI_RATE_LIMIT_TTL", "3600")),
             "max_retries": int(os.getenv("AI_MAX_RETRIES", "2")),
+            "transcription_primary": os.getenv("TRANSCRIPTION_PRIMARY", "gemini").strip().lower(),
+            "gemini_transcription_timeout": _get_int_env("GEMINI_TRANSCRIPTION_TIMEOUT", 60),
+            "copilot_transcription_timeout": _get_int_env("COPILOT_TRANSCRIPTION_TIMEOUT", 120),
+            "whisper_model": os.getenv("WHISPER_MODEL", "whisper-1").strip(),
+            "whisper_language": os.getenv("WHISPER_LANGUAGE", "").strip().lower(),
+            "whisper_languages": os.getenv("WHISPER_LANGUAGES", "").strip().lower(),
         }
     return _orchestrator_config_cache["value"]
 
@@ -584,9 +590,6 @@ def get_tasks_logs_dir(workspace: str, project: str) -> str:
 # --- TIMING CONFIGURATION ---
 INBOX_CHECK_INTERVAL = 10  # seconds - how often to check for new completions
 SLEEP_INTERVAL = INBOX_CHECK_INTERVAL  # Alias for backward compatibility
-STUCK_AGENT_THRESHOLD = _get_int_env(
-    "NEXUS_STUCK_AGENT_THRESHOLD_SECONDS", 180
-)  # seconds - alert if no log activity for this long
 AGENT_RECENT_WINDOW = 120   # seconds - consider agent "recently launched" within this window
 AUTO_CHAIN_CYCLE = 60       # seconds - frequency of auto-chain polling
 

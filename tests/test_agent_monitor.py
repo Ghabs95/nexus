@@ -94,7 +94,7 @@ class TestAgentMonitor:
         runtime_ops.find_agent_pid_for_issue.return_value = 12345
         mock_get_runtime_ops.return_value = runtime_ops
         
-        timed_out, pid = AgentMonitor.check_timeout("42", "/tmp/test.log")
+        timed_out, pid = AgentMonitor.check_timeout("42", "/tmp/test.log", timeout_seconds=180)
         
         assert timed_out is True
         assert pid == 12345

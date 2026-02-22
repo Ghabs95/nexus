@@ -35,6 +35,7 @@ def get_orchestrator(config: Optional[Any] = None) -> AIOrchestrator:
         elif hasattr(config, "get"):
             keys = (
                 "gemini_cli_path",
+                "gemini_model",
                 "copilot_cli_path",
                 "tool_preferences",
                 "fallback_enabled",
@@ -42,6 +43,12 @@ def get_orchestrator(config: Optional[Any] = None) -> AIOrchestrator:
                 "max_retries",
                 "analysis_timeout",
                 "refine_description_timeout",
+                "transcription_primary",
+                "gemini_transcription_timeout",
+                "copilot_transcription_timeout",
+                "whisper_model",
+                "whisper_language",
+                "whisper_languages",
             )
             overrides = {
                 key: config.get(key)

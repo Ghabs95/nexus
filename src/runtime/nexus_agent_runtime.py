@@ -13,6 +13,7 @@ import os
 import re
 import time
 import glob
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -467,17 +468,21 @@ class NexusAgentRuntime(AgentRuntime):
 
         workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
         if not workflow_id:
-            return True
+            return False
 
         wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
         try:
             with open(wf_file, "r") as f:
                 payload = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return True
+            return False
 
         state_str = str(payload.get("state", "")).strip().lower()
         if state_str in {"completed", "failed", "cancelled"}:
+            return False
+
+        remote_issue_open = self._is_remote_issue_open(payload, issue_number)
+        if remote_issue_open is False:
             return False
 
         running_steps = []
@@ -500,6 +505,54 @@ class NexusAgentRuntime(AgentRuntime):
                 return True
 
         return False
+
+    def _is_remote_issue_open(self, payload: dict, issue_number: str) -> Optional[bool]:
+        """Best-effort check whether the source issue still exists and is open.
+
+        Returns:
+            True when confirmed open, False when confirmed closed/missing,
+            None when status cannot be determined.
+        """
+        try:
+            from orchestration.nexus_core_helpers import get_git_platform
+        except Exception:
+            return None
+
+        metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        if not isinstance(metadata, dict):
+            return None
+
+        issue_url = str(metadata.get("github_issue_url", "")).strip()
+        project_name = str(metadata.get("project", "")).strip() or None
+
+        repo_name = ""
+        issue_num = str(issue_number)
+        if issue_url:
+            parsed = urlparse(issue_url)
+            path_parts = [part for part in parsed.path.strip("/").split("/") if part]
+            if "issues" in path_parts:
+                idx = path_parts.index("issues")
+                if idx >= 2:
+                    repo_name = f"{path_parts[idx - 2]}/{path_parts[idx - 1]}"
+                if idx + 1 < len(path_parts):
+                    issue_num = path_parts[idx + 1]
+
+        try:
+            platform = get_git_platform(repo=repo_name or None, project_name=project_name)
+            details = platform.get_issue(str(issue_num), ["state"]) if platform else None
+            if not details:
+                return False
+            state = str(details.get("state", "")).strip().lower()
+            if state == "closed":
+                return False
+            if state:
+                return True
+            return None
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "404" in error_text or "not found" in error_text:
+                return False
+            return None
 
     def get_expected_running_agent(self, issue_number: str) -> Optional[str]:
         """Return the current RUNNING step agent type from workflow storage."""
@@ -623,11 +676,19 @@ class NexusAgentRuntime(AgentRuntime):
         return False
 
     def check_log_timeout(
-        self, issue_number: str, log_file: str
+        self,
+        issue_number: str,
+        log_file: str,
+        timeout_seconds: Optional[int] = None,
     ) -> Tuple[bool, Optional[int]]:
         from runtime.agent_monitor import AgentMonitor
 
-        return AgentMonitor.check_timeout(issue_number, log_file)
+        resolved_timeout = timeout_seconds or self.get_agent_timeout_seconds(issue_number)
+        return AgentMonitor.check_timeout(
+            issue_number,
+            log_file,
+            timeout_seconds=resolved_timeout,
+        )
 
     def kill_process(self, pid: int) -> bool:
         """Delegate to AgentMonitor.kill_agent for consistent kill + cleanup."""

@@ -5,7 +5,6 @@ import os
 from typing import Optional, Tuple
 from datetime import datetime
 from audit_store import AuditStore
-from config import STUCK_AGENT_THRESHOLD
 from orchestration.plugin_runtime import get_runtime_ops_plugin
 
 logger = logging.getLogger(__name__)
@@ -25,18 +24,43 @@ class AgentMonitor:
         return f"{normalized_issue}_{normalized_agent}"
 
     @staticmethod
-    def check_timeout(issue_num: str, log_file: str) -> Tuple[bool, Optional[int]]:
+    def check_timeout(
+        issue_num: str,
+        log_file: str,
+        timeout_seconds: Optional[int] = None,
+    ) -> Tuple[bool, Optional[int]]:
         """
         Check if an agent has timed out.
         
         Returns: (timed_out, pid)
         """
+        return AgentMonitor.check_timeout_with_threshold(
+            issue_num,
+            log_file,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @staticmethod
+    def check_timeout_with_threshold(
+        issue_num: str,
+        log_file: str,
+        timeout_seconds: Optional[int] = None,
+    ) -> Tuple[bool, Optional[int]]:
+        """Check if an agent timed out using a provided timeout value.
+
+        Falls back to 3600 seconds when timeout is missing/invalid.
+        """
         try:
+            threshold_seconds = (
+                int(timeout_seconds)
+                if isinstance(timeout_seconds, (int, float)) and int(timeout_seconds) > 0
+                else 3600
+            )
             current_time = time.time()
             last_modified = os.path.getmtime(log_file)
             time_since_update = current_time - last_modified
 
-            if time_since_update > STUCK_AGENT_THRESHOLD:
+            if time_since_update > threshold_seconds:
                 # Check if process is still running
                 runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:monitor")
                 pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None

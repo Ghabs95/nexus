@@ -27,7 +27,16 @@ def test_extract_repo_from_gitlab_issue_url_parses_namespace_repo():
 def test_resolve_repo_strict_raises_on_mismatch(monkeypatch):
     import inbox_processor
 
-    monkeypatch.setattr(inbox_processor, "get_github_repo", lambda project: "Ghabs95/nexus-core")
+    monkeypatch.setattr(
+        inbox_processor,
+        "PROJECT_CONFIG",
+        {
+            "nexus": {
+                "workspace": "ghabs/nexus",
+                "git_repo": "Ghabs95/nexus-core",
+            }
+        },
+    )
     monkeypatch.setattr(inbox_processor, "_resolve_repo_for_issue", lambda issue, default_project=None: "Ghabs95/nexus")
 
     with patch("inbox_processor.send_telegram_alert") as mock_alert:

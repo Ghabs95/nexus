@@ -99,6 +99,14 @@ Step through an interactive menu:
    ```
    TELEGRAM_TOKEN=your_telegram_bot_token
    ALLOWED_USER=your_user_id
+
+   # Voice transcription provider (default: gemini)
+   # Options: gemini | copilot | whisper
+   TRANSCRIPTION_PRIMARY=whisper
+
+   # Local Whisper settings (used when TRANSCRIPTION_PRIMARY=whisper)
+   # Common local models: tiny, base, small, medium, large
+   WHISPER_MODEL=base
    ```
 
    In config/project_config.yaml, make sure the nexus project points to the
@@ -231,7 +239,7 @@ flowchart TD
 
 The system automatically detects and recovers from stuck agents:
 
-- **Detection**: Monitors log files for agents stuck beyond `STUCK_AGENT_THRESHOLD` (default: 180 seconds)
+- **Detection**: Monitors log files using each workflow step's configured agent timeout
 - **Recovery**: Automatically kills unresponsive processes
 - **Retry Logic**: Up to 3 attempts per agent per issue (MAX_RETRIES=2)
 - **Tracking**: Per-issue, per-agent retry counters reset on success
@@ -354,7 +362,6 @@ sudo systemctl status nexus-bot.service
 TELEGRAM_TOKEN=...
 GITHUB_TOKEN=...
 PROJECT_CONFIG_PATH=config/project_config.yaml
-NEXUS_STUCK_AGENT_THRESHOLD_SECONDS=180
 ```
 
 - Example bot commands and expected responses:
@@ -527,7 +534,7 @@ Edit the following dictionaries in [src/telegram_bot.py](src/telegram_bot.py) to
 Core configuration is centralized in [src/config.py](src/config.py):
 
 - **PROJECT_CONFIG**: Map projects to workspace, agent directories, and workflow definitions
-- **STUCK_AGENT_THRESHOLD**: Timeout threshold in seconds (default: 180, env: `NEXUS_STUCK_AGENT_THRESHOLD_SECONDS`)
+- **Agent timeout**: Timeout is sourced from workflow step/agent timeout definitions
 - **DATA_DIR**: Location for persistent state and audit logs
 
 Workflow orchestration is defined in YAML files (see `ghabs_org_workflow.yaml` in agents repo).

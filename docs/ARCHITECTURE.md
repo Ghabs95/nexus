@@ -539,7 +539,7 @@ Other potential improvements:
 | Rate limit errors | Too many requests | Wait for window to reset or adjust limits |
 | GitHub auth errors | Token expired | `gh auth login` |
 | Notification silence | Telegram blocked | Check bot is not blocked in chat |
-| Agent timeout | Long-running task | Increase `STUCK_AGENT_THRESHOLD` in config |
+| Agent timeout | Long-running task | Increase the timeout on the workflow step/agent definition |
 
 ## References
 

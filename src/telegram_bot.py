@@ -56,6 +56,7 @@ from integrations.git_platform_utils import build_issue_url, resolve_repo
 from handlers.workflow_command_handlers import (
     WorkflowHandlerDeps,
     continue_handler as workflow_continue_handler,
+    forget_handler as workflow_forget_handler,
     kill_handler as workflow_kill_handler,
     pause_handler as workflow_pause_picker_handler,
     reconcile_handler as workflow_reconcile_handler,
@@ -1003,6 +1004,7 @@ def _command_handler_map():
         "reprocess": reprocess_handler,
         "reconcile": reconcile_handler,
         "continue": continue_handler,
+        "forget": forget_handler,
         "respond": respond_handler,
         "kill": kill_handler,
         "assign": assign_handler,
@@ -1102,6 +1104,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/wfstate <project> <issue#> - Show workflow state and drift snapshot\n"
         "/reconcile <project> <issue#> - Reconcile workflow/comment/local state\n"
         "/continue <project> <issue#> - Check stuck agent status\n"
+        "/forget <project> <issue#> - Permanently clear local state for an issue\n"
         "/kill <project> <issue#> - Stop running agent process\n"
         "/pause <project> <issue#> - Pause auto-chaining (agents work but no auto-launch)\n"
         "/resume <project> <issue#> - Resume auto-chaining\n"
@@ -1280,6 +1283,28 @@ async def process_audio_with_gemini(voice_file_id, context):
         return None
 
 
+def _refine_task_description(text: str, project_key: Optional[str] = None) -> str:
+    """Refine task description using orchestrator with graceful fallback."""
+    candidate_text = (text or "").strip()
+    if not candidate_text:
+        return ""
+
+    try:
+        logger.info("Refining description with orchestrator (len=%s)", len(candidate_text))
+        refine_result = orchestrator.run_text_to_speech_analysis(
+            text=candidate_text,
+            task="refine_description",
+            project_name=PROJECTS.get(project_key) if project_key else None,
+        )
+        refined = str(refine_result.get("text", "")).strip()
+        if refined:
+            return refined
+    except Exception as exc:
+        logger.warning("Failed to refine description: %s", exc)
+
+    return candidate_text
+
+
 # --- 1. HANDS-FREE MODE (Auto-Router) ---
 async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1319,6 +1344,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 task_type = "feature"
             text = str(pending_project.get("raw_text", "")).strip()
             content = str(pending_project.get("content", text)).strip()
+            content = _refine_task_description(content, project)
             task_name = str(pending_project.get("task_name", "")).strip()
 
             status_msg = await update.message.reply_text("⚡ Project selected. Routing task...")
@@ -1425,6 +1451,7 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 task_type = "feature"
             
             content = result.get("text", text or "")
+            content = _refine_task_description(content, project)
             task_name = result.get("task_name", "")
             logger.info(f"Parsed: project={project}, type={task_type}, task_name={task_name}")
         except Exception as e:
@@ -1769,6 +1796,11 @@ async def continue_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await workflow_continue_handler(update, context, _workflow_handler_deps())
 
 
+async def forget_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Permanently forget local workflow/tracker state for an issue."""
+    await workflow_forget_handler(update, context, _workflow_handler_deps())
+
+
 async def kill_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Kill a running Copilot agent process."""
     await workflow_kill_handler(update, context, _workflow_handler_deps())
@@ -1942,6 +1974,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("reprocess", reprocess_handler))
     app.add_handler(CommandHandler("reconcile", reconcile_handler))
     app.add_handler(CommandHandler("continue", continue_handler))
+    app.add_handler(CommandHandler("forget", forget_handler))
     app.add_handler(CommandHandler("kill", kill_handler))
     app.add_handler(CommandHandler("pause", pause_handler))
     app.add_handler(CommandHandler("resume", resume_handler))

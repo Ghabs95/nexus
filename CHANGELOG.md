@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Business Agent for Feature Suggestions** — Introduced a new agent type (`business`) that leverages AI to generate actionable feature suggestions for a given project. This agent processes project context and existing features to provide prioritized suggestions with rationale.
 - **Voice Transcription Support** — Added `WhisperTranscriptionProvider` for voice-to-text transcription, supporting various audio formats including OGG. Integrated the transcription adapter into the `AdapterRegistry` for seamless use.
 
 ---

@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from telegram import Update
 from telegram.ext import ContextTypes
+
+from config import NEXUS_CORE_STORAGE_DIR
+from state_manager import StateManager
+from runtime.agent_launcher import clear_launch_guard
 
 
 @dataclass
@@ -552,3 +557,86 @@ async def stop_handler(
 
     context.args = [project_key, issue_num]
     await deps.workflow_stop_handler(update, context)
+
+
+async def forget_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    deps: WorkflowHandlerDeps,
+) -> None:
+    deps.logger.info(f"Forget requested by user: {update.effective_user.id}")
+    if deps.allowed_user_id and update.effective_user.id != deps.allowed_user_id:
+        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    if not context.args:
+        await deps.prompt_project_selection(update, context, "forget")
+        return
+
+    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "forget")
+    if not project_key:
+        return
+
+    if project_key not in deps.project_config:
+        await update.effective_message.reply_text("❌ Invalid project.")
+        return
+
+    workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
+    workflow_file_deleted = False
+    if workflow_id:
+        workflow_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
+        if os.path.exists(workflow_file):
+            try:
+                os.remove(workflow_file)
+                workflow_file_deleted = True
+            except OSError as exc:
+                deps.logger.warning(
+                    "Failed to delete workflow file for issue #%s: %s",
+                    issue_num,
+                    exc,
+                )
+
+    runtime_ops = deps.get_runtime_ops_plugin(cache_key="runtime-ops:workflow")
+    pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None
+    killed = False
+    if pid and runtime_ops:
+        killed = bool(runtime_ops.kill_process(pid, force=True))
+
+    launched = StateManager.load_launched_agents(recent_only=False)
+    launched_removed = launched.pop(str(issue_num), None) is not None
+    StateManager.save_launched_agents(launched)
+
+    tracked = StateManager.load_tracked_issues()
+    tracked_removed = tracked.pop(str(issue_num), None) is not None
+    StateManager.save_tracked_issues(tracked)
+
+    StateManager.remove_workflow_mapping(str(issue_num))
+    StateManager.clear_pending_approval(str(issue_num))
+
+    cleared_guards = clear_launch_guard(str(issue_num))
+
+    try:
+        completion_path = os.path.join(os.path.dirname(NEXUS_CORE_STORAGE_DIR), "completion_comments.json")
+        with open(completion_path, "r", encoding="utf-8") as handle:
+            completion_data = json.load(handle) or {}
+        if isinstance(completion_data, dict):
+            to_delete = [key for key in completion_data.keys() if key.startswith(f"{issue_num}:")]
+            for key in to_delete:
+                completion_data.pop(key, None)
+            if to_delete:
+                with open(completion_path, "w", encoding="utf-8") as handle:
+                    json.dump(completion_data, handle)
+    except Exception as exc:
+        deps.logger.debug("completion_comments cleanup skipped for issue #%s: %s", issue_num, exc)
+
+    await update.effective_message.reply_text(
+        "🧹 **Issue state forgotten**\n\n"
+        f"Issue: #{issue_num}\n"
+        f"Project: {project_key}\n"
+        f"Workflow mapping: cleared{' (file deleted)' if workflow_file_deleted else ''}\n"
+        f"Tracker state: {'removed' if launched_removed else 'not present'}\n"
+        f"Tracked issue: {'removed' if tracked_removed else 'not present'}\n"
+        f"Running PID: {'killed' if killed else ('found but kill failed' if pid else 'none')}\n"
+        f"Launch guards cleared: {cleared_guards}\n\n"
+        "This issue will no longer auto-retry or emit orphan notifications unless relaunched manually."
+    )

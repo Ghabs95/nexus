@@ -17,7 +17,7 @@ import yaml
 # Import centralized configuration
 from config import (
     BASE_DIR, get_github_repo, get_github_repos, get_default_project, get_project_platform,
-    SLEEP_INTERVAL, STUCK_AGENT_THRESHOLD,
+    SLEEP_INTERVAL,
     PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
     NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir,
     get_tasks_logs_dir, get_nexus_dir_name
@@ -612,6 +612,72 @@ def reconcile_completion_signals_on_startup() -> None:
         local_next = (local_signal or {}).get("next_agent", "")
         comment_next = (comment_signal or {}).get("next_agent", "")
 
+        # Safe auto-reconcile path:
+        # if latest structured comment is from the currently RUNNING agent and
+        # points to a non-terminal next step, trust it and advance workflow.
+        comment_completed = (comment_signal or {}).get("completed_agent", "")
+        if (
+            comment_signal
+            and comment_completed
+            and comment_completed == expected_running_agent
+            and comment_next
+            and not _is_terminal_agent_reference(comment_next)
+        ):
+            try:
+                outputs = {
+                    "status": "complete",
+                    "agent_type": comment_completed,
+                    "next_agent": comment_next,
+                    "summary": (
+                        f"Auto-reconciled on startup from comment "
+                        f"{comment_signal.get('comment_id', 'n/a')}"
+                    ),
+                    "source": "startup-auto-reconcile",
+                }
+                asyncio.run(
+                    complete_step_for_issue(
+                        str(issue_num),
+                        comment_completed,
+                        outputs,
+                        event_id=f"startup:{comment_signal.get('comment_id', 'n/a')}",
+                    )
+                )
+                if local_signal and local_signal.get("file"):
+                    try:
+                        with open(local_signal["file"], "w", encoding="utf-8") as handle:
+                            json.dump(
+                                {
+                                    "status": "complete",
+                                    "agent_type": comment_completed,
+                                    "summary": outputs["summary"],
+                                    "key_findings": [
+                                        "Startup auto-reconciled from structured comment"
+                                    ],
+                                    "next_agent": comment_next,
+                                },
+                                handle,
+                                indent=2,
+                            )
+                    except Exception as file_exc:
+                        logger.debug(
+                            "Startup auto-reconcile could not rewrite local completion for issue #%s: %s",
+                            issue_num,
+                            file_exc,
+                        )
+                logger.info(
+                    "Startup auto-reconciled issue #%s: %s -> %s",
+                    issue_num,
+                    comment_completed,
+                    comment_next,
+                )
+                continue
+            except Exception as exc:
+                logger.debug(
+                    "Startup auto-reconcile skipped for issue #%s due to error: %s",
+                    issue_num,
+                    exc,
+                )
+
         if local_next and local_next != expected_running_agent:
             drifts.append(f"local next={local_next}")
         if comment_next and comment_next != expected_running_agent:
@@ -851,7 +917,6 @@ def _get_process_orchestrator() -> ProcessOrchestrator:
     _process_orchestrator = ProcessOrchestrator(
         runtime=runtime,
         complete_step_fn=complete_step_for_issue,
-        stuck_threshold_seconds=STUCK_AGENT_THRESHOLD,
         nexus_dir=get_nexus_dir_name(),
     )
     return _process_orchestrator
@@ -1651,7 +1716,7 @@ def process_file(filepath):
 
 def main():
     logger.info(f"Inbox Processor started on {BASE_DIR}")
-    logger.info(f"Stuck agent monitoring enabled (threshold: {STUCK_AGENT_THRESHOLD}s)")
+    logger.info("Stuck agent monitoring enabled (using workflow agent timeout)")
     logger.info(f"Agent comment monitoring enabled")
     try:
         reconcile_completion_signals_on_startup()
