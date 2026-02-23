@@ -1,3 +1,5 @@
+import asyncio
+
 from handlers import feature_ideation_handlers as handlers
 
 
@@ -135,6 +137,74 @@ class _CopilotFallbackSuccessOrchestrator:
                 }
             ]
         }
+
+
+class _StubChat:
+    id = 123
+
+
+class _StubUser:
+    id = 777
+
+
+class _StubMessage:
+    def __init__(self, message_id: int = 1):
+        self.message_id = message_id
+
+
+class _StubBot:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_message_text(self, **kwargs):
+        self.edits.append(kwargs)
+
+
+class _StubQuery:
+    def __init__(self, data: str, message_id: int = 1):
+        self.data = data
+        self.message = _StubMessage(message_id=message_id)
+        self.edits = []
+
+    async def answer(self):
+        return None
+
+    async def edit_message_text(self, text, reply_markup=None, parse_mode=None):
+        self.edits.append(
+            {
+                "text": text,
+                "reply_markup": reply_markup,
+                "parse_mode": parse_mode,
+            }
+        )
+
+
+class _FailAnswerQuery(_StubQuery):
+    async def answer(self):
+        raise RuntimeError("stale callback")
+
+
+class _StubContext:
+    def __init__(self):
+        self.user_data = {}
+        self.bot = _StubBot()
+
+
+class _StubUpdate:
+    def __init__(self, callback_query=None):
+        self.callback_query = callback_query
+        self.effective_chat = _StubChat()
+        self.effective_user = _StubUser()
+
+
+def _keyboard_callback_data(reply_markup) -> list[str]:
+    if reply_markup is None:
+        return []
+    callbacks = []
+    for row in getattr(reply_markup, "inline_keyboard", []):
+        for button in row:
+            callbacks.append(str(getattr(button, "callback_data", "")))
+    return callbacks
 
 
 def test_build_feature_suggestions_requires_agent_prompt(tmp_path):
@@ -677,3 +747,225 @@ def test_build_feature_suggestions_logs_success_when_copilot_fallback_succeeds(t
         in msg
         for msg in logger.messages
     )
+
+
+def test_handle_feature_ideation_request_prompts_count_first(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agents_dir = workspace_root / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "business.yaml").write_text(
+        "spec:\n"
+        "  agent_type: business\n"
+        "  prompt_template: |\n"
+        "    Dedicated Advisor Prompt\n",
+        encoding="utf-8",
+    )
+
+    deps = handlers.FeatureIdeationHandlerDeps(
+        logger=_CaptureLogger(),
+        allowed_user_ids=[],
+        projects={"acme": "Acme"},
+        get_project_label=lambda key: "Acme" if key == "acme" else key,
+        orchestrator=_CaptureOrchestrator(),
+        base_dir=str(tmp_path),
+        project_config={
+            "acme": {
+                "workspace": "workspace",
+                "agents_dir": "workspace/agents",
+                "chat_agents": {"business": {}},
+            }
+        },
+    )
+
+    update = _StubUpdate()
+    context = _StubContext()
+    status_msg = _StubMessage(message_id=42)
+
+    handled = asyncio.run(
+        handlers.handle_feature_ideation_request(
+            update=update,
+            context=context,
+            status_msg=status_msg,
+            text="Please propose new features for acme",
+            deps=deps,
+            preferred_project_key=None,
+            preferred_agent_type="business",
+        )
+    )
+
+    assert handled is True
+    assert context.user_data[handlers.FEATURE_STATE_KEY]["project"] == "acme"
+    assert context.user_data[handlers.FEATURE_STATE_KEY]["feature_count"] is None
+    assert context.user_data[handlers.FEATURE_STATE_KEY]["project_locked"] is True
+    assert context.bot.edits
+    assert "How many feature proposals" in context.bot.edits[-1]["text"]
+    callbacks = _keyboard_callback_data(context.bot.edits[-1]["reply_markup"])
+    assert "feat:choose_project" not in callbacks
+
+
+def test_feature_pick_starts_task_flow_with_selected_project(tmp_path):
+    created = {"calls": []}
+
+    async def _create_feature_task(text: str, message_id: str, project_key: str):
+        created["calls"].append(
+            {
+                "text": text,
+                "message_id": message_id,
+                "project_key": project_key,
+            }
+        )
+        return {"success": True, "message": "✅ Feature task started"}
+
+    deps = handlers.FeatureIdeationHandlerDeps(
+        logger=_CaptureLogger(),
+        allowed_user_ids=[],
+        projects={"acme": "Acme"},
+        get_project_label=lambda key: "Acme" if key == "acme" else key,
+        orchestrator=_CaptureOrchestrator(),
+        create_feature_task=_create_feature_task,
+    )
+
+    query = _StubQuery(data="feat:pick:0", message_id=777)
+    update = _StubUpdate(callback_query=query)
+    context = _StubContext()
+    context.user_data[handlers.FEATURE_STATE_KEY] = {
+        "project": "acme",
+        "items": [
+            {
+                "title": "Agent Consensus Engine",
+                "summary": "Introduce a consensus layer for critical validation.",
+                "why": "Improves quality.",
+                "steps": ["Define protocol", "Integrate workflow", "Ship reconciliation"],
+            }
+        ],
+        "agent_type": "business",
+        "feature_count": 1,
+        "source_text": "propose features",
+    }
+
+    asyncio.run(handlers.feature_callback_handler(update=update, context=context, deps=deps))
+
+    assert len(created["calls"]) == 1
+    assert created["calls"][0]["project_key"] == "acme"
+    assert query.edits
+    assert "Feature task started" in query.edits[-1]["text"]
+    callbacks = _keyboard_callback_data(query.edits[-1]["reply_markup"])
+    assert "feat:choose_project" not in callbacks
+
+
+def test_count_selection_shows_thinking_before_generating_features(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agents_dir = workspace_root / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "business.yaml").write_text(
+        "spec:\n"
+        "  agent_type: business\n"
+        "  prompt_template: |\n"
+        "    Dedicated Advisor Prompt\n",
+        encoding="utf-8",
+    )
+
+    deps = handlers.FeatureIdeationHandlerDeps(
+        logger=_CaptureLogger(),
+        allowed_user_ids=[],
+        projects={"acme": "Acme"},
+        get_project_label=lambda key: "Acme" if key == "acme" else key,
+        orchestrator=_CaptureOrchestrator(),
+        base_dir=str(tmp_path),
+        project_config={
+            "acme": {
+                "workspace": "workspace",
+                "agents_dir": "workspace/agents",
+                "chat_agents": {"business": {}},
+            }
+        },
+    )
+
+    query = _StubQuery(data="feat:count:2", message_id=888)
+    update = _StubUpdate(callback_query=query)
+    context = _StubContext()
+    context.user_data[handlers.FEATURE_STATE_KEY] = {
+        "project": "acme",
+        "project_locked": True,
+        "items": [],
+        "agent_type": "business",
+        "feature_count": None,
+        "source_text": "new features for acme",
+    }
+
+    asyncio.run(handlers.feature_callback_handler(update=update, context=context, deps=deps))
+
+    assert len(query.edits) >= 2
+    assert "Nexus thinking" in query.edits[0]["text"]
+
+
+def test_back_to_feature_list_uses_cached_items_without_regeneration():
+    class _NoCallOrchestrator:
+        def run_text_to_speech_analysis(self, **_kwargs):
+            raise AssertionError("Should not regenerate on back-to-list when items are cached")
+
+    deps = handlers.FeatureIdeationHandlerDeps(
+        logger=_CaptureLogger(),
+        allowed_user_ids=[],
+        projects={"acme": "Acme"},
+        get_project_label=lambda key: "Acme" if key == "acme" else key,
+        orchestrator=_NoCallOrchestrator(),
+    )
+
+    query = _StubQuery(data="feat:project:acme", message_id=900)
+    update = _StubUpdate(callback_query=query)
+    context = _StubContext()
+    context.user_data[handlers.FEATURE_STATE_KEY] = {
+        "project": "acme",
+        "items": [
+            {
+                "title": "Cached feature",
+                "summary": "Use cached suggestions.",
+                "why": "Fast UI.",
+                "steps": ["A", "B", "C"],
+            }
+        ],
+        "agent_type": "business",
+        "feature_count": 1,
+        "source_text": "new features",
+        "project_locked": True,
+    }
+
+    asyncio.run(handlers.feature_callback_handler(update=update, context=context, deps=deps))
+
+    assert query.edits
+    assert "Feature proposals for Acme" in query.edits[-1]["text"]
+
+
+def test_stale_callback_answer_does_not_abort_feature_callback():
+    deps = handlers.FeatureIdeationHandlerDeps(
+        logger=_CaptureLogger(),
+        allowed_user_ids=[],
+        projects={"acme": "Acme"},
+        get_project_label=lambda key: "Acme" if key == "acme" else key,
+        orchestrator=_CaptureOrchestrator(),
+    )
+
+    query = _FailAnswerQuery(data="feat:project:acme", message_id=901)
+    update = _StubUpdate(callback_query=query)
+    context = _StubContext()
+    context.user_data[handlers.FEATURE_STATE_KEY] = {
+        "project": "acme",
+        "items": [
+            {
+                "title": "Cached feature",
+                "summary": "Use cached suggestions.",
+                "why": "Fast UI.",
+                "steps": ["A", "B", "C"],
+            }
+        ],
+        "agent_type": "business",
+        "feature_count": 1,
+        "source_text": "new features",
+        "project_locked": True,
+    }
+
+    asyncio.run(handlers.feature_callback_handler(update=update, context=context, deps=deps))
+
+    assert query.edits
+    assert "Feature proposals for Acme" in query.edits[-1]["text"]

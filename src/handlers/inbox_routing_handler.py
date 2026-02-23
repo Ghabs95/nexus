@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Any, Optional
 from config import BASE_DIR, PROJECT_CONFIG, get_inbox_dir
 from handlers.common_routing import extract_json_dict
+from utils.task_name_utils import generate_task_name, normalize_task_name
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,14 @@ async def process_inbox_task(
         
         content = result.get("content") or text
         content = _refine_task_description(content, str(project))
-        task_name = result.get("task_name", "")
+        task_name = normalize_task_name(result.get("task_name", ""))
+        if not task_name:
+            task_name = generate_task_name(
+                orchestrator,
+                content,
+                PROJECTS.get(str(project), str(project)),
+                logger=logger,
+            )
         logger.info(f"Parsed: project={project}, type={task_type}, task_name={task_name}")
     except Exception as e:
         logger.error(f"JSON parsing error: {e}", exc_info=True)

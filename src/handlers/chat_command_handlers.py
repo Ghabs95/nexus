@@ -102,7 +102,10 @@ def _build_main_menu_keyboard(active_chat_id: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📝 New Chat", callback_data="chat:new"),
             InlineKeyboardButton("📋 Switch Chat", callback_data="chat:list"),
         ],
-        [InlineKeyboardButton("⚙️ Context", callback_data="chat:context")],
+        [
+            InlineKeyboardButton("⚙️ Context", callback_data="chat:context"),
+            InlineKeyboardButton("✏️ Rename", callback_data="chat:rename"),
+        ],
         [InlineKeyboardButton("🗑️ Delete Current", callback_data=f"chat:delete:{active_chat_id}")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -275,6 +278,27 @@ async def chat_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         set_active_chat(user_id, chat_id)
         await _render_menu(query, user_id, notice="✅ *Switched Active Chat!*")
 
+    elif data == "chat:rename":
+        context.user_data["pending_chat_rename"] = True
+        await query.edit_message_text(
+            text=(
+                "✏️ *Rename Active Chat*\n\n"
+                "Send the new chat name as a message.\n"
+                "Or tap cancel below."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("❌ Cancel", callback_data="chat:rename:cancel")],
+                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="chat:menu")],
+                ]
+            ),
+            parse_mode="Markdown",
+        )
+
+    elif data == "chat:rename:cancel":
+        context.user_data.pop("pending_chat_rename", None)
+        await _render_menu(query, user_id, notice="❎ *Rename canceled.*")
+
     elif data == "chat:context":
         await _render_context_menu(query, user_id)
 
@@ -351,6 +375,7 @@ async def chat_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
         
     elif data == "chat:menu":
+        context.user_data.pop("pending_chat_rename", None)
         await _render_menu(query, user_id)
 
 

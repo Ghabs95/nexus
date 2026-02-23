@@ -173,7 +173,9 @@ _WORKFLOW_STATE_PLUGIN_KWARGS = {
 
 def _workflow_handler_deps() -> WorkflowHandlerDeps:
     return WorkflowHandlerDeps(
+        logger=logger,
         allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
+        base_dir=BASE_DIR,
         default_repo=GITHUB_REPO,
         project_config=PROJECT_CONFIG,
         workflow_state_plugin_kwargs=_WORKFLOW_STATE_PLUGIN_KWARGS,
@@ -325,6 +327,14 @@ def _callback_handler_deps() -> CallbackHandlerDeps:
 
 
 def _feature_ideation_handler_deps() -> FeatureIdeationHandlerDeps:
+    async def _create_feature_task(text: str, message_id: str, project_key: str) -> Dict[str, Any]:
+        return await process_inbox_task(
+            text,
+            orchestrator,
+            message_id,
+            project_hint=project_key,
+        )
+
     return FeatureIdeationHandlerDeps(
         logger=logger,
         allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
@@ -333,6 +343,7 @@ def _feature_ideation_handler_deps() -> FeatureIdeationHandlerDeps:
         orchestrator=orchestrator,
         base_dir=BASE_DIR,
         project_config=PROJECT_CONFIG,
+        create_feature_task=_create_feature_task,
     )
 
 
@@ -1378,6 +1389,41 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
             logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+            return
+
+        if context.user_data.get("pending_chat_rename"):
+            if update.message.voice:
+                await update.message.reply_text("⚠️ Please send the new chat name as text (or type `cancel`).")
+                return
+
+            candidate = (update.message.text or "").strip()
+            if not candidate:
+                await update.message.reply_text("⚠️ Chat name cannot be empty. Send a name or type `cancel`.")
+                return
+
+            if candidate.lower() in {"cancel", "/cancel"}:
+                context.user_data.pop("pending_chat_rename", None)
+                await update.message.reply_text("❎ Rename canceled.")
+                return
+
+            user_id = update.effective_user.id
+            active_chat_id = get_active_chat(user_id)
+            if not active_chat_id:
+                context.user_data.pop("pending_chat_rename", None)
+                await update.message.reply_text("⚠️ No active chat found. Use /chat to create or select one.")
+                return
+
+            renamed = rename_chat(user_id, active_chat_id, candidate)
+            context.user_data.pop("pending_chat_rename", None)
+            if not renamed:
+                await update.message.reply_text("⚠️ Could not rename the active chat. Please try again.")
+                return
+
+            await update.message.reply_text(
+                f"✅ Active chat renamed to: *{candidate}*",
+                parse_mode="Markdown",
+            )
+            await chat_menu_handler(update, context)
             return
 
         if (not update.message.voice) and await _handle_pending_issue_input(update, context):

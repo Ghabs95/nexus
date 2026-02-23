@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 
 from chat_agents_schema import get_default_project_chat_agent_type
 from handlers.common_routing import parse_intent_result, route_task_with_context, run_conversation_turn
+from handlers.feature_ideation_handlers import FEATURE_STATE_KEY
 
 
 @dataclass
@@ -195,6 +196,34 @@ def _build_chat_persona(
     return f"{base_persona}{context_block}"
 
 
+def _has_active_feature_ideation(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    feature_state = context.user_data.get(FEATURE_STATE_KEY)
+    if not isinstance(feature_state, dict):
+        return False
+    items = feature_state.get("items")
+    return isinstance(items, list) and len(items) > 0
+
+
+def _looks_like_explicit_task_request(text: str) -> bool:
+    candidate = str(text or "").strip().lower()
+    if not candidate:
+        return False
+
+    explicit_phrases = (
+        "create task",
+        "create a task",
+        "make this a task",
+        "route this",
+        "open issue",
+        "file issue",
+        "implement this",
+        "implement it",
+        "go with option",
+        "use option",
+    )
+    return any(phrase in candidate for phrase in explicit_phrases)
+
+
 async def resolve_pending_project_selection(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -223,8 +252,16 @@ async def route_hands_free_text(
     text: str,
     deps: HandsFreeRoutingDeps,
 ) -> None:
-    deps.logger.info("Detecting intent for: %s...", text[:50])
-    intent_result = parse_intent_result(deps.orchestrator, text, deps.extract_json_dict)
+    force_conversation = _has_active_feature_ideation(context) and not _looks_like_explicit_task_request(text)
+    if force_conversation:
+        deps.logger.info(
+            "Active feature ideation detected; routing follow-up as conversation: %s",
+            text[:50],
+        )
+        intent_result = {"intent": "conversation"}
+    else:
+        deps.logger.info("Detecting intent for: %s...", text[:50])
+        intent_result = parse_intent_result(deps.orchestrator, text, deps.extract_json_dict)
 
     intent = intent_result.get("intent", "task")
 

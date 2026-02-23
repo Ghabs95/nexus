@@ -5,6 +5,7 @@ import asyncio
 import io
 import glob
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 import discord
 from discord.ext import commands
 from utils.logging_filters import install_secret_redaction
@@ -58,6 +59,12 @@ from handlers.common_routing import (
     route_task_with_context,
     run_conversation_turn,
 )
+from handlers.feature_ideation_handlers import (
+    FeatureIdeationHandlerDeps,
+    detect_feature_project,
+    is_feature_ideation_request,
+    _build_feature_suggestions,
+)
 from services.command_contract import validate_command_parity
 from services.command_contract import validate_required_command_interface
 
@@ -71,6 +78,248 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
 user_manager = get_user_manager()
 _pending_project_resolution: dict[int, dict] = {}
+_pending_feature_ideation: dict[int, dict] = {}
+
+
+def _get_project_label(project_key: str) -> str:
+    return str(ROUTING_PROJECTS.get(project_key, project_key))
+
+
+def _feature_ideation_handler_deps() -> FeatureIdeationHandlerDeps:
+    return FeatureIdeationHandlerDeps(
+        logger=logger,
+        allowed_user_ids=DISCORD_ALLOWED_USER_IDS,
+        projects=ROUTING_PROJECTS,
+        get_project_label=_get_project_label,
+        orchestrator=orchestrator,
+        base_dir=BASE_DIR,
+        project_config=PROJECT_CONFIG,
+    )
+
+
+def _clamp_feature_count(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 3
+    return max(1, min(5, parsed))
+
+
+def _build_feature_task_text(project_key: str, selected: Dict[str, Any]) -> str:
+    lines = [
+        f"New feature proposal for {_get_project_label(project_key)}",
+        "",
+        f"Title: {selected.get('title', '')}",
+        f"Summary: {selected.get('summary', '')}",
+        f"Why now: {selected.get('why', '')}",
+        "",
+        "Implementation outline:",
+    ]
+    steps = selected.get("steps") if isinstance(selected.get("steps"), list) else []
+    if steps:
+        for index, step in enumerate(steps, start=1):
+            lines.append(f"{index}. {step}")
+    else:
+        lines.extend(
+            [
+                "1. Define technical approach",
+                "2. Implement core changes",
+                "3. Validate and document",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def _feature_list_text(project_key: str, features: List[Dict[str, Any]], feature_count: int) -> str:
+    lines = [
+        f"💡 **Feature proposals for {_get_project_label(project_key)}**",
+        f"Requested: {feature_count}",
+        "",
+        "Reply with the feature number to start implementation:",
+    ]
+    for index, item in enumerate(features, start=1):
+        lines.append(f"{index}. **{item['title']}** — {item['summary']}")
+    lines.append("")
+    lines.append("Type a project key anytime to switch project, or `cancel` to stop.")
+    return "\n".join(lines)
+
+
+def _parse_count_reply(text: str) -> Optional[int]:
+    candidate = str(text or "").strip().lower()
+    if not candidate:
+        return None
+    if candidate.isdigit():
+        return _clamp_feature_count(candidate)
+
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+    }
+    return words.get(candidate)
+
+
+async def _begin_feature_ideation(message: discord.Message, text: str) -> bool:
+    if not is_feature_ideation_request(text):
+        return False
+
+    user_id = message.author.id
+    active_chat = get_chat(user_id) or {}
+    metadata = active_chat.get("metadata") if isinstance(active_chat, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+
+    preferred_project_key = metadata.get("project_key")
+    project_key = detect_feature_project(text, ROUTING_PROJECTS)
+    if not project_key and preferred_project_key in ROUTING_PROJECTS:
+        project_key = preferred_project_key
+
+    _pending_feature_ideation[user_id] = {
+        "step": "awaiting_count",
+        "source_text": text,
+        "project": project_key,
+        "feature_count": None,
+        "items": [],
+    }
+
+    project_label = _get_project_label(project_key) if project_key else "not selected"
+    await message.channel.send(
+        "🔢 How many feature proposals do you want? Reply with a number from 1 to 5.\n\n"
+        f"Current project: **{project_label}**"
+    )
+    return True
+
+
+async def _handle_pending_feature_ideation(message: discord.Message, text: str) -> bool:
+    state = _pending_feature_ideation.get(message.author.id)
+    if not isinstance(state, dict):
+        return False
+
+    candidate_text = str(text or "").strip()
+    candidate_lower = candidate_text.lower()
+    if candidate_lower in {"cancel", "/cancel"}:
+        _pending_feature_ideation.pop(message.author.id, None)
+        await message.channel.send("❎ Feature ideation canceled.")
+        return True
+
+    if state.get("step") == "awaiting_count":
+        feature_count = _parse_count_reply(candidate_text)
+        if feature_count is None:
+            await message.channel.send("⚠️ Please reply with a number between 1 and 5.")
+            return True
+
+        state["feature_count"] = _clamp_feature_count(feature_count)
+        project_key = state.get("project")
+        if project_key not in ROUTING_PROJECTS:
+            state["step"] = "awaiting_project"
+            options = ", ".join(sorted(ROUTING_PROJECTS.keys()))
+            await message.channel.send(
+                "📁 Great — now choose a project key to continue:\n"
+                f"{options}"
+            )
+            return True
+
+        deps = _feature_ideation_handler_deps()
+        features = _build_feature_suggestions(
+            project_key=project_key,
+            text=str(state.get("source_text") or ""),
+            deps=deps,
+            preferred_agent_type=None,
+            feature_count=state["feature_count"],
+        )
+        state["items"] = features
+        state["step"] = "awaiting_pick"
+
+        if not features:
+            _pending_feature_ideation.pop(message.author.id, None)
+            await message.channel.send("⚠️ I couldn't generate feature proposals right now. Please try again.")
+            return True
+
+        await message.channel.send(_feature_list_text(project_key, features, state["feature_count"]))
+        return True
+
+    if state.get("step") == "awaiting_project":
+        project_key = _normalize_project_key(candidate_text)
+        if project_key not in ROUTING_PROJECTS:
+            options = ", ".join(sorted(ROUTING_PROJECTS.keys()))
+            await message.channel.send(f"⚠️ Invalid project key. Choose one of: {options}")
+            return True
+
+        state["project"] = project_key
+        deps = _feature_ideation_handler_deps()
+        features = _build_feature_suggestions(
+            project_key=project_key,
+            text=str(state.get("source_text") or ""),
+            deps=deps,
+            preferred_agent_type=None,
+            feature_count=_clamp_feature_count(state.get("feature_count")),
+        )
+        state["items"] = features
+        state["step"] = "awaiting_pick"
+
+        if not features:
+            _pending_feature_ideation.pop(message.author.id, None)
+            await message.channel.send("⚠️ I couldn't generate feature proposals right now. Please try again.")
+            return True
+
+        await message.channel.send(
+            _feature_list_text(project_key, features, _clamp_feature_count(state.get("feature_count")))
+        )
+        return True
+
+    if state.get("step") == "awaiting_pick":
+        project_key = state.get("project")
+        items = state.get("items") if isinstance(state.get("items"), list) else []
+        if project_key not in ROUTING_PROJECTS or not items:
+            _pending_feature_ideation.pop(message.author.id, None)
+            await message.channel.send("⚠️ Feature session expired. Start a new request.")
+            return True
+
+        project_candidate = _normalize_project_key(candidate_text)
+        if project_candidate in ROUTING_PROJECTS:
+            state["project"] = project_candidate
+            deps = _feature_ideation_handler_deps()
+            features = _build_feature_suggestions(
+                project_key=project_candidate,
+                text=str(state.get("source_text") or ""),
+                deps=deps,
+                preferred_agent_type=None,
+                feature_count=_clamp_feature_count(state.get("feature_count")),
+            )
+            state["items"] = features
+            if not features:
+                _pending_feature_ideation.pop(message.author.id, None)
+                await message.channel.send("⚠️ I couldn't generate feature proposals right now. Please try again.")
+                return True
+            await message.channel.send(
+                _feature_list_text(project_candidate, features, _clamp_feature_count(state.get("feature_count")))
+            )
+            return True
+
+        if not candidate_text.isdigit():
+            await message.channel.send("⚠️ Reply with a feature number to start implementation.")
+            return True
+
+        selected_index = int(candidate_text) - 1
+        if selected_index < 0 or selected_index >= len(items):
+            await message.channel.send("⚠️ Invalid feature selection. Reply with one of the listed numbers.")
+            return True
+
+        selected = items[selected_index]
+        task_text = _build_feature_task_text(project_key, selected)
+        result = await process_inbox_task(
+            task_text,
+            orchestrator,
+            str(message.id),
+            project_hint=project_key,
+        )
+        _pending_feature_ideation.pop(message.author.id, None)
+        await message.channel.send(str(result.get("message") or "⚠️ Task processing completed."))
+        return True
+
+    _pending_feature_ideation.pop(message.author.id, None)
+    return False
 
 def check_permission(user_id: int) -> bool:
     """Check if the user is allowed to interact with the bot."""
@@ -104,8 +353,13 @@ def _project_workspace(project_key: str) -> str:
 
 # --- DISCORD UI VIEWS (Similar to Telegram Inline Keyboards) ---
 
-class ChatRenameModal(discord.ui.Modal, title="Rename Chat"):
-    name = discord.ui.TextInput(label="New Name", placeholder="Enter new chat name...", min_length=1, max_length=100)
+class ChatRenameModal(discord.ui.Modal, title="Rename Active Chat"):
+    name = discord.ui.TextInput(
+        label="New Chat Name",
+        placeholder="Enter the new active chat name...",
+        min_length=1,
+        max_length=100,
+    )
 
     def __init__(self, user_id: int, chat_id: str):
         super().__init__()
@@ -113,8 +367,36 @@ class ChatRenameModal(discord.ui.Modal, title="Rename Chat"):
         self.chat_id = chat_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        rename_chat(self.user_id, self.chat_id, self.name.value)
-        await send_chat_menu(interaction, self.user_id)
+        new_name = str(self.name.value or "").strip()
+        rename_chat(self.user_id, self.chat_id, new_name)
+        await send_chat_menu(
+            interaction,
+            self.user_id,
+            notice=f"✅ Active chat renamed to: **{new_name}**",
+        )
+
+
+class ChatRenamePromptView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="✏️ Open Rename", style=discord.ButtonStyle.primary, custom_id="chat:rename:open")
+    async def open_rename_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id):
+            return
+
+        active_chat_id = get_active_chat(interaction.user.id)
+        if active_chat_id:
+            await interaction.response.send_modal(ChatRenameModal(interaction.user.id, active_chat_id))
+        else:
+            await interaction.response.send_message("No active chat to rename.", ephemeral=True)
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="chat:rename:cancel")
+    async def cancel_rename(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id):
+            return
+        await send_chat_menu(interaction, interaction.user.id, notice="❎ Rename canceled.")
 
 class ChatMenuView(discord.ui.View):
     def __init__(self, user_id: int):
@@ -142,12 +424,14 @@ class ChatMenuView(discord.ui.View):
     async def rename_current_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_permission(interaction.user.id):
             return
-        
-        active_chat_id = get_active_chat(interaction.user.id)
-        if active_chat_id:
-            await interaction.response.send_modal(ChatRenameModal(interaction.user.id, active_chat_id))
-        else:
-            await interaction.response.send_message("No active chat to rename.", ephemeral=True)
+
+        await interaction.response.edit_message(
+            content=(
+                "✏️ **Rename Active Chat**\n\n"
+                "Open rename to enter a new name, or cancel to go back."
+            ),
+            view=ChatRenamePromptView(interaction.user.id),
+        )
 
     @discord.ui.button(label="🗑️ Delete Current", style=discord.ButtonStyle.danger, custom_id="chat:delete")
     async def delete_active_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -200,7 +484,7 @@ class ChatListView(discord.ui.View):
         await send_chat_menu(interaction, interaction.user.id)
 
 
-async def send_chat_menu(interaction: discord.Interaction, user_id: int):
+async def send_chat_menu(interaction: discord.Interaction, user_id: int, notice: str = ""):
     """Helper to send or edit the current message with the main chat menu."""
     active_chat_id = get_active_chat(user_id)
     chats = list_chats(user_id)
@@ -212,6 +496,8 @@ async def send_chat_menu(interaction: discord.Interaction, user_id: int):
             break
 
     text = f"🗣️ **Nexus Chat Menu**\n\n"
+    if notice:
+        text += f"{notice}\n"
     text += f"**Active Chat:** {active_chat_title}\n"
     text += f"_(All conversational history is saved under this thread)_"
     
@@ -439,6 +725,14 @@ async def on_message(message: discord.Message):
 
     if not text:
         await status_msg.edit(content="I didn't understand that.")
+        return
+
+    if await _handle_pending_feature_ideation(message, text):
+        await status_msg.delete()
+        return
+
+    if await _begin_feature_ideation(message, text):
+        await status_msg.delete()
         return
 
     pending_resolution = _pending_project_resolution.get(message.author.id)

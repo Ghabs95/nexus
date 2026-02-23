@@ -1303,6 +1303,18 @@ def generate_issue_name(content, project_name):
         return slugify(body.strip()) or "generic-task"
 
 
+def _extract_inline_task_name(content: str) -> str:
+    if not isinstance(content, str) or not content:
+        return ""
+    for line in content.splitlines():
+        stripped = str(line or "").strip()
+        if not stripped.startswith("**Task Name:**"):
+            continue
+        candidate = stripped.split("**Task Name:**", 1)[1].strip()
+        return candidate
+    return ""
+
+
 
 def process_file(filepath):
     """Processes a single task file."""
@@ -1496,10 +1508,13 @@ def process_file(filepath):
         
         # Standard task processing (create new GitHub issue)
         # Check if task name was already generated (in telegram_bot)
-        task_name_match = re.search(r'\*\*Task Name:\*\*\s*(.+)', content)
-        if task_name_match:
-            slug = slugify(task_name_match.group(1).strip())
-            logger.info(f"✅ Using pre-generated task name: {slug}")
+        precomputed_task_name = _extract_inline_task_name(content)
+        if precomputed_task_name:
+            slug = slugify(precomputed_task_name)
+            if slug:
+                logger.info(f"✅ Using pre-generated task name: {slug}")
+            else:
+                slug = generate_issue_name(content, project_name)
         else:
             # Fallback: Generate concise task name using Gemini AI
             slug = generate_issue_name(content, project_name)
