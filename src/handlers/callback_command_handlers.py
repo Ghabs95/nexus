@@ -141,6 +141,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     if menu_key == "root":
         keyboard = [
+            [InlineKeyboardButton("🗣️ Chat", callback_data="menu:chat")],
             [InlineKeyboardButton("✨ Task Creation", callback_data="menu:tasks")],
             [InlineKeyboardButton("📊 Monitoring", callback_data="menu:monitor")],
             [InlineKeyboardButton("🔁 Workflow Control", callback_data="menu:workflow")],
@@ -157,6 +158,12 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     menu_texts = {
+        "chat": (
+            "🗣️ **Chat**\n"
+            "- /chat — Open chat threads and context controls\n"
+            "- /chatagents [project] — Show ordered chat agent types (first is primary)\n"
+            "- Configure project, mode, and primary agent for conversational routing"
+        ),
         "tasks": (
             "✨ **Task Creation**\n"
             "- /menu — Open command menu\n"
@@ -196,7 +203,8 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "agents": (
             "🤝 **Agents**\n"
             "- /agents <project> — List agents for a project\n"
-            "- /direct <project> <@agent> <message> — Send direct request"
+            "- /direct <project> <@agent> <message> — Send direct request\n"
+            "- /direct <project> <@agent> --new-chat <message> — Strategic direct reply in a new chat"
         ),
         "github": (
             "🔧 **Git Platform**\n"

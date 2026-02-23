@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 PROJECTS = {
     "case_italia": "Case Italia",
     "wallible": "Wallible",
-    "biome": "BIOME",
+    "biome": "Biome",
     "nexus": "Nexus"
 }
 

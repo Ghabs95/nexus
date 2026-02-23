@@ -241,6 +241,36 @@ def get_ai_tool_preferences(project: str = "nexus") -> dict:
     return {}
 
 
+def get_chat_agent_types(project: str = "nexus") -> list[str]:
+    """Get ordered chat agent types for a project.
+
+    Priority:
+    1. Project-specific ``chat_agent_types`` in PROJECT_CONFIG (ordered)
+    2. Keys of ``get_ai_tool_preferences(project)`` (ordered)
+    3. ["triage"] fallback
+
+    The first item is treated as the default primary chat agent.
+    """
+    config = _get_project_config()
+
+    if project in config:
+        proj_config = config[project]
+        if isinstance(proj_config, dict) and isinstance(proj_config.get("chat_agent_types"), list):
+            cleaned = [
+                str(agent_type).strip().lower()
+                for agent_type in proj_config.get("chat_agent_types", [])
+                if isinstance(agent_type, str) and str(agent_type).strip()
+            ]
+            if cleaned:
+                return cleaned
+
+    preferences = get_ai_tool_preferences(project)
+    if isinstance(preferences, dict) and preferences:
+        return [str(agent_type).strip().lower() for agent_type in preferences.keys() if str(agent_type).strip()]
+
+    return ["triage"]
+
+
 # Caching wrappers for lazy-loading on first access (support monkeypatch in tests)
 _ai_tool_preferences_cache = {}
 

@@ -27,7 +27,7 @@ require_human_merge_approval: always  # Enforce human review for all projects
 #
 # Each project's workflow defines which actual agent implements each type.
 # Example:
-#   - nexus uses development_workflow.yaml: triage → @triage, escalation → @triage (with priority flag)
+#   - nexus uses enterprise_workflow.yaml: triage → @triage, escalation → @triage (with priority flag)
 #   - ghabs org uses ghabs_org_workflow.yaml: triage → @ProjectLead, escalation → @Atlas
 github_issue_triage:
   # Default agent type when no specific mapping applies
@@ -61,30 +61,32 @@ github_issue_triage:
 #     agent_type: "triage"       # This agent handles type: triage
 #     provider_preference: null  # Will use value from ai_tool_preferences
 ai_tool_preferences:
-  # Functional patterns (synchronized across all projects)
-  triage: copilot            # Initial issue analysis and routing
-  debug: copilot             # Bug root cause analysis
-  escalation: copilot        # Urgent issues
-  architect: copilot         # System design and architecture
-  developer: copilot         # Code implementation (leads, etc.)
-  marketing: copilot         # Growth, SEO, and content
-  reviewer: copilot          # PR reviews and verification (QA)
-  deployer: copilot          # Deployment and ops
-  compliance: copilot        # Security and privacy audits
-  designer: copilot          # UX/UI and product design
-  docs: gemini               # Documentation and scribing (faster)
-  summarizer: gemini         # Workflow summaries (faster)
-  
-  # Leadership/Advisory roles
-  ceo: copilot               # Vision and scope approval
-  cto: copilot               # Strategic technical feasibility
-  advisor: copilot           # Business strategy
+  triage: copilot            # Generic intake and routing
+  developer: copilot         # Generic code implementation
+  reviewer: copilot          # Generic code/quality review
+  compliance: copilot        # Generic security/privacy checks
+  deployer: copilot          # Generic deployment and ops
+  debug: copilot             # Generic root-cause analysis
+  designer: gemini           # Generic UX/UI and product design
+  docs: gemini               # Generic docs and summaries
+  writer: gemini             # Generic close-loop writing
+  finalizer: gemini          # Generic rejected/closure handling
 
 # Project configurations
 case_italia:
   agents_dir: ghabs/agents/casit-agents
   workspace: case_italia
   git_repo: Ghabs95/agents
+  chat_agent_types:
+    - advisor
+    - marketing
+    - triage
+    - developer
+    - reviewer
+    - compliance
+    - deployer
+    - designer
+    - docs
 
 wallible:
   agents_dir: wallible/wlbl-workflow-os/agents
@@ -98,11 +100,40 @@ wallible:
     - wallible/wlbl-business-os
     - wallible/wlbl-marketing-os
     - wallible/wlbl-workflow-os
+  chat_agent_types:
+    - ceo
+    - advisor
+    - marketing
+    - cto
+  # Wallible-specific AI tool preferences (complete role set)
+  ai_tool_preferences:
+    ceo: gemini              # Vision and scope approval
+    cto: gemini              # Strategic technical feasibility
+    advisor: gemini          # Business strategy
+    marketing: gemini        # GTM and growth
+    architect: copilot       # System design and architecture
+    developer: copilot       # Code implementation
+    deployer: copilot        # Deployment and ops
+    compliance: copilot      # Security and privacy audits
+    designer: gemini         # UX/UI and product design
+    triage: copilot          # Intake and routing
+    reviewer: copilot        # Code/quality review
+    docs: gemini             # Documentation and summaries
 
 biome:
   agents_dir: ghabs/agents/bm-agents
   workspace: biome
   git_repo: Ghabs95/agents
+  chat_agent_types:
+    - advisor
+    - marketing
+    - triage
+    - developer
+    - reviewer
+    - compliance
+    - deployer
+    - designer
+    - docs
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
@@ -111,6 +142,11 @@ nexus:
   git_repos:
     - Ghabs95/nexus-core
     - Ghabs95/nexus
+  chat_agent_types:
+    - designer
+    - triage
+    - compliance
+    - writer
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
   workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
   # AI tool preferences for enterprise workflow agent types

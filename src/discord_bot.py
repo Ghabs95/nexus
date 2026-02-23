@@ -259,7 +259,7 @@ async def on_message(message: discord.Message):
         
         chat_result = orchestrator.run_text_to_speech_analysis(
             text=text, 
-            task="business_chat",
+            task="advisor_chat",
             history=history,
             persona=AI_PERSONA
         )

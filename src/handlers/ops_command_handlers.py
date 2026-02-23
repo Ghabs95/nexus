@@ -7,8 +7,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+import yaml
 from telegram import Update
 from telegram.ext import ContextTypes
+
+from handlers.agent_resolution_handler import resolve_agents_for_project
 
 
 @dataclass
@@ -16,6 +19,7 @@ class OpsHandlerDeps:
     logger: Any
     allowed_user_ids: List[int]
     base_dir: str
+    nexus_dir_name: str
     project_config: Dict[str, Dict[str, Any]]
     prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
     ensure_project_issue: Callable[
@@ -25,9 +29,73 @@ class OpsHandlerDeps:
     get_stats_report: Callable[[int], str]
     format_error_for_user: Callable[[Exception, str], str]
     get_audit_history: Callable[[str, int], List[Dict[str, Any]]]
-    get_agents_for_project: Callable[[str], Dict[str, str]]
     get_github_repo: Callable[[str], str]
     get_direct_issue_plugin: Callable[[str], Any]
+    orchestrator: Any
+    ai_persona: str
+    get_chat_history: Callable[[int], str]
+    append_message: Callable[[int, str, str], None]
+    create_chat: Callable[..., str]
+
+
+_CHAT_FIRST_AGENT_TYPES = {"ceo", "cto", "advisor", "marketing"}
+
+
+def _normalize_agent_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
+
+
+def _resolve_agent_type(
+    agent_name: str,
+    source_filename: str,
+    agents_dir: str,
+    nexus_dir_name: str,
+) -> Optional[str]:
+    candidate_paths = [
+        os.path.join(agents_dir, nexus_dir_name, "agents", source_filename),
+        os.path.join(agents_dir, source_filename),
+    ]
+
+    for candidate_path in candidate_paths:
+        if not os.path.isfile(candidate_path):
+            continue
+
+        if candidate_path.endswith((".yaml", ".yml")):
+            try:
+                with open(candidate_path, "r", encoding="utf-8") as file_handle:
+                    data = yaml.safe_load(file_handle) or {}
+                spec = data.get("spec") if isinstance(data.get("spec"), dict) else {}
+                agent_type = str(spec.get("agent_type") or "").strip().lower()
+                if agent_type:
+                    return agent_type
+            except Exception:
+                continue
+
+    alias_map = {
+        "vision": "ceo",
+        "atlas": "cto",
+        "business": "advisor",
+        "marketing": "marketing",
+        "growthlead": "marketing",
+        "webdirector": "marketing",
+    }
+    normalized = _normalize_agent_key(agent_name)
+    return alias_map.get(normalized)
+
+
+def _build_direct_chat_persona(base_persona: str, project: str, agent_name: str, agent_type: str) -> str:
+    safe_base = base_persona or "You are a helpful AI assistant."
+    context_block = (
+        "\n\nDirect Conversation Context:\n"
+        f"- Project: {project}\n"
+        f"- Requested agent: @{agent_name}\n"
+        f"- Routed agent_type: {agent_type}\n"
+        "Behavior rules:\n"
+        f"- Respond in the voice and decision style of `{agent_type}`.\n"
+        "- This is a direct chat reply, not a workflow ticket.\n"
+        "- Keep the answer concise, actionable, and business-oriented."
+    )
+    return f"{safe_base}{context_block}"
 
 
 async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
@@ -206,7 +274,7 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         return
 
     try:
-        agents_map = deps.get_agents_for_project(agents_dir)
+        agents_map = resolve_agents_for_project(agents_dir, deps.nexus_dir_name)
 
         if not agents_map:
             await update.effective_message.reply_text(f"No agents configured for '{project}'")
@@ -215,7 +283,8 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         agents_list = "\n".join([f"• @{agent}" for agent in sorted(agents_map.keys())])
         await update.effective_message.reply_text(
             f"🤖 **Agents for {project}:**\n\n{agents_list}\n\n"
-            "Use `/direct <project> <@agent> <message>` to send a direct request."
+            "Use `/direct <project> <@agent> <message>` to send a direct request.\n"
+            "Use /chat for project-scoped conversations and strategy threads."
         )
     except Exception as exc:
         deps.logger.error(f"Error listing agents: {exc}")
@@ -231,20 +300,30 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
     if len(context.args) < 3:
         await update.effective_message.reply_text(
             "⚠️ Usage: /direct <project> <@agent> <message>\n\n"
-            "Example: /direct case_italia @BackendLead Add caching to API endpoints"
+            "Example: /direct case_italia @BackendLead Add caching to API endpoints\n"
+            "Optional: add `--new-chat` for strategic agents to start a fresh chat thread"
         )
         return
 
     project = context.args[0].lower()
     agent = context.args[1].lstrip("@")
-    message = " ".join(context.args[2:])
+    message_tokens = [token for token in context.args[2:] if token != "--new-chat"]
+    create_new_chat = "--new-chat" in context.args[2:]
+    message = " ".join(message_tokens).strip()
+
+    if not message:
+        await update.effective_message.reply_text(
+            "⚠️ Please include a message after the agent.\n\n"
+            "Example: /direct wallible @Vision --new-chat Which strategy should we prioritize next quarter?"
+        )
+        return
 
     if project not in deps.project_config:
         await update.effective_message.reply_text(f"❌ Unknown project '{project}'")
         return
 
     agents_dir = os.path.join(deps.base_dir, deps.project_config[project]["agents_dir"])
-    agents_map = deps.get_agents_for_project(agents_dir)
+    agents_map = resolve_agents_for_project(agents_dir, deps.nexus_dir_name)
 
     if agent not in agents_map:
         available = ", ".join([f"@{a}" for a in sorted(agents_map.keys())])
@@ -253,6 +332,58 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
             f"Available: {available}"
         )
         return
+
+    source_filename = agents_map.get(agent, "")
+    agent_type = _resolve_agent_type(agent, source_filename, agents_dir, deps.nexus_dir_name)
+
+    if agent_type in _CHAT_FIRST_AGENT_TYPES:
+        msg = await update.effective_message.reply_text(f"🤖 Asking @{agent} directly...")
+        try:
+            user_id = update.effective_user.id
+            if create_new_chat:
+                chat_title = f"Direct @{agent} ({project})"
+                deps.create_chat(
+                    user_id,
+                    title=chat_title,
+                    metadata={
+                        "project_key": project,
+                        "primary_agent_type": agent_type,
+                    },
+                )
+
+            deps.append_message(user_id, "user", message)
+            history = deps.get_chat_history(user_id)
+            persona = _build_direct_chat_persona(deps.ai_persona, project, agent, agent_type)
+
+            chat_result = deps.orchestrator.run_text_to_speech_analysis(
+                text=message,
+                task="advisor_chat",
+                history=history,
+                persona=persona,
+            )
+
+            reply_text = chat_result.get("text", "I couldn't generate a response right now.")
+            deps.append_message(user_id, "assistant", reply_text)
+
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=(
+                    f"🤖 *{agent} ({agent_type})*: \n\n{reply_text}\n\n"
+                    f"🧵 Chat thread: {'new' if create_new_chat else 'current'}\n"
+                    "💬 Use /chat to manage conversation threads and context."
+                ),
+                parse_mode="Markdown",
+            )
+            return
+        except Exception as exc:
+            deps.logger.error(f"Error in direct chat request: {exc}")
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg.message_id,
+                text=f"❌ Error in direct chat reply: {exc}",
+            )
+            return
 
     msg = await update.effective_message.reply_text(f"🚀 Creating direct request for @{agent}...")
 
@@ -287,7 +418,7 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=msg.message_id,
-                text="❌ Failed to create issue",
+                text="❌ Failed to create issue\n\nIf this is a discussion, use /chat instead.",
             )
             return
 
@@ -311,7 +442,8 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
                 f"✅ Direct request created for @{agent} (Issue #{issue_num})\n\n"
                 f"Message: {message}\n\n"
                 f"The auto-chaining system will invoke @{agent} on the next cycle (~60s)\n\n"
-                f"🔗 {issue_url}"
+                f"🔗 {issue_url}\n\n"
+                "💬 For conversational strategy Q&A, use /chat."
             ),
         )
     except Exception as exc:

@@ -2,10 +2,75 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from typing import Any, Dict, Optional
 import redis
-from config import REDIS_URL
+from config import REDIS_URL, get_chat_agent_types
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_project_agent_types(project_key: Optional[str]) -> list[str]:
+    try:
+        configured_types = get_chat_agent_types(project_key or "nexus") or []
+    except Exception:
+        configured_types = []
+    if not isinstance(configured_types, list):
+        return []
+    return [str(agent_type).strip().lower() for agent_type in configured_types if str(agent_type).strip()]
+
+
+def _resolve_primary_agent_type(project_key: Optional[str], allowed_agent_types: list[str]) -> str:
+    candidates = [agent for agent in allowed_agent_types if isinstance(agent, str) and agent.strip()]
+    if not candidates:
+        candidates = _resolve_project_agent_types(project_key)
+
+    if not candidates:
+        return "triage"
+    return candidates[0]
+
+
+def _default_chat_metadata() -> Dict[str, Any]:
+    return {
+        "project_key": None,
+        "chat_mode": "strategy",
+        "primary_agent_type": "triage",
+        "allowed_agent_types": [],
+        "workflow_profile": "ghabs_org_workflow",
+        "delegation_enabled": True,
+    }
+
+
+def _normalize_chat_data(chat_data: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(chat_data or {})
+    metadata = merged.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    defaults = _default_chat_metadata()
+    normalized_metadata = {**defaults, **metadata}
+
+    project_key = normalized_metadata.get("project_key")
+
+    allowed_agent_types = normalized_metadata.get("allowed_agent_types")
+    if not isinstance(allowed_agent_types, list):
+        allowed_agent_types = []
+
+    cleaned_allowed = [
+        str(item).strip().lower()
+        for item in allowed_agent_types
+        if isinstance(item, str) and str(item).strip()
+    ]
+    if not cleaned_allowed:
+        cleaned_allowed = _resolve_project_agent_types(project_key)
+    normalized_metadata["allowed_agent_types"] = cleaned_allowed
+
+    primary_agent_type = str(normalized_metadata.get("primary_agent_type") or "").strip().lower()
+    if not primary_agent_type or (cleaned_allowed and primary_agent_type not in cleaned_allowed):
+        primary_agent_type = _resolve_primary_agent_type(project_key, cleaned_allowed)
+    normalized_metadata["primary_agent_type"] = primary_agent_type
+
+    merged["metadata"] = normalized_metadata
+    return merged
 
 # Singleton redis client
 _redis_client = None
@@ -21,18 +86,19 @@ def get_redis() -> redis.Redis:
             raise
     return _redis_client
 
-def create_chat(user_id: int, title: str = None) -> str:
+def create_chat(user_id: int, title: str = None, metadata: Optional[Dict[str, Any]] = None) -> str:
     """Creates a new chat and sets it as active."""
     r = get_redis()
     chat_id = uuid.uuid4().hex
     if not title:
         title = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         
-    chat_data = {
+    chat_data = _normalize_chat_data({
         "id": chat_id,
         "title": title,
-        "created_at": datetime.now().isoformat()
-    }
+        "created_at": datetime.now().isoformat(),
+        "metadata": metadata or {},
+    })
     
     r.hset(f"user_chats:{user_id}", chat_id, json.dumps(chat_data))
     set_active_chat(user_id, chat_id)
@@ -73,13 +139,67 @@ def list_chats(user_id: int) -> list:
     chats = []
     for chat_str in chats_raw.values():
         try:
-            chats.append(json.loads(chat_str))
+            chat_data = json.loads(chat_str)
+            chats.append(_normalize_chat_data(chat_data))
         except json.JSONDecodeError:
             continue
             
     # Sort by created_at descending
     chats.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return chats
+
+
+def get_chat(user_id: int, chat_id: Optional[str] = None) -> Dict[str, Any]:
+    """Return a single chat payload (active chat by default)."""
+    r = get_redis()
+    resolved_chat_id = chat_id or get_active_chat(user_id)
+    raw_chat = r.hget(f"user_chats:{user_id}", resolved_chat_id)
+    if not raw_chat:
+        return {}
+    try:
+        parsed = json.loads(raw_chat)
+        return _normalize_chat_data(parsed)
+    except json.JSONDecodeError:
+        return {}
+
+
+def update_chat_metadata(user_id: int, chat_id: str, updates: Dict[str, Any]) -> bool:
+    """Update metadata fields for a chat and persist the change."""
+    if not chat_id or not isinstance(updates, dict):
+        return False
+
+    r = get_redis()
+    raw_chat = r.hget(f"user_chats:{user_id}", chat_id)
+    if not raw_chat:
+        return False
+
+    try:
+        chat_data = _normalize_chat_data(json.loads(raw_chat))
+    except json.JSONDecodeError:
+        return False
+
+    metadata = dict(chat_data.get("metadata") or {})
+
+    next_project_key = updates.get("project_key")
+    if isinstance(next_project_key, str) and next_project_key.strip():
+        normalized_project_key = next_project_key.strip().lower()
+        project_agent_types = _resolve_project_agent_types(normalized_project_key)
+        metadata["project_key"] = normalized_project_key
+        metadata["allowed_agent_types"] = project_agent_types
+        metadata["primary_agent_type"] = project_agent_types[0] if project_agent_types else "triage"
+
+    metadata.update(updates)
+
+    if isinstance(next_project_key, str) and next_project_key.strip():
+        normalized_project_key = next_project_key.strip().lower()
+        project_agent_types = _resolve_project_agent_types(normalized_project_key)
+        metadata["project_key"] = normalized_project_key
+        metadata["allowed_agent_types"] = project_agent_types
+        metadata["primary_agent_type"] = project_agent_types[0] if project_agent_types else "triage"
+
+    chat_data["metadata"] = _normalize_chat_data({"metadata": metadata}).get("metadata")
+    r.hset(f"user_chats:{user_id}", chat_id, json.dumps(chat_data))
+    return True
 
 def delete_chat(user_id: int, chat_id: str) -> bool:
     """Deletes a chat and its history. Returns True if successful."""

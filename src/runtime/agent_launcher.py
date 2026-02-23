@@ -348,9 +348,59 @@ def _build_agent_search_dirs(agents_dir: str) -> list:
     return dirs
 
 
+def _normalize_skill_name(value: str) -> str:
+    """Normalize a skill directory name to lowercase underscore format."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
+    return normalized or "agent"
 
 
-def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
+def _resolve_skill_name(yaml_path: str, agent_type: str) -> str:
+    """Resolve workspace skill name from YAML metadata, with agent_type fallback."""
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+        metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+        candidate = metadata.get("name") if isinstance(metadata, dict) else None
+        return _normalize_skill_name(str(candidate or agent_type))
+    except Exception:
+        return _normalize_skill_name(agent_type)
+
+
+def _ensure_workspace_skill(
+    workspace_dir: str | None,
+    yaml_path: str,
+    agent_type: str,
+    md_content: str,
+) -> None:
+    """Ensure workspace skill file exists and is up to date for Gemini-style tooling."""
+    if not workspace_dir:
+        return
+    if not md_content or not md_content.strip():
+        return
+
+    skill_name = _resolve_skill_name(yaml_path, agent_type)
+    skill_path = os.path.join(workspace_dir, ".agent", "skills", skill_name, "SKILL.md")
+
+    try:
+        needs_write = True
+        if os.path.exists(skill_path):
+            skill_mtime = os.path.getmtime(skill_path)
+            yaml_mtime = os.path.getmtime(yaml_path)
+            if skill_mtime >= yaml_mtime and os.path.getsize(skill_path) > 0:
+                needs_write = False
+
+        if needs_write:
+            os.makedirs(os.path.dirname(skill_path), exist_ok=True)
+            with open(skill_path, "w", encoding="utf-8") as handle:
+                handle.write(md_content)
+            logger.info(f"✅ Generated workspace skill: {skill_path}")
+    except Exception as exc:
+        logger.warning(f"Failed to generate workspace skill for '{agent_type}': {exc}")
+
+
+
+
+def _ensure_agent_definition(agents_dir: str, agent_type: str, workspace_dir: str | None = None) -> bool:
     """Ensure an agent definition exists by generating it from YAML if needed."""
     search_dirs = _build_agent_search_dirs(agents_dir)
     yaml_path = find_agent_yaml(agent_type, search_dirs)
@@ -364,6 +414,13 @@ def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
     agent_md_path = os.path.splitext(yaml_path)[0] + ".agent.md"
     if os.path.exists(agent_md_path):
         if os.path.getmtime(agent_md_path) >= os.path.getmtime(yaml_path):
+            try:
+                with open(agent_md_path, "r", encoding="utf-8") as handle:
+                    _ensure_workspace_skill(workspace_dir, yaml_path, agent_type, handle.read())
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to sync workspace skill from existing agent file for '{agent_type}': {exc}"
+                )
             return True
 
     try:
@@ -379,6 +436,7 @@ def _ensure_agent_definition(agents_dir: str, agent_type: str) -> bool:
             
         with open(agent_md_path, "w", encoding="utf-8") as handle:
             handle.write(md_content)
+        _ensure_workspace_skill(workspace_dir, yaml_path, agent_type, md_content)
         logger.info(f"✅ Generated agent instructions: {agent_md_path}")
         return True
     except Exception as e:
@@ -501,7 +559,7 @@ def invoke_copilot_agent(
     logger.info(f"   Workspace: {workspace_dir}")
     logger.info(f"   Workflow: /{workflow_name} (tier: {tier_name})")
 
-    if not _ensure_agent_definition(agents_dir, agent_type):
+    if not _ensure_agent_definition(agents_dir, agent_type, workspace_dir):
         return None, None
 
     # Use orchestrator to launch agent

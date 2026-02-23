@@ -26,7 +26,7 @@ from config import (
     AI_PERSONA,
     NEXUS_CORE_STORAGE_DIR,
 )
-from services.memory_service import get_chat_history, append_message
+from services.memory_service import append_message, create_chat, get_chat, get_chat_history
 from state_manager import StateManager
 from audit_store import AuditStore
 from models import WorkflowState
@@ -105,7 +105,18 @@ from handlers.callback_command_handlers import (
     monitor_project_picker_handler as callback_monitor_project_picker_handler,
     project_picker_handler as callback_project_picker_handler,
 )
-from handlers.chat_command_handlers import chat_menu_handler, chat_callback_handler
+from handlers.chat_command_handlers import chat_menu_handler, chat_callback_handler, chat_agents_handler
+from handlers.audio_transcription_handler import AudioTranscriptionDeps, transcribe_telegram_voice
+from handlers.hands_free_routing_handler import (
+    HandsFreeRoutingDeps,
+    resolve_pending_project_selection,
+    route_hands_free_text,
+)
+from handlers.feature_ideation_handlers import (
+    FeatureIdeationHandlerDeps,
+    feature_callback_handler as core_feature_callback_handler,
+    handle_feature_ideation_request,
+)
 from error_handling import format_error_for_user, run_command_with_retry
 from analytics import get_stats_report
 from rate_limiter import get_rate_limiter, RateLimit
@@ -320,6 +331,7 @@ def _ops_handler_deps() -> OpsHandlerDeps:
         logger=logger,
         allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
         base_dir=BASE_DIR,
+        nexus_dir_name=get_nexus_dir_name(),
         project_config=PROJECT_CONFIG,
         prompt_project_selection=_prompt_project_selection,
         ensure_project_issue=_ensure_project_issue,
@@ -327,9 +339,13 @@ def _ops_handler_deps() -> OpsHandlerDeps:
         get_stats_report=get_stats_report,
         format_error_for_user=format_error_for_user,
         get_audit_history=AuditStore.get_audit_history,
-        get_agents_for_project=get_agents_for_project,
         get_github_repo=get_github_repo,
         get_direct_issue_plugin=_get_direct_issue_plugin,
+        orchestrator=orchestrator,
+        ai_persona=AI_PERSONA,
+        get_chat_history=get_chat_history,
+        append_message=append_message,
+        create_chat=create_chat,
     )
 
 
@@ -356,6 +372,40 @@ def _callback_handler_deps() -> CallbackHandlerDeps:
             "audit": audit_handler,
             "reprocess": reprocess_handler,
         },
+    )
+
+
+def _feature_ideation_handler_deps() -> FeatureIdeationHandlerDeps:
+    return FeatureIdeationHandlerDeps(
+        logger=logger,
+        allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
+        projects=PROJECTS,
+        get_project_label=_get_project_label,
+        orchestrator=orchestrator,
+    )
+
+
+def _audio_transcription_handler_deps() -> AudioTranscriptionDeps:
+    return AudioTranscriptionDeps(
+        logger=logger,
+        transcribe_audio_cli=orchestrator.transcribe_audio_cli,
+    )
+
+
+def _hands_free_routing_handler_deps() -> HandsFreeRoutingDeps:
+    return HandsFreeRoutingDeps(
+        logger=logger,
+        orchestrator=orchestrator,
+        ai_persona=AI_PERSONA,
+        projects=PROJECTS,
+        extract_json_dict=_extract_json_dict,
+        get_chat_history=get_chat_history,
+        append_message=append_message,
+        get_chat=get_chat,
+        process_inbox_task=process_inbox_task,
+        normalize_project_key=_normalize_project_key,
+        save_resolved_task=save_resolved_task,
+        task_confirmation_mode=TASK_CONFIRMATION_MODE,
     )
 
 
@@ -693,6 +743,8 @@ PROJECT_ALIASES = {
     "wlbl": "wallible",
     "bm": "biome",
     "nexus": "nexus",
+    "nexus core": "nexus",
+    "nexus-core": "nexus",
 }
 
 
@@ -1049,6 +1101,7 @@ SELECT_PROJECT, SELECT_TYPE, INPUT_TASK = range(3)
 tracked_issues = load_tracked_issues()  # Load on startup
 active_tail_sessions: dict[tuple[int, int], str] = {}
 active_tail_tasks: dict[tuple[int, int], asyncio.Task] = {}
+TASK_CONFIRMATION_MODE = os.getenv("TASK_CONFIRMATION_MODE", "smart").strip().lower()
 
 
 # --- 0. HELP & INFO ---
@@ -1062,13 +1115,17 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 **Nexus Commands**\n\n"
         "Use /menu for a categorized, button-driven view.\n\n"
+        "🗣️ **Chat & Strategy:**\n"
+        "/chat - Open chat threads and context controls\n\n"
+        "/chatagents [project] - Show effective ordered chat agent types (first is primary)\n\n"
         "✨ **Task Creation:**\n"
         "/menu - Open command menu\n"
         "/new - Start a menu-driven task creation\n"
         "/cancel - Abort the current guided process\n\n"
         "⚡ **Hands-Free Mode:**\n"
         "Send a **Voice Note** or **Text Message** directly. "
-        "The bot will transcribe, route, and save the task.\n\n"
+        "The bot will transcribe, route, and save the task.\n"
+        "Task safety guard: confirmation may be required before creation (mode: off|smart|always via `TASK_CONFIRMATION_MODE`).\n\n"
         "📋 **Workflow Tiers:**\n"
         "• 🔥 Hotfix/Chore → fast-track (triage → implement → verify → deploy)\n"
         "• 🩹 Bug → shortened (triage → debug → fix → verify → deploy → close)\n"
@@ -1101,7 +1158,8 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/respond <project> <issue#> <text> - Respond to agent questions\n\n"
         "🤝 **Agent Management:**\n"
         "/agents <project> - List all agents for a project\n"
-        "/direct <project> <@agent> <message> - Send direct request to an agent\n\n"
+        "/direct <project> <@agent> <message> - Send direct request to an agent\n"
+        "/direct <project> <@agent> --new-chat <message> - Strategic direct reply in a new chat thread\n\n"
         "🔧 **Git Platform Management:**\n"
         "/assign <project> <issue#> - Assign issue to yourself\n"
         "/implement <project> <issue#> - Request Copilot agent implementation\n"
@@ -1127,6 +1185,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
+        [InlineKeyboardButton("🗣️ Chat", callback_data="menu:chat")],
         [InlineKeyboardButton("✨ Task Creation", callback_data="menu:tasks")],
         [InlineKeyboardButton("📊 Monitoring", callback_data="menu:monitor")],
         [InlineKeyboardButton("🔁 Workflow Control", callback_data="menu:workflow")],
@@ -1156,6 +1215,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         "👋 Welcome to Nexus!\n\n"
         "Use the menu buttons to create tasks or monitor queues.\n"
+        "Use /chat for project-scoped conversational threads.\n"
         "Send voice or text to create a task automatically.\n\n"
         "💡 **Workflow Tiers:**\n"
         "• 🔥 Hotfix/Chore/Simple Feature → 4 steps (fast)\n"
@@ -1166,6 +1226,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         ["/menu"],
+        ["/chat"],
         ["/new"],
         ["/status"],
         ["/active"],
@@ -1180,6 +1241,8 @@ async def on_startup(application):
     """Register bot commands so they appear in the Telegram client menu."""
     cmds = [
         BotCommand("menu", "Open command menu"),
+        BotCommand("chat", "Open chat menu"),
+        # BotCommand("chatagents", "Show chat agent order"),
         BotCommand("new", "Start task creation"),
         # BotCommand("cancel", "Cancel current process"),
         BotCommand("status", "Show pending tasks"),
@@ -1249,29 +1312,6 @@ async def _check_tool_health(application):
         logger.info("✅ Tool health check passed: Copilot and Gemini are available")
 
 
-# --- HELPER: AUDIO TRANSCRIPTION (via Orchestrator CLI) ---
-async def process_audio_with_gemini(voice_file_id, context):
-    """Downloads Telegram audio and transcribes using orchestrator (CLI only)."""
-    # 1. Download audio to temp file
-    new_file = await context.bot.get_file(voice_file_id)
-    await new_file.download_to_drive("temp_voice.ogg")
-
-    # 2. Transcribe using orchestrator (gemini-cli + copilot-cli fallback)
-    logger.info("🎧 Transcribing audio with orchestrator...")
-    text = orchestrator.transcribe_audio_cli("temp_voice.ogg")
-
-    # 3. Cleanup
-    if os.path.exists("temp_voice.ogg"):
-        os.remove("temp_voice.ogg")
-
-    if text:
-        logger.info(f"✅ Transcription successful ({len(text)} chars)")
-        return text.strip()
-    else:
-        logger.error("❌ Transcription failed")
-        return None
-
-
 def _refine_task_description(text: str, project_key: Optional[str] = None) -> str:
     """Refine task description using orchestrator with graceful fallback."""
     candidate_text = (text or "").strip()
@@ -1294,6 +1334,60 @@ def _refine_task_description(text: str, project_key: Optional[str] = None) -> st
     return candidate_text
 
 
+async def feature_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await core_feature_callback_handler(update, context, _feature_ideation_handler_deps())
+
+
+async def task_confirmation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
+        logger.warning(f"Unauthorized callback access attempt by ID: {update.effective_user.id}")
+        return
+
+    data = query.data or ""
+    pending = context.user_data.get("pending_task_confirmation")
+    if not pending:
+        await query.edit_message_text("⚠️ Task confirmation expired. Send the request again.")
+        return
+
+    if data == "taskconfirm:cancel":
+        context.user_data.pop("pending_task_confirmation", None)
+        context.user_data.pop("pending_task_edit", None)
+        await query.edit_message_text("❎ Task creation canceled.")
+        return
+
+    if data == "taskconfirm:edit":
+        context.user_data["pending_task_edit"] = True
+        await query.edit_message_text(
+            "✏️ Send the updated task text now.\n\n"
+            "I will show the confirmation preview again before creating anything.\n"
+            "Type `cancel` to abort."
+        )
+        return
+
+    if data != "taskconfirm:confirm":
+        await query.edit_message_text("⚠️ Unknown confirmation action.")
+        return
+
+    text = str(pending.get("text") or "").strip()
+    message_id = str(pending.get("message_id") or query.message.message_id)
+    context.user_data.pop("pending_task_confirmation", None)
+
+    result = await process_inbox_task(text, orchestrator, message_id)
+    if not result.get("success") and "pending_resolution" in result:
+        context.user_data["pending_task_project_resolution"] = result["pending_resolution"]
+
+    await query.edit_message_text(result.get("message", "⚠️ Task processing completed."))
+
+
+async def _transcribe_voice_message(voice_file_id: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    return await transcribe_telegram_voice(voice_file_id, context, _audio_transcription_handler_deps())
+
+
 # --- 1. HANDS-FREE MODE (Auto-Router) ---
 async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1311,38 +1405,65 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if (not update.message.voice) and await _handle_pending_issue_input(update, context):
             return
 
+        if context.user_data.get("pending_task_edit"):
+            if not update.message.voice:
+                candidate = (update.message.text or "").strip().lower()
+                if candidate in {"cancel", "/cancel"}:
+                    context.user_data.pop("pending_task_edit", None)
+                    context.user_data.pop("pending_task_confirmation", None)
+                    await update.message.reply_text("❎ Task edit canceled.")
+                    return
+
+            revised_text = ""
+            if update.message.voice:
+                msg = await update.message.reply_text("🎧 Transcribing your edited task...")
+                revised_text = await _transcribe_voice_message(update.message.voice.file_id, context)
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg.message_id)
+            else:
+                revised_text = (update.message.text or "").strip()
+
+            if not revised_text:
+                await update.message.reply_text("⚠️ I couldn't read the edited task text. Please try again.")
+                return
+
+            context.user_data["pending_task_edit"] = False
+            context.user_data["pending_task_confirmation"] = {
+                "text": revised_text,
+                "message_id": str(update.message.message_id),
+            }
+            preview = revised_text if len(revised_text) <= 300 else f"{revised_text[:300]}..."
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("✅ Confirm", callback_data="taskconfirm:confirm")],
+                    [InlineKeyboardButton("✏️ Edit", callback_data="taskconfirm:edit")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="taskconfirm:cancel")],
+                ]
+            )
+            await update.message.reply_text(
+                "🛡️ *Confirm task creation*\n\n"
+                "Updated request preview:\n\n"
+                f"_{preview}_",
+                reply_markup=keyboard,
+                parse_mode="Markdown",
+            )
+            return
+
         # Guard: Don't process commands as tasks
         if update.message.text and update.message.text.startswith('/'):
             logger.info(f"Ignoring command in hands_free_handler: {update.message.text}")
             return
 
-        pending_project = context.user_data.get("pending_task_project_resolution")
-        if pending_project:
-            selected = _normalize_project_key((update.message.text or "").strip())
-            if not selected or selected not in PROJECTS:
-                options = ", ".join(sorted(PROJECTS.keys()))
-                await update.message.reply_text(
-                    f"Please reply with a valid project key: {options}"
-                )
-                return
-
-            context.user_data.pop("pending_task_project_resolution", None)
-            result = await save_resolved_task(pending_project, selected, str(update.message.message_id))
-            
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=status_msg.message_id,
-                text=result["message"]
-            )
+        if await resolve_pending_project_selection(update, context, _hands_free_routing_handler_deps()):
             return
 
         text = ""
-        status_msg = await update.message.reply_text("⚡ AI Listening...")
+        status_text = "⚡ AI Listening..." if update.message.voice else "🤖 Nexus thinking..."
+        status_msg = await update.message.reply_text(status_text)
 
         # Get text from Audio or Text
         if update.message.voice:
             logger.info("Processing voice message...")
-            text = await process_audio_with_gemini(update.message.voice.file_id, context)
+            text = await _transcribe_voice_message(update.message.voice.file_id, context)
             if not text:
                 logger.warning("Voice transcription returned empty text")
                 await context.bot.edit_message_text(
@@ -1355,58 +1476,31 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.info(f"Processing text input... text={update.message.text[:50]}")
             text = update.message.text
 
-        logger.info(f"Detecting intent for: {text[:50]}...")
-        intent_result = orchestrator.run_text_to_speech_analysis(text=text, task="detect_intent")
-        
-        if isinstance(intent_result, dict) and intent_result.get("text"):
-            needs_reparse = intent_result.get("parse_error") or "intent" not in intent_result
-            if needs_reparse:
-                reparsed = _extract_json_dict(intent_result["text"])
-                if reparsed:
-                    intent_result = reparsed
+        active_chat = get_chat(update.effective_user.id)
+        active_chat_metadata = active_chat.get("metadata") if isinstance(active_chat, dict) else {}
+        preferred_project_key = None
+        preferred_agent_type = None
+        if isinstance(active_chat_metadata, dict):
+            preferred_project_key = active_chat_metadata.get("project_key")
+            preferred_agent_type = active_chat_metadata.get("primary_agent_type")
 
-        intent = intent_result.get("intent", "task")
-        
-        if intent == "conversation":
-            user_id = update.effective_user.id
-            history = get_chat_history(user_id)
-            append_message(user_id, "user", text)
-            
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=status_msg.message_id,
-                text="🤖 *Nexus:* Thinking...",
-                parse_mode="Markdown"
-            )
-            
-            chat_result = orchestrator.run_text_to_speech_analysis(
-                text=text, 
-                task="business_chat",
-                history=history,
-                persona=AI_PERSONA
-            )
-            
-            reply_text = chat_result.get("text", "I'm offline right now, how can I help later?")
-            append_message(user_id, "assistant", reply_text)
-            
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=status_msg.message_id,
-                text=f"🤖 *Nexus*: \n\n{reply_text}",
-                parse_mode="Markdown"
-            )
+        if await handle_feature_ideation_request(
+            update,
+            context,
+            status_msg,
+            text,
+            _feature_ideation_handler_deps(),
+            preferred_project_key=preferred_project_key,
+            preferred_agent_type=preferred_agent_type,
+        ):
             return
 
-        result = await process_inbox_task(text, orchestrator, str(update.message.message_id))
-        
-        if not result["success"]:
-            if "pending_resolution" in result:
-                context.user_data["pending_task_project_resolution"] = result["pending_resolution"]
-            
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=status_msg.message_id,
-            text=result["message"]
+        await route_hands_free_text(
+            update,
+            context,
+            status_msg,
+            text,
+            _hands_free_routing_handler_deps(),
         )
     except Exception as e:
         logger.error(f"Unexpected error in hands_free_handler: {e}", exc_info=True)
@@ -1465,7 +1559,7 @@ async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.voice:
         msg = await update.message.reply_text("🎧 Transcribing (CLI)...")
         # Re-use the helper function to just get text
-        text = await process_audio_with_gemini(update.message.voice.file_id, context)
+        text = await _transcribe_voice_message(update.message.voice.file_id, context)
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg.message_id)
     else:
         text = update.message.text
@@ -1743,43 +1837,6 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # pause_handler, resume_handler, and stop_handler now wrap commands.workflow handlers
 
 
-def get_agents_for_project(project_dir):
-    """Parse agents from .nexus/agents/*.agent.md files.
-    
-    Returns a dictionary: {agent_display_name: agent_filename}
-    Example: {'Architect': 'architect.agent.md', 'BackendLead': 'backend.agent.md'}
-    """
-    nexus_dir_name = get_nexus_dir_name()
-    agents_nexus_dir = os.path.join(project_dir, nexus_dir_name, "agents")
-    agents_map = {}
-    
-    if not os.path.exists(agents_nexus_dir):
-        return agents_map
-    
-    try:
-        for filename in sorted(os.listdir(agents_nexus_dir)):
-            if filename.endswith(".agent.md"):
-                filepath = os.path.join(agents_nexus_dir, filename)
-                # Parse the name from the YAML frontmatter
-                try:
-                    with open(filepath, 'r') as f:
-                        lines = f.readlines()
-                        in_frontmatter = False
-                        for line in lines:
-                            if line.strip() == "---":
-                                in_frontmatter = not in_frontmatter
-                            elif in_frontmatter and line.startswith("name:"):
-                                agent_name = line.split("name:", 1)[1].strip()
-                                agents_map[agent_name] = filename
-                                break
-                except Exception as e:
-                    logger.warning(f"Failed to parse agent file {filename}: {e}")
-    except Exception as e:
-        logger.warning(f"Error listing agent files: {e}")
-    
-    return agents_map
-
-
 async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all agents for a specific project."""
     await ops_agents_handler(update, context, _ops_handler_deps())
@@ -1895,6 +1952,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("implement", implement_handler))
     app.add_handler(CommandHandler("prepare", prepare_handler))
     app.add_handler(CommandHandler("chat", chat_menu_handler))
+    app.add_handler(CommandHandler("chatagents", chat_agents_handler))
     # Menu navigation callbacks
     app.add_handler(CallbackQueryHandler(chat_callback_handler, pattern=r'^chat:'))
     app.add_handler(CallbackQueryHandler(menu_callback_handler, pattern=r'^menu:'))
@@ -1902,6 +1960,8 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(issue_picker_handler, pattern=r'^pickissue'))
     app.add_handler(CallbackQueryHandler(monitor_project_picker_handler, pattern=r'^pickmonitor:'))
     app.add_handler(CallbackQueryHandler(close_flow_handler, pattern=r'^flow:close$'))
+    app.add_handler(CallbackQueryHandler(feature_callback_handler, pattern=r'^feat:'))
+    app.add_handler(CallbackQueryHandler(task_confirmation_callback_handler, pattern=r'^taskconfirm:'))
     # Inline keyboard callback handler (must be before ConversationHandler callbacks)
     app.add_handler(CallbackQueryHandler(inline_keyboard_handler, pattern=r'^(logs|logsfull|status|pause|resume|stop|audit|reprocess|respond|approve|reject)_'))
     # Exclude commands from the auto-router catch-all
