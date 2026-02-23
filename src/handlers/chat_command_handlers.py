@@ -1,6 +1,6 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ConversationHandler
 from config import get_chat_agent_types
 from handlers.inbox_routing_handler import PROJECTS
 from services.memory_service import (
@@ -11,10 +11,12 @@ from services.memory_service import (
     list_chats,
     set_active_chat,
     update_chat_metadata,
+    rename_chat,
 )
 
 logger = logging.getLogger(__name__)
 
+CHAT_RENAME_INPUT = 10
 
 CHAT_MODES = {
     "strategy": "Strategy",

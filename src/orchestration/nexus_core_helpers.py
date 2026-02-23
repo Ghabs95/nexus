@@ -69,7 +69,7 @@ def get_workflow_definition_path(project_name: str) -> Optional[str]:
     3. None (caller must abort)
     
     Args:
-        project_name: Project name (e.g., 'nexus', 'casit-agents')
+        project_name: Project name (e.g., 'nexus')
         
     Returns:
         Absolute path to workflow YAML file, or None if not configured
@@ -124,7 +124,7 @@ async def create_workflow_for_issue(
     Args:
         issue_number: GitHub issue number
         issue_title: Issue title (slug)
-        project_name: Project name (e.g., 'casit-agents')
+        project_name: Project name (e.g., 'nxs')
         tier_name: Workflow tier (tier-1-simple, tier-2-standard, etc.)
         task_type: Task type (feature, bug, hotfix, etc.)
         description: Task description

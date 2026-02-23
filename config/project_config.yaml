@@ -9,6 +9,23 @@ shared_agents_dir: ghabs/agents/workflows/agents
 # Relative to project workspace root
 nexus_dir: .nexus
 
+# Project key registry (single source of truth for short keys and aliases)
+projects:
+  casit:
+    code: case_italia
+    aliases: []
+  wlbl:
+    code: wallible
+    aliases: []
+  bm:
+    code: biome
+    aliases: []
+  nxs:
+    code: nexus
+    aliases:
+      - nexus core
+      - nexus-core
+
 # PR Merge Policy (project-level enforcement)
 # Controls whether @OpsCommander can auto-merge PRs or must wait for human approval
 # Options:

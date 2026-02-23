@@ -20,13 +20,15 @@ from config import (
     TELEGRAM_TOKEN, TELEGRAM_ALLOWED_USER_IDS, BASE_DIR,
     DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, get_github_repos, get_default_github_repo,
     get_default_project,
+    get_track_short_projects,
+    normalize_project_key,
     PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
     get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir, get_tasks_logs_dir, get_nexus_dir_name,
     AI_PERSONA,
     NEXUS_CORE_STORAGE_DIR,
 )
-from services.memory_service import append_message, create_chat, get_chat, get_chat_history
+from services.memory_service import append_message, create_chat, get_chat, get_chat_history, rename_chat, get_active_chat
 from state_manager import StateManager
 from audit_store import AuditStore
 from models import WorkflowState
@@ -86,6 +88,7 @@ from handlers.issue_command_handlers import (
     prepare_handler as issue_prepare_handler,
     respond_handler as issue_respond_handler,
     track_handler as issue_track_handler,
+    tracked_handler as issue_tracked_handler,
     untrack_handler as issue_untrack_handler,
 )
 from handlers.ops_command_handlers import (
@@ -124,6 +127,9 @@ from report_scheduler import ReportScheduler
 from user_manager import get_user_manager
 from alerting import init_alerting_system
 from handlers.inbox_routing_handler import process_inbox_task, save_resolved_task, PROJECTS, TYPES
+from handlers.common_routing import route_task_with_context, extract_json_dict
+from services.command_contract import validate_command_parity, validate_required_command_interface
+from utils.logging_filters import install_secret_redaction
 
 
 # --- LOGGING ---
@@ -139,64 +145,7 @@ logging.basicConfig(
 )
 
 
-def _extract_json_dict(text: str) -> Optional[Dict[str, Any]]:
-    if not text:
-        return None
-
-    candidates: List[str] = [text.strip()]
-
-    fenced_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
-    candidates.extend(block.strip() for block in fenced_blocks if block.strip())
-
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace > first_brace:
-        candidates.append(text[first_brace:last_brace + 1].strip())
-
-    seen = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-class _SecretRedactingFilter(logging.Filter):
-    """Redact sensitive values from log messages."""
-
-    def __init__(self, secrets: List[str]):
-        super().__init__()
-        self._secrets = [s for s in secrets if s]
-
-    def _redact(self, value):
-        if isinstance(value, str):
-            redacted = value
-            for secret in self._secrets:
-                redacted = redacted.replace(secret, "[REDACTED_BOT_TOKEN]")
-            return redacted
-        if isinstance(value, tuple):
-            return tuple(self._redact(v) for v in value)
-        if isinstance(value, list):
-            return [self._redact(v) for v in value]
-        if isinstance(value, dict):
-            return {k: self._redact(v) for k, v in value.items()}
-        return value
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = self._redact(record.msg)
-        record.args = self._redact(record.args)
-        return True
-
-
-_redaction_filter = _SecretRedactingFilter([TELEGRAM_TOKEN or ""])
-for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_redaction_filter)
+install_secret_redaction([TELEGRAM_TOKEN or ""], logging.getLogger())
 
 # Long-polling calls Telegram getUpdates repeatedly by design.
 # Keep these transport logs at WARNING to avoid noisy INFO output.
@@ -322,7 +271,7 @@ def _issue_handler_deps() -> IssueHandlerDeps:
         tracked_issues_ref=tracked_issues,
         default_issue_url=_default_issue_url,
         get_project_label=_get_project_label,
-        track_short_projects=["casit", "wlbl", "bm"],
+        track_short_projects=get_track_short_projects(),
     )
 
 
@@ -398,7 +347,7 @@ def _hands_free_routing_handler_deps() -> HandsFreeRoutingDeps:
         orchestrator=orchestrator,
         ai_persona=AI_PERSONA,
         projects=PROJECTS,
-        extract_json_dict=_extract_json_dict,
+        extract_json_dict=extract_json_dict,
         get_chat_history=get_chat_history,
         append_message=append_message,
         get_chat=get_chat,
@@ -467,7 +416,7 @@ def save_tracked_issues(data):
     StateManager.save_tracked_issues(data)
 
 
-# Moved `_extract_json_dict` and `_refine_task_description` to inbox_routing_handler.py
+# Moved `_refine_task_description` to inbox_routing_handler.py
 
 def get_issue_details(issue_num, repo: str = None):
     """Query GitHub API for issue details."""
@@ -736,23 +685,8 @@ def find_task_file_by_issue(issue_num):
     return None
 
 
-# --- DATA ---
-
-PROJECT_ALIASES = {
-    "casit": "case_italia",
-    "wlbl": "wallible",
-    "bm": "biome",
-    "nexus": "nexus",
-    "nexus core": "nexus",
-    "nexus-core": "nexus",
-}
-
-
 def _normalize_project_key(project: str) -> Optional[str]:
-    if not project:
-        return None
-    project_key = project.lower()
-    return PROJECT_ALIASES.get(project_key, project_key)
+    return normalize_project_key(project)
 
 
 def _iter_project_keys() -> List[str]:
@@ -1055,6 +989,7 @@ def _command_handler_map():
         "resume": resume_handler,
         "stop": stop_handler,
         "track": track_handler,
+        "tracked": tracked_handler,
         "untrack": untrack_handler,
         "agents": agents_handler,
     }
@@ -1105,6 +1040,26 @@ TASK_CONFIRMATION_MODE = os.getenv("TASK_CONFIRMATION_MODE", "smart").strip().lo
 
 
 # --- 0. HELP & INFO ---
+async def rename_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rename the active chat."""
+    if TELEGRAM_ALLOWED_USER_IDS and update.effective_user.id not in TELEGRAM_ALLOWED_USER_IDS:
+        return
+
+    user_id = update.effective_user.id
+    active_chat_id = get_active_chat(user_id)
+    
+    if not active_chat_id:
+        await update.message.reply_text("⚠️ No active chat found. Use /chat to create or select one.")
+        return
+
+    new_name = " ".join(context.args).strip()
+    if not new_name:
+        await update.message.reply_text("⚠️ Usage: `/rename <new name>`", parse_mode="Markdown")
+        return
+
+    rename_chat(user_id, active_chat_id, new_name)
+    await update.message.reply_text(f"✅ Active chat renamed to: *{new_name}*", parse_mode="Markdown")
+
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists available commands and usage info."""
     logger.info(f"Help triggered by user: {update.effective_user.id}")
@@ -1116,6 +1071,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **Nexus Commands**\n\n"
         "Use /menu for a categorized, button-driven view.\n\n"
         "🗣️ **Chat & Strategy:**\n"
+        "/rename <name> - Rename the active chat\n"
         "/chat - Open chat threads and context controls\n\n"
         "/chatagents [project] - Show effective ordered chat agent types (first is primary)\n\n"
         "✨ **Task Creation:**\n"
@@ -1135,6 +1091,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status [project|all] - View pending tasks in inbox\n"
         "/active [project|all] [cleanup] - View tasks currently being worked on\n"
         "/track <project> <issue#> - Track issue per-project\n"
+        "/tracked - View active globally tracked issues\n"
         "/untrack <project> <issue#> - Stop tracking per-project\n"
         "/myissues - View all your tracked issues\n"
         "/logs <project> <issue#> - View task logs\n"
@@ -1239,10 +1196,26 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_startup(application):
     """Register bot commands so they appear in the Telegram client menu."""
+    try:
+        validate_required_command_interface()
+        parity = validate_command_parity()
+        telegram_only = sorted(parity.get("telegram_only", set()))
+        discord_only = sorted(parity.get("discord_only", set()))
+        if telegram_only or discord_only:
+            logger.warning(
+                "Command parity drift detected: telegram_only=%s discord_only=%s",
+                telegram_only,
+                discord_only,
+            )
+    except Exception:
+        logger.exception("Command parity strict check failed")
+        raise
+
     cmds = [
         BotCommand("menu", "Open command menu"),
         BotCommand("chat", "Open chat menu"),
         # BotCommand("chatagents", "Show chat agent order"),
+        # BotCommand("rename", "Rename active chat"),
         BotCommand("new", "Start task creation"),
         # BotCommand("cancel", "Cancel current process"),
         BotCommand("status", "Show pending tasks"),
@@ -1377,7 +1350,14 @@ async def task_confirmation_callback_handler(update: Update, context: ContextTyp
     message_id = str(pending.get("message_id") or query.message.message_id)
     context.user_data.pop("pending_task_confirmation", None)
 
-    result = await process_inbox_task(text, orchestrator, message_id)
+    result = await route_task_with_context(
+        user_id=update.effective_user.id,
+        text=text,
+        orchestrator=orchestrator,
+        message_id=message_id,
+        get_chat=get_chat,
+        process_inbox_task=process_inbox_task,
+    )
     if not result.get("success") and "pending_resolution" in result:
         context.user_data["pending_task_project_resolution"] = result["pending_resolution"]
 
@@ -1726,10 +1706,14 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     Examples:
       /track 123
-      /track casit 456
-      /track wlbl 789
+      /track nxs 456
     """
     await issue_track_handler(update, context, _issue_handler_deps())
+
+
+async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show active globally tracked issues."""
+    await issue_tracked_handler(update, context, _issue_handler_deps())
 
 
 async def untrack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1921,11 +1905,13 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("menu", menu_handler))
+    app.add_handler(CommandHandler("rename", rename_handler))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("active", active_handler))
     app.add_handler(CommandHandler("progress", progress_handler))
     app.add_handler(CommandHandler("track", track_handler))
+    app.add_handler(CommandHandler("tracked", tracked_handler))
     app.add_handler(CommandHandler("untrack", untrack_handler))
     app.add_handler(CommandHandler("myissues", myissues_handler))
     app.add_handler(CommandHandler("logs", logs_handler))

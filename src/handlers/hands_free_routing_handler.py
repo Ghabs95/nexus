@@ -8,6 +8,8 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from handlers.common_routing import parse_intent_result, route_task_with_context, run_conversation_turn
+
 
 @dataclass
 class HandsFreeRoutingDeps:
@@ -19,7 +21,7 @@ class HandsFreeRoutingDeps:
     get_chat_history: Callable[[int], str]
     append_message: Callable[[int, str, str], None]
     get_chat: Callable[[int], Dict[str, Any]]
-    process_inbox_task: Callable[[str, Any, str], Awaitable[Dict[str, Any]]]
+    process_inbox_task: Callable[[str, Any, str, Optional[str]], Awaitable[Dict[str, Any]]]
     normalize_project_key: Callable[[str], Optional[str]]
     save_resolved_task: Callable[[dict, str, str], Awaitable[Dict[str, Any]]]
     task_confirmation_mode: str
@@ -186,21 +188,12 @@ async def route_hands_free_text(
     deps: HandsFreeRoutingDeps,
 ) -> None:
     deps.logger.info("Detecting intent for: %s...", text[:50])
-    intent_result = deps.orchestrator.run_text_to_speech_analysis(text=text, task="detect_intent")
-
-    if isinstance(intent_result, dict) and intent_result.get("text"):
-        needs_reparse = intent_result.get("parse_error") or "intent" not in intent_result
-        if needs_reparse:
-            reparsed = deps.extract_json_dict(intent_result["text"])
-            if reparsed:
-                intent_result = reparsed
+    intent_result = parse_intent_result(deps.orchestrator, text, deps.extract_json_dict)
 
     intent = intent_result.get("intent", "task")
 
     if intent == "conversation":
         user_id = update.effective_user.id
-        history = deps.get_chat_history(user_id)
-        deps.append_message(user_id, "user", text)
         chat_data = deps.get_chat(user_id) or {}
         metadata = chat_data.get("metadata") if isinstance(chat_data, dict) else {}
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -226,15 +219,14 @@ async def route_hands_free_text(
             parse_mode="Markdown",
         )
 
-        chat_result = deps.orchestrator.run_text_to_speech_analysis(
+        reply_text = run_conversation_turn(
+            user_id=user_id,
             text=text,
-            task="advisor_chat",
-            history=history,
+            orchestrator=deps.orchestrator,
+            get_chat_history=deps.get_chat_history,
+            append_message=deps.append_message,
             persona=persona,
         )
-
-        reply_text = chat_result.get("text", "I'm offline right now, how can I help later?")
-        deps.append_message(user_id, "assistant", reply_text)
 
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
@@ -302,7 +294,14 @@ async def route_hands_free_text(
         )
         return
 
-    result = await deps.process_inbox_task(text, deps.orchestrator, str(update.message.message_id))
+    result = await route_task_with_context(
+        user_id=update.effective_user.id,
+        text=text,
+        orchestrator=deps.orchestrator,
+        message_id=str(update.message.message_id),
+        get_chat=deps.get_chat,
+        process_inbox_task=deps.process_inbox_task,
+    )
 
     if not result["success"] and "pending_resolution" in result:
         context.user_data["pending_task_project_resolution"] = result["pending_resolution"]

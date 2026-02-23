@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+from handlers.common_routing import extract_json_dict
 
 
 FEATURE_STATE_KEY = "feature_suggestions"
@@ -50,22 +51,25 @@ def is_feature_ideation_request(text: str) -> bool:
     return any(trigger in candidate for trigger in triggers)
 
 
-def detect_feature_project(text: str) -> Optional[str]:
+def detect_feature_project(text: str, projects: Optional[Dict[str, str]] = None) -> Optional[str]:
     candidate = (text or "").strip().lower()
     if not candidate:
         return None
 
-    aliases = {
-        "nexus core": "nexus",
-        "nexus-core": "nexus",
-        "nexus": "nexus",
-        "case italia": "case_italia",
-        "wallible": "wallible",
-        "biome": "biome",
-        "casit": "case_italia",
-        "wlbl": "wallible",
-        "bm": "biome",
-    }
+    aliases: Dict[str, str] = {}
+    try:
+        from config import get_project_aliases
+
+        aliases.update(get_project_aliases())
+    except Exception:
+        pass
+
+    if isinstance(projects, dict):
+        for key in projects.keys():
+            normalized = str(key).strip().lower()
+            if normalized:
+                aliases.setdefault(normalized, normalized)
+
     for alias, project_key in aliases.items():
         if alias in candidate:
             return project_key
@@ -95,35 +99,8 @@ def _requested_feature_count(text: str, default_count: int = 3, max_count: int =
 def _extract_json_dict(raw_text: str) -> Optional[Dict[str, Any]]:
     if not raw_text:
         return None
-
-    candidate = raw_text.strip()
-    try:
-        parsed = json.loads(candidate)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-
-    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, flags=re.DOTALL)
-    if fenced_match:
-        try:
-            parsed = json.loads(fenced_match.group(1))
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-
-    first_brace = candidate.find("{")
-    last_brace = candidate.rfind("}")
-    if first_brace >= 0 and last_brace > first_brace:
-        snippet = candidate[first_brace : last_brace + 1]
-        try:
-            parsed = json.loads(snippet)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-    return None
+    parsed = extract_json_dict(raw_text)
+    return parsed if parsed else None
 
 
 def _normalize_generated_features(items: Any, limit: int) -> List[Dict[str, Any]]:
@@ -338,7 +315,7 @@ async def handle_feature_ideation_request(
     if not is_feature_ideation_request(text):
         return False
 
-    project_key = detect_feature_project(text)
+    project_key = detect_feature_project(text, deps.projects)
     if not project_key and preferred_project_key in deps.projects:
         project_key = preferred_project_key
     if not project_key:

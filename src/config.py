@@ -104,6 +104,7 @@ def _validate_config_with_project_config(config: dict) -> None:
     global_keys = {
         'nexus_dir',  # VCS-agnostic inbox/tasks directory name
         'workflow_definition_path',
+        'projects',
         'ai_tool_preferences',
         'workflow_chains',
         'final_agents',
@@ -142,6 +143,41 @@ def _validate_config_with_project_config(config: dict) -> None:
             raise ValueError(
                 f"PROJECT_CONFIG['{project}']['git_platform'] must be 'github' or 'gitlab'"
             )
+
+    registry = config.get("projects")
+    if registry is not None:
+        if not isinstance(registry, dict) or not registry:
+            raise ValueError("PROJECT_CONFIG['projects'] must be a non-empty mapping")
+        for short_key, payload in registry.items():
+            normalized_short = str(short_key).strip().lower()
+            if not normalized_short:
+                raise ValueError("PROJECT_CONFIG['projects'] contains empty short key")
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"PROJECT_CONFIG['projects']['{normalized_short}'] must be a mapping"
+                )
+
+            code = str(payload.get("code", "")).strip().lower()
+            if not code:
+                raise ValueError(
+                    f"PROJECT_CONFIG['projects']['{normalized_short}'] missing non-empty 'code'"
+                )
+            if code not in config or not isinstance(config.get(code), dict):
+                raise ValueError(
+                    f"PROJECT_CONFIG['projects']['{normalized_short}']['code'] references unknown project '{code}'"
+                )
+
+            aliases = payload.get("aliases", [])
+            if aliases is not None and not isinstance(aliases, list):
+                raise ValueError(
+                    f"PROJECT_CONFIG['projects']['{normalized_short}']['aliases'] must be a list"
+                )
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    if not isinstance(alias, str) or not alias.strip():
+                        raise ValueError(
+                            f"PROJECT_CONFIG['projects']['{normalized_short}']['aliases'] contains invalid alias"
+                        )
 
 
 def _load_and_validate_project_config() -> dict:
@@ -269,6 +305,114 @@ def get_chat_agent_types(project: str = "nexus") -> list[str]:
         return [str(agent_type).strip().lower() for agent_type in preferences.keys() if str(agent_type).strip()]
 
     return ["triage"]
+
+
+def get_project_registry() -> dict[str, dict[str, object]]:
+    """Return normalized short-key project registry from PROJECT_CONFIG['projects']."""
+    config = _get_project_config()
+    raw_registry = config.get("projects")
+    if not isinstance(raw_registry, dict):
+        return {}
+
+    registry: dict[str, dict[str, object]] = {}
+    for short_key, payload in raw_registry.items():
+        normalized_short = str(short_key).strip().lower()
+        if not normalized_short or not isinstance(payload, dict):
+            continue
+
+        code = str(payload.get("code", "")).strip().lower()
+        if not code:
+            continue
+        raw_aliases = payload.get("aliases", [])
+        aliases = []
+        if isinstance(raw_aliases, list):
+            aliases = [
+                str(alias).strip().lower()
+                for alias in raw_aliases
+                if isinstance(alias, str) and str(alias).strip()
+            ]
+
+        registry[normalized_short] = {
+            "code": code,
+            "aliases": aliases,
+        }
+
+    return registry
+
+
+def get_project_aliases() -> dict[str, str]:
+    """Return normalized aliases resolved from PROJECT_CONFIG['projects']."""
+    config = _get_project_config()
+    aliases: dict[str, str] = {}
+
+    for short_key, payload in get_project_registry().items():
+        code = str(payload.get("code", "")).strip().lower()
+        if not code:
+            continue
+        aliases[short_key] = code
+        raw_aliases = payload.get("aliases", [])
+        if isinstance(raw_aliases, list):
+            for alias in raw_aliases:
+                normalized = str(alias).strip().lower()
+                if normalized:
+                    aliases[normalized] = code
+
+    for key, value in config.items():
+        if isinstance(value, dict) and value.get("workspace"):
+            canonical = str(key).strip().lower()
+            if canonical:
+                aliases.setdefault(canonical, canonical)
+
+    return aliases
+
+
+def normalize_project_key(project: str) -> str | None:
+    """Normalize a project key using configured aliases."""
+    candidate = str(project or "").strip().lower()
+    if not candidate:
+        return None
+    aliases = get_project_aliases()
+    return aliases.get(candidate, candidate)
+
+
+def get_track_short_projects() -> list[str]:
+    """Return short project keys for /track commands from projects registry."""
+    derived: list[str] = []
+    for short_key, payload in get_project_registry().items():
+        code = str(payload.get("code", "")).strip().lower()
+        if not code:
+            continue
+        if short_key != code and short_key.replace("-", "").replace("_", "").isalnum():
+            derived.append(short_key)
+
+    unique: list[str] = []
+    for item in derived:
+        if item not in unique:
+            unique.append(item)
+    return unique
+
+
+def get_workflow_profile(project: str = "nexus") -> str:
+    """Resolve workflow profile/path for a project from PROJECT_CONFIG.
+
+    Priority:
+    1. Project-specific ``workflow_definition_path``
+    2. Global ``workflow_definition_path``
+    3. ``ghabs_org_workflow`` fallback
+    """
+    config = _get_project_config()
+
+    workflow_value = ""
+    project_cfg = config.get(project)
+    if isinstance(project_cfg, dict):
+        workflow_value = str(project_cfg.get("workflow_definition_path", "")).strip()
+
+    if not workflow_value:
+        workflow_value = str(config.get("workflow_definition_path", "")).strip()
+
+    if workflow_value:
+        return workflow_value
+    return "ghabs_org_workflow"
 
 
 # Caching wrappers for lazy-loading on first access (support monkeypatch in tests)

@@ -270,7 +270,7 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
             f"Projects: {', '.join(deps.track_short_projects)}\n\n"
             "Examples:\n"
             "  /track 123\n"
-            "  /track casit 456"
+            "  /track nxs 456"
         )
         return
 
@@ -308,14 +308,19 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
             await update.effective_message.reply_text("❌ Invalid issue number.")
             return
 
+        details = deps.get_issue_details(issue_num)
+        issue_title = details.get("title", "") if isinstance(details, dict) else ""
+
         deps.tracked_issues_ref[issue_num] = {
+            "project": "global",
+            "status": "active",
+            "description": issue_title,
             "added_at": datetime.now().isoformat(),
             "last_seen_state": None,
             "last_seen_labels": [],
         }
         deps.save_tracked_issues(deps.tracked_issues_ref)
 
-        details = deps.get_issue_details(issue_num)
         if details:
             await update.effective_message.reply_text(
                 f"👁️ Now tracking issue #{issue_num} (global)\n\n"
@@ -378,8 +383,8 @@ async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, d
             "📋 You're not tracking any issues yet.\n\n"
             "Use /track <project> <issue#> to start tracking.\n\n"
             "Examples:\n"
-            "  /track casit 123\n"
-            "  /track wlbl 456"
+            "  /track prj 123\n"
+            "  /track nxs 456"
         )
         return
 
@@ -398,6 +403,44 @@ async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     message += "<i>Use /untrack &lt;project&gt; &lt;issue#&gt; to stop tracking</i>"
 
     await update.effective_message.reply_text(message, parse_mode="HTML")
+
+
+async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
+    """Show globally tracked issues stored in StateManager."""
+    deps.logger.info(f"Global tracked issues requested by user: {update.effective_user.id}")
+    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
+        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        return
+
+    tracked = deps.tracked_issues_ref or {}
+    if not tracked:
+        await update.effective_message.reply_text(
+            "📌 No globally tracked issues.\n\n"
+            "Use /track <issue#> to add one."
+        )
+        return
+
+    lines = ["📌 <b>Global Tracked Issues</b>", ""]
+    active_total = 0
+    for issue_num, issue_data in sorted(tracked.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10**9):
+        issue_payload = issue_data if isinstance(issue_data, dict) else {}
+        status = str(issue_payload.get("status", "active")).strip().lower() or "active"
+        if status in {"done", "closed", "resolved", "completed", "implemented", "rejected"}:
+            continue
+        project = str(issue_payload.get("project", "global")).strip() or "global"
+        active_total += 1
+        lines.append(f"• #{issue_num} ({project}) — {status}")
+
+    if active_total == 0:
+        await update.effective_message.reply_text(
+            "📌 No active globally tracked issues.\n\n"
+            "Use /track <issue#> to add one."
+        )
+        return
+
+    lines.append("")
+    lines.append(f"<b>Active:</b> {active_total}")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:

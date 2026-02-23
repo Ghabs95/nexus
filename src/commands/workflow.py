@@ -4,17 +4,11 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
 from audit_store import AuditStore
-from config import TELEGRAM_ALLOWED_USER_IDS, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
+from config import TELEGRAM_ALLOWED_USER_IDS, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR, normalize_project_key
 from orchestration.plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ALIASES = {
-    "casit": "case_italia",
-    "wlbl": "wallible",
-    "bm": "biome",
-    "nexus": "nexus",
-}
 _issue_plugin_cache = {}
 _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
@@ -23,7 +17,8 @@ _WORKFLOW_STATE_PLUGIN_KWARGS = {
 
 
 def _normalize_project_key(project: str) -> str:
-    return PROJECT_ALIASES.get(project.lower(), project.lower())
+    normalized = normalize_project_key(project)
+    return str(normalized or "")
 
 
 def _get_project_repo(project_key: str) -> str:

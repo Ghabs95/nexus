@@ -1,7 +1,7 @@
 """User management and per-project tracking.
 
 Manages user access and tracks which issues each user is monitoring per project.
-Allows users to track different issues across multiple projects (casit, wlbl, bm).
+Allows users to track different issues across multiple projects (nxs, etc.).
 """
 import json
 import logging
@@ -20,7 +20,7 @@ USER_DATA_FILE = Path(DATA_DIR) / "user_tracking.json"
 @dataclass
 class UserProject:
     """Represents a user's tracking for a specific project."""
-    project_name: str  # casit, wlbl, bm, etc.
+    project_name: str  # nxs, etc.
     tracked_issues: List[str]  # List of issue numbers as strings
     last_activity: str  # ISO format timestamp
     
@@ -173,7 +173,7 @@ class UserManager:
         
         Args:
             telegram_id: Telegram user ID
-            project: Project name (casit, wlbl, bm)
+            project: Project name (nxs, etc.)
             issue_number: GitHub issue number
             username: Telegram username
             first_name: User's first name

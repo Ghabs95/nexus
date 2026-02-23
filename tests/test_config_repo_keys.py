@@ -63,3 +63,83 @@ def test_get_github_repos_supports_git_repo_and_git_repos(monkeypatch):
     repos = config.get_github_repos("wallible")
 
     assert repos == ["wallible/backend", "wallible/mobile-app"]
+
+
+def test_get_workflow_profile_prefers_project_specific(monkeypatch):
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "_get_project_config",
+        lambda: {
+            "workflow_definition_path": "ghabs/agents/workflows/ghabs_org_workflow.yaml",
+            "wallible": {
+                "workspace": "wallible",
+                "workflow_definition_path": "wallible/wlbl-workflow-os/workflows/master.yaml",
+            },
+        },
+    )
+
+    assert config.get_workflow_profile("wallible") == "wallible/wlbl-workflow-os/workflows/master.yaml"
+
+
+def test_get_workflow_profile_falls_back_to_global(monkeypatch):
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "_get_project_config",
+        lambda: {
+            "workflow_definition_path": "ghabs/agents/workflows/ghabs_org_workflow.yaml",
+            "nexus": {"workspace": "ghabs"},
+        },
+    )
+
+    assert config.get_workflow_profile("nexus") == "ghabs/agents/workflows/ghabs_org_workflow.yaml"
+
+
+def test_normalize_project_key_uses_config_aliases(monkeypatch):
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "_get_project_config",
+        lambda: {
+            "projects": {
+                "casit": {"code": "case_italia", "aliases": []},
+                "wlbl": {"code": "wallible", "aliases": []},
+                "nxs": {"code": "nexus", "aliases": ["nexus core", "nexus-core"]},
+            },
+            "case_italia": {"workspace": "case_italia"},
+            "wallible": {"workspace": "wallible"},
+            "nexus": {"workspace": "ghabs"},
+        },
+    )
+
+    assert config.normalize_project_key("casit") == "case_italia"
+    assert config.normalize_project_key("nxs") == "nexus"
+    assert config.normalize_project_key("wallible") == "wallible"
+    assert config.normalize_project_key("unknown") == "unknown"
+
+
+def test_get_track_short_projects_derives_from_aliases(monkeypatch):
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "_get_project_config",
+        lambda: {
+            "projects": {
+                "casit": {"code": "case_italia", "aliases": []},
+                "wlbl": {"code": "wallible", "aliases": []},
+                "bm": {"code": "biome", "aliases": []},
+                "nxs": {"code": "nexus", "aliases": ["nexus core", "nexus-core"]},
+            },
+            "case_italia": {"workspace": "case_italia"},
+            "wallible": {"workspace": "wallible"},
+            "biome": {"workspace": "biome"},
+            "nexus": {"workspace": "ghabs"},
+        },
+    )
+
+    assert config.get_track_short_projects() == ["casit", "wlbl", "bm", "nxs"]

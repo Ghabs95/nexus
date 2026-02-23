@@ -183,7 +183,14 @@ class ReportScheduler:
             status_counts = {}
             
             for issue_key, issue_data in tracked_issues.items():
-                status = issue_data.get('status', 'unknown')
+                payload = issue_data if isinstance(issue_data, dict) else {}
+                status = str(payload.get('status', '')).strip().lower()
+                if not status:
+                    legacy_state = str(payload.get('last_seen_state', '')).strip().lower()
+                    if legacy_state in {'closed', 'resolved', 'done', 'completed', 'implemented', 'rejected'}:
+                        status = legacy_state
+                    else:
+                        status = 'active'
                 status_counts[status] = status_counts.get(status, 0) + 1
             
             return {

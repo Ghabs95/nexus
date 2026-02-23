@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
 import redis
-from config import REDIS_URL, get_chat_agent_types
+from config import REDIS_URL, get_chat_agent_types, get_workflow_profile
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,24 @@ def _resolve_primary_agent_type(project_key: Optional[str], allowed_agent_types:
     return candidates[0]
 
 
-def _default_chat_metadata() -> Dict[str, Any]:
+def _resolve_workflow_profile(project_key: Optional[str]) -> str:
+    try:
+        value = get_workflow_profile(project_key or "nexus")
+        normalized = str(value).strip()
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return "ghabs_org_workflow"
+
+
+def _default_chat_metadata(project_key: Optional[str] = None) -> Dict[str, Any]:
     return {
-        "project_key": None,
+        "project_key": project_key,
         "chat_mode": "strategy",
         "primary_agent_type": "triage",
         "allowed_agent_types": [],
-        "workflow_profile": "ghabs_org_workflow",
+        "workflow_profile": _resolve_workflow_profile(project_key),
         "delegation_enabled": True,
     }
 
@@ -46,10 +57,21 @@ def _normalize_chat_data(chat_data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(metadata, dict):
         metadata = {}
 
-    defaults = _default_chat_metadata()
+    inferred_project_key = metadata.get("project_key") if isinstance(metadata, dict) else None
+    if isinstance(inferred_project_key, str):
+        inferred_project_key = inferred_project_key.strip().lower() or None
+    else:
+        inferred_project_key = None
+
+    defaults = _default_chat_metadata(inferred_project_key)
     normalized_metadata = {**defaults, **metadata}
 
     project_key = normalized_metadata.get("project_key")
+    if isinstance(project_key, str):
+        project_key = project_key.strip().lower() or None
+    else:
+        project_key = None
+    normalized_metadata["project_key"] = project_key
 
     allowed_agent_types = normalized_metadata.get("allowed_agent_types")
     if not isinstance(allowed_agent_types, list):
@@ -68,6 +90,11 @@ def _normalize_chat_data(chat_data: Dict[str, Any]) -> Dict[str, Any]:
     if not primary_agent_type or (cleaned_allowed and primary_agent_type not in cleaned_allowed):
         primary_agent_type = _resolve_primary_agent_type(project_key, cleaned_allowed)
     normalized_metadata["primary_agent_type"] = primary_agent_type
+
+    current_profile = str(normalized_metadata.get("workflow_profile") or "").strip()
+    expected_profile = _resolve_workflow_profile(project_key)
+    if not current_profile or (current_profile == "ghabs_org_workflow" and expected_profile):
+        normalized_metadata["workflow_profile"] = expected_profile
 
     merged["metadata"] = normalized_metadata
     return merged
@@ -187,19 +214,37 @@ def update_chat_metadata(user_id: int, chat_id: str, updates: Dict[str, Any]) ->
         metadata["project_key"] = normalized_project_key
         metadata["allowed_agent_types"] = project_agent_types
         metadata["primary_agent_type"] = project_agent_types[0] if project_agent_types else "triage"
+        metadata["workflow_profile"] = _resolve_workflow_profile(normalized_project_key)
 
     metadata.update(updates)
 
-    if isinstance(next_project_key, str) and next_project_key.strip():
-        normalized_project_key = next_project_key.strip().lower()
-        project_agent_types = _resolve_project_agent_types(normalized_project_key)
+    if isinstance(metadata.get("project_key"), str) and str(metadata.get("project_key")).strip():
+        normalized_project_key = str(metadata.get("project_key")).strip().lower()
         metadata["project_key"] = normalized_project_key
-        metadata["allowed_agent_types"] = project_agent_types
-        metadata["primary_agent_type"] = project_agent_types[0] if project_agent_types else "triage"
+        if not str(metadata.get("workflow_profile") or "").strip():
+            metadata["workflow_profile"] = _resolve_workflow_profile(normalized_project_key)
 
     chat_data["metadata"] = _normalize_chat_data({"metadata": metadata}).get("metadata")
     r.hset(f"user_chats:{user_id}", chat_id, json.dumps(chat_data))
     return True
+
+def rename_chat(user_id: int, chat_id: str, new_title: str) -> bool:
+    """Renames a chat. Returns True if successful."""
+    if not chat_id or not new_title:
+        return False
+        
+    r = get_redis()
+    raw_chat = r.hget(f"user_chats:{user_id}", chat_id)
+    if not raw_chat:
+        return False
+        
+    try:
+        chat_data = json.loads(raw_chat)
+        chat_data["title"] = new_title
+        r.hset(f"user_chats:{user_id}", chat_id, json.dumps(chat_data))
+        return True
+    except json.JSONDecodeError:
+        return False
 
 def delete_chat(user_id: int, chat_id: str) -> bool:
     """Deletes a chat and its history. Returns True if successful."""

@@ -1,8 +1,8 @@
 import os
-import json
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Optional
 from config import BASE_DIR, PROJECT_CONFIG, get_inbox_dir
+from handlers.common_routing import extract_json_dict
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +25,26 @@ TYPES = {
     "improvement-simple": "Improvement (Simple)"
 }
 
-def _extract_json_dict(text: str) -> Dict[str, Any]:
-    """Extract a JSON dictionary from a string that might contain markdown or other text."""
-    try:
-        # Strategy 1: Find everything between first { and last }
-        if "{" in text and "}" in text:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            json_str = text[start:end]
-            return json.loads(json_str)
-
-        # Strategy 2: Remove markdown formatting
-        text_clean = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text_clean)
-        
-    except json.JSONDecodeError as e:
+def _parse_classification_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize orchestrator classification output into a plain dict payload."""
+    if not isinstance(result, dict):
         return {}
+
+    if result.get("project"):
+        return result
+
+    for field in ("response", "text", "output"):
+        candidate = result.get(field)
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+        if isinstance(candidate, str) and candidate.strip():
+            parsed = extract_json_dict(candidate)
+            if parsed:
+                merged = dict(result)
+                merged.update(parsed)
+                return merged
+
+    return result
 
 def _refine_task_description(content: str, project: str) -> str:
     """Prepend the project name if it's missing."""
@@ -49,7 +53,12 @@ def _refine_task_description(content: str, project: str) -> str:
         return f"{project_display}: {content}"
     return content
 
-async def process_inbox_task(text: str, orchestrator, message_id_or_unique_id: str) -> Dict[str, Any]:
+async def process_inbox_task(
+    text: str,
+    orchestrator,
+    message_id_or_unique_id: str,
+    project_hint: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Core logic for processing a task from natural language text.
     Classifies the task, creates the markdown file in the inbox, and returns the result.
@@ -61,26 +70,45 @@ async def process_inbox_task(text: str, orchestrator, message_id_or_unique_id: s
     - content: str (Optional)
     - pending_resolution: dict (Optional, if project needs manual selection)
     """
-    logger.info("Running task classification...")
-    result = orchestrator.run_text_to_speech_analysis(
-        text=text,
-        task="classify",
-        projects=list(PROJECTS.keys()),
-        types=list(TYPES.keys())
-    )
+    normalized_project_hint = str(project_hint or "").strip().lower()
+    result: Dict[str, Any] = {}
 
-    logger.info(f"Analysis result: {result}")
+    if normalized_project_hint in PROJECTS:
+        logger.info(
+            "Using project context '%s' directly; skipping project classification.",
+            normalized_project_hint,
+        )
+        result = {
+            "project": normalized_project_hint,
+            "type": "feature",
+            "task_name": "",
+            "content": text,
+        }
+    else:
+        logger.info("Running task classification...")
+        result = orchestrator.run_text_to_speech_analysis(
+            text=text,
+            task="classify",
+            projects=list(PROJECTS.keys()),
+            types=list(TYPES.keys())
+        )
+        logger.info(f"Analysis result: {result}")
 
     # Parse Result
     try:
-        if isinstance(result, dict) and result.get("text"):
-            needs_reparse = result.get("parse_error") or "project" not in result
-            if needs_reparse:
-                reparsed = _extract_json_dict(result["text"])
-                if reparsed:
-                    result = reparsed
+        result = _parse_classification_result(result)
 
         project = result.get("project")
+        if isinstance(project, str):
+            project = project.strip().lower()
+
+        if (not project or project not in PROJECTS) and normalized_project_hint in PROJECTS:
+            logger.info(
+                "Using contextual project fallback '%s' for inbox routing",
+                normalized_project_hint,
+            )
+            project = normalized_project_hint
+
         if not project or project not in PROJECTS:
             task_type = result.get("type", "feature")
             if task_type not in TYPES:
@@ -110,6 +138,7 @@ async def process_inbox_task(text: str, orchestrator, message_id_or_unique_id: s
             logger.warning(f"Type '{task_type}' not in TYPES, defaulting to 'feature'")
             task_type = "feature"
         
+        content = result.get("content") or text
         content = _refine_task_description(content, str(project))
         task_name = result.get("task_name", "")
         logger.info(f"Parsed: project={project}, type={task_type}, task_name={task_name}")
