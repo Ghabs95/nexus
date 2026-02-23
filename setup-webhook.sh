@@ -23,22 +23,22 @@ SERVICE_FILE="nexus-webhook.service"
 echo "📝 Step 1: Webhook Secret"
 echo "-------------------------"
 
-if grep -q "^WEBHOOK_SECRET=$" "$NEXUS_DIR/vars.secret"; then
+if grep -q "^WEBHOOK_SECRET=$" "$NEXUS_DIR/.env"; then
     echo "No webhook secret found. Generating one..."
     WEBHOOK_SECRET=$(openssl rand -hex 32)
-    sed -i "s|^WEBHOOK_SECRET=$|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_DIR/vars.secret"
+    sed -i "s|^WEBHOOK_SECRET=$|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_DIR/.env"
     echo "✅ Generated webhook secret: $WEBHOOK_SECRET"
     echo ""
     echo "⚠️  IMPORTANT: Save this secret! You'll need it for GitHub webhook configuration."
     echo "   Add it to GitHub at: https://github.com/Ghabs95/agents/settings/hooks"
     echo ""
 else
-    WEBHOOK_SECRET=$(grep "^WEBHOOK_SECRET=" "$NEXUS_DIR/vars.secret" | cut -d= -f2)
+    WEBHOOK_SECRET=$(grep "^WEBHOOK_SECRET=" "$NEXUS_DIR/.env" | cut -d= -f2)
     if [[ -z "$WEBHOOK_SECRET" ]]; then
-        echo "⚠️  Warning: WEBHOOK_SECRET is empty in vars.secret"
+        echo "⚠️  Warning: WEBHOOK_SECRET is empty in .env"
         echo "   Generating a new secret..."
         WEBHOOK_SECRET=$(openssl rand -hex 32)
-        sed -i "s|^WEBHOOK_SECRET=.*|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_DIR/vars.secret"
+        sed -i "s|^WEBHOOK_SECRET=.*|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_DIR/.env"
         echo "✅ Generated webhook secret: $WEBHOOK_SECRET"
     else
         echo "✅ Webhook secret already configured"
@@ -96,7 +96,7 @@ echo ""
 echo "🧪 Step 5: Test Endpoint"
 echo "-----------------------"
 
-WEBHOOK_PORT=$(grep "^WEBHOOK_PORT=" "$NEXUS_DIR/vars.secret" | cut -d= -f2)
+WEBHOOK_PORT=$(grep "^WEBHOOK_PORT=" "$NEXUS_DIR/.env" | cut -d= -f2)
 WEBHOOK_PORT=${WEBHOOK_PORT:-8081}
 
 sleep 1

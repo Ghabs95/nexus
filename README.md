@@ -90,7 +90,7 @@ Step through an interactive menu:
 
 4. **Configure environment variables**:
 
-   Edit `vars.secret` with your credentials:
+   Edit `.env` with your credentials:
    ```bash
    PROJECT_CONFIG_PATH=config/project_config.yaml    # Per-project settings
    ```
@@ -114,7 +114,7 @@ Step through an interactive menu:
 
    For manual testing, you can also export them:
    ```bash
-   source vars.secret
+   source .env
    ```
 
 ### Running the Bot
@@ -331,7 +331,7 @@ Comprehensive error handling for reliability:
 
 **Implementation**: [src/error_handling.py](src/error_handling.py) - `retry_with_backoff()`, `run_command_with_retry()`, `validate_configuration()`
 
-### Configuration (`vars.secret`)
+### Configuration (`.env`)
 
 ```bash
 PROJECT_CONFIG_PATH=config/project_config.yaml    # Per-project settings
@@ -356,7 +356,7 @@ sudo systemctl enable --now nexus-bot.service
 sudo systemctl status nexus-bot.service
 ```
 
-- Common environment variables (set in `vars.secret`):
+- Common environment variables (set in `.env`):
 
 ```
 TELEGRAM_TOKEN=...

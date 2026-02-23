@@ -346,7 +346,7 @@ Maintains human-in-the-loop for critical decision points while preserving automa
 
 ## Configuration
 
-### Environment Variables (`vars.secret`)
+### Environment Variables (`.env`)
 ```bash
 TELEGRAM_TOKEN          # Bot authentication
 TELEGRAM_CHAT_ID        # Target chat
@@ -533,7 +533,7 @@ Other potential improvements:
 
 | Symptom | Likely Cause | Solution |
 |---------|--------------|----------|
-| Service won't start | Missing env vars | Check `vars.secret`, verify with `env \| grep TELEGRAM` |
+| Service won't start | Missing env vars | Check `.env`, verify with `env \| grep TELEGRAM` |
 | No auto-chaining | Comment format wrong | Ensure `` Ready for `@AgentName` `` format |
 | High memory | Stuck processes | `pkill -f "copilot.*issues/"` |
 | Rate limit errors | Too many requests | Wait for window to reset or adjust limits |

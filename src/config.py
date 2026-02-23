@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from chat_agents_schema import get_project_chat_agents
 
 # Load secrets from local file if exists
-SECRET_FILE = "vars.secret"
+SECRET_FILE = ".env"
 if os.path.exists(SECRET_FILE):
     logging.info(f"Loading environment from {SECRET_FILE}")
     load_dotenv(SECRET_FILE)
@@ -831,7 +831,7 @@ def validate_configuration():
     
     # Check required environment variables
     if not TELEGRAM_TOKEN:
-        errors.append("TELEGRAM_TOKEN is missing! Set it in vars.secret or environment.")
+        errors.append("TELEGRAM_TOKEN is missing! Set it in .env or environment.")
     
     if not TELEGRAM_ALLOWED_USER_IDS:
         warnings.append("TELEGRAM_ALLOWED_USER_IDS are missing! Bot will not respond to anyone.")

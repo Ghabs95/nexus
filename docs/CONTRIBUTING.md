@@ -29,8 +29,8 @@ pip install -r requirements.txt
 pip install pytest pytest-mock pytest-asyncio pytest-cov black flake8
 
 # Copy and configure environment variables
-cp vars.secret.example vars.secret
-# Edit vars.secret with your credentials
+cp .env.example .env
+# Edit .env with your credentials
 ```
 
 ### Running Tests
@@ -54,15 +54,15 @@ pytest tests/test_rate_limiter.py::TestRateLimiter::test_basic_limiting -v
 
 ```bash
 # Terminal 1: Start the bot
-source vars.secret
+source .env
 python src/telegram_bot.py
 
 # Terminal 2: Start the processor
-source vars.secret
+source .env
 python src/inbox_processor.py
 
 # Terminal 3: Start health check (optional)
-source vars.secret
+source .env
 python src/health_check.py
 ```
 
@@ -456,7 +456,7 @@ async def my_handler(update, context):
 # In src/config.py
 MY_NEW_CONFIG = os.getenv("MY_NEW_CONFIG", "default_value")
 
-# In vars.secret
+# In .env
 MY_NEW_CONFIG=production_value
 
 # In README.md and DEPLOYMENT.md

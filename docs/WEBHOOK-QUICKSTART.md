@@ -7,7 +7,7 @@ Your webhook server is **already running** on port 8081! Just configure GitHub t
 ## Step 1: Get Your Webhook Secret
 
 ```bash
-grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/vars.secret
+grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/.env
 ```
 
 **Result**: `b6fa2513cbf3d41cdbddbac4b6ff774ae7b6ac2e632ba988a06dcc2eff22edc1`
@@ -129,7 +129,7 @@ grep "already running\|recently launched\|Recent log file" logs/webhook.log
 Before going live:
 
 - [ ] GitHub webhook configured and tested
-- [ ] Webhook secret verified (matches vars.secret)
+- [ ] Webhook secret verified (matches .env)
 - [ ] Firewall allows port 8081 (or use nginx reverse proxy)
 - [ ] Service auto-starts on boot: `sudo systemctl is-enabled nexus-webhook`
 - [ ] Logs rotating properly (check logrotate.conf)

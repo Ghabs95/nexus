@@ -58,11 +58,11 @@ pip install -r requirements.txt
 
 ### 3. Configure Environment Variables
 
-Create and edit `vars.secret`:
+Create and edit `.env`:
 
 ```bash
-cp vars.secret.example vars.secret
-nano vars.secret
+cp .env.example .env
+nano .env
 ```
 
 Required variables:
@@ -91,7 +91,7 @@ AGENT_FAILURE_THRESHOLD=3
 ALERT_COOLDOWN_MINUTES=30
 ```
 
-**Security Note**: Never commit `vars.secret` to version control. It's included in `.gitignore`.
+**Security Note**: Never commit `.env` to version control. It's included in `.gitignore`.
 
 ### 4. Initialize Data Directories
 
@@ -240,7 +240,7 @@ sudo journalctl -u nexus-bot -n 100 --no-pager
 
 # Common issues:
 # 1. Missing environment variables
-source /home/ubuntu/git/ghabs/nexus/vars.secret
+source /home/ubuntu/git/ghabs/nexus/.env
 env | grep TELEGRAM
 
 # 2. Permission issues
@@ -318,8 +318,8 @@ Edit rate limit thresholds in `src/rate_limiter.py`:
 ## Security Best Practices
 
 1. **Environment Variables**
-   - Never commit `vars.secret`
-   - Use restrictive permissions: `chmod 600 vars.secret`
+   - Never commit `.env`
+   - Use restrictive permissions: `chmod 600 .env`
    - Rotate tokens periodically
 
 2. **Service User**

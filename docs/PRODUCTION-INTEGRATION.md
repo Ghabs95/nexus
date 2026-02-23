@@ -124,7 +124,7 @@ workflow_id = create_workflow_for_issue_sync(...)
 
 ### Nexus-Core Workflow Engine
 
-**File:** `vars.secret` or environment
+**File:** `.env` or environment
 
 ```bash
 # Nexus-core workflow integration is mandatory

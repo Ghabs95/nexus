@@ -532,6 +532,21 @@ def invoke_copilot_agent(
     # Use orchestrator to launch agent
     orchestrator = get_orchestrator(ORCHESTRATOR_CONFIG)
     
+    # Resolve project-specific API token
+    from orchestration.nexus_core_helpers import _get_project_config
+    project_cfg = _get_project_config().get(project_name, {}) if project_name else {}
+    git_platform = project_cfg.get("git_platform", "github")
+    default_token_var = "GITLAB_TOKEN" if git_platform == "gitlab" else "GITHUB_TOKEN"
+    token_var = project_cfg.get("git_token_var_name", default_token_var)
+    token = os.getenv(token_var)
+    
+    agent_env = None
+    if token:
+        agent_env = {
+            "GITHUB_TOKEN": token,
+            "GITLAB_TOKEN": token
+        }
+    
     try:
         pid, tool_used = orchestrator.invoke_agent(
             agent_prompt=prompt,
@@ -542,7 +557,8 @@ def invoke_copilot_agent(
             agent_name=agent_type,
             use_gemini=use_gemini,
             exclude_tools=exclude_tools,
-            log_subdir=log_subdir
+            log_subdir=log_subdir,
+            env=agent_env
         )
         
         logger.info(f"🚀 Agent launched with {tool_used.value} (PID: {pid})")

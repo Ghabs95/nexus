@@ -44,11 +44,15 @@ def get_git_platform(repo: str = None, project_name: str = None):
     repo_name = repo or get_github_repo(project_key)
     platform_type = get_project_platform(project_key)
 
+    project_config = _get_project_config().get(project_key, {})
+    default_token_var = "GITLAB_TOKEN" if platform_type == "gitlab" else "GITHUB_TOKEN"
+    token_var = project_config.get("git_token_var_name", default_token_var)
+    token = os.getenv(token_var)
+
     if platform_type == "gitlab":
-        token = os.getenv("GITLAB_TOKEN")
         if not token:
             raise ValueError(
-                "GITLAB_TOKEN is required for gitlab projects. "
+                f"{token_var} is required for gitlab projects. "
                 f"Missing token for project '{project_key}'."
             )
         return GitLabPlatform(
@@ -57,7 +61,9 @@ def get_git_platform(repo: str = None, project_name: str = None):
             base_url=get_gitlab_base_url(project_key),
         )
 
-    return GitHubPlatform(repo=repo_name)
+    if not token:
+        logger.warning(f"{token_var} is missing for project '{project_key}'. Git operations may fail.")
+    return GitHubPlatform(repo=repo_name, token=token)
 
 
 def get_workflow_definition_path(project_name: str) -> Optional[str]:

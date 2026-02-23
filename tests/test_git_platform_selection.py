@@ -37,3 +37,19 @@ def test_get_git_platform_raises_when_gitlab_token_missing(monkeypatch):
 
     with pytest.raises(ValueError, match="GITLAB_TOKEN"):
         nexus_core_helpers.get_git_platform(project_name="wallible")
+
+
+def test_get_git_platform_uses_custom_token_var(monkeypatch):
+    import orchestration.nexus_core_helpers as nexus_core_helpers
+    from nexus.adapters.git.github import GitHubPlatform
+
+    monkeypatch.setattr(nexus_core_helpers, "_get_project_config", lambda: {"wallible": {"git_token_var_name": "WALLIBLE_GITHUB_TOKEN"}})
+    monkeypatch.setattr(nexus_core_helpers, "get_project_platform", lambda _project: "github")
+    monkeypatch.setattr(nexus_core_helpers, "get_github_repo", lambda _project: "wallible/app")
+    
+    monkeypatch.setenv("WALLIBLE_GITHUB_TOKEN", "ghp_custom_token_123")
+    
+    platform = nexus_core_helpers.get_git_platform(project_name="wallible")
+    
+    assert isinstance(platform, GitHubPlatform)
+    assert platform.token == "ghp_custom_token_123"

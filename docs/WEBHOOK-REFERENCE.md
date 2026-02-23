@@ -39,7 +39,7 @@ curl http://localhost:8081/health
 3. Configure:
    - **Payload URL**: `http://<your-server-ip>:8081/webhook`
    - **Content type**: `application/json`
-   - **Secret**: (use value from vars.secret: `WEBHOOK_SECRET`)
+   - **Secret**: (use value from .env: `WEBHOOK_SECRET`)
    - **Events**: Select individual events:
      - ✓ Issue comments
      - ✓ Pull requests  
@@ -76,7 +76,7 @@ sudo journalctl -u nexus-webhook -n 100
 sudo lsof -i :8081
 
 # Verify configuration
-cat /home/ubuntu/git/ghabs/nexus/vars.secret | grep WEBHOOK
+cat /home/ubuntu/git/ghabs/nexus/.env | grep WEBHOOK
 ```
 
 ### Webhooks not being received
@@ -100,7 +100,7 @@ sudo ufw status
 ### Signature verification failing
 ```bash
 # Check if WEBHOOK_SECRET matches GitHub configuration
-grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/vars.secret
+grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/.env
 
 # Verify in GitHub webhook settings
 # Settings → Webhooks → Edit → Secret field

@@ -129,9 +129,9 @@ sudo chown -R ubuntu:ubuntu data logs
 
 ### 2.5 Configure Environment Variables
 
-**Critical:** Never commit `vars.secret` to git.
+**Critical:** Never commit `.env` to git.
 
-Create `/home/ubuntu/git/ghabs/nexus/vars.secret`:
+Create `/home/ubuntu/git/ghabs/nexus/.env`:
 
 ```bash
 TELEGRAM_TOKEN=<your_telegram_bot_token>
@@ -150,7 +150,7 @@ openssl rand -base64 32
 
 Set proper permissions:
 ```bash
-chmod 600 /home/ubuntu/git/ghabs/nexus/vars.secret
+chmod 600 /home/ubuntu/git/ghabs/nexus/.env
 ```
 
 ### 2.6 Create Project Workspace Structure
@@ -317,7 +317,7 @@ curl http://127.0.0.1:8080/health
 
 ```bash
 bash
-WEBHOOK_SECRET=$(grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/vars.secret | cut -d= -f2)
+WEBHOOK_SECRET=$(grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/.env | cut -d= -f2)
 
 payload='{"zen":"Keep it logically awesome.","hook_id":123}'
 sig=$(printf "%s" "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')
@@ -346,7 +346,7 @@ curl -s http://158.180.233.4:8081/health
 3. Fill in:
    - **Payload URL:** `http://<YOUR_SERVER_IP>:8081/webhook`
    - **Content type:** `application/json`
-   - **Secret:** (paste your WEBHOOK_SECRET from vars.secret)
+   - **Secret:** (paste your WEBHOOK_SECRET from .env)
    - **Events:** Select "Let me select individual events" → check:
      - `Issue comments` (workflow completion)
      - `Pull requests` (PR notifications)
@@ -396,7 +396,7 @@ sudo journalctl -u nexus-webhook.service -n 100
 # (see "Webhook Signature Test" above)
 
 # 4. Verify secret matches in GitHub webhook settings
-grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/vars.secret
+grep WEBHOOK_SECRET /home/ubuntu/git/ghabs/nexus/.env
 ```
 
 ### Services Won't Start
@@ -409,8 +409,8 @@ ls -la /home/ubuntu/git/ghabs/nexus/venv/bin/python
 source /home/ubuntu/git/ghabs/nexus/venv/bin/activate
 python3 -c "import telegram; import flask"
 
-# 3. Check vars.secret is readable
-cat /home/ubuntu/git/ghabs/nexus/vars.secret
+# 3. Check .env is readable
+cat /home/ubuntu/git/ghabs/nexus/.env
 
 # 4. Review service logs
 sudo systemctl status nexus-bot.service --no-pager -l
@@ -457,7 +457,7 @@ sudo crontab -e
 - [ ] System dependencies installed
 - [ ] Python venv created and dependencies installed
 - [ ] Data/logs directories created with correct permissions
-- [ ] vars.secret configured with all required keys
+- [ ] .env configured with all required keys
 - [ ] Project workspace directories (.github/inbox, tasks/) created
 - [ ] Service files installed and enabled
 - [ ] All 4 services running without errors
@@ -487,4 +487,3 @@ For issues:
 2. Review [DEPLOYMENT.md](DEPLOYMENT.md) for operations guide
 3. Check [ARCHITECTURE.md](ARCHITECTURE.md) for system design
 4. Verify firewall rules: `sudo iptables -S INPUT | grep 8081`
-
