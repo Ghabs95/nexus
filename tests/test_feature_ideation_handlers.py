@@ -77,6 +77,12 @@ class _CaptureLogger:
     def __init__(self):
         self.messages = []
 
+    def info(self, message, *args):
+        if args:
+            self.messages.append(str(message) % args)
+        else:
+            self.messages.append(str(message))
+
     def warning(self, message, *args):
         if args:
             self.messages.append(str(message) % args)
@@ -111,6 +117,23 @@ class _WrappedResponseOrchestrator:
                 "  ]\n"
                 "}"
             ),
+        }
+
+
+class _CopilotFallbackSuccessOrchestrator:
+    def run_text_to_speech_analysis(self, **_kwargs):
+        return {"text": "not-json"}
+
+    def _run_copilot_analysis(self, *_args, **_kwargs):
+        return {
+            "items": [
+                {
+                    "title": "Copilot-generated roadmap slice",
+                    "summary": "Break roadmap into measurable monthly increments.",
+                    "why": "Improves execution predictability and visibility.",
+                    "steps": ["Define milestones", "Map owner per milestone", "Track completion"],
+                }
+            ]
         }
 
 
@@ -603,3 +626,54 @@ def test_build_feature_suggestions_accepts_wrapped_response_json_string(tmp_path
     assert len(items) == 1
     assert items[0]["title"] == "Multi-Asset Performance Benchmarking"
     assert not any("retrying with Copilot" in msg for msg in logger.messages)
+
+
+def test_build_feature_suggestions_logs_success_when_copilot_fallback_succeeds(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    agents_dir = workspace_root / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "business.yaml").write_text(
+        "spec:\n"
+        "  agent_type: business\n"
+        "  prompt_template: |\n"
+        "    Dedicated Advisor Prompt\n",
+        encoding="utf-8",
+    )
+
+    logger = _CaptureLogger()
+    deps = handlers.FeatureIdeationHandlerDeps(
+        logger=logger,
+        allowed_user_ids=[],
+        projects={"acme": "Acme"},
+        get_project_label=lambda key: "Acme" if key == "acme" else key,
+        orchestrator=_CopilotFallbackSuccessOrchestrator(),
+        base_dir=str(tmp_path),
+        project_config={
+            "acme": {
+                "workspace": "workspace",
+                "agents_dir": "workspace/agents",
+                "chat_agents": {
+                    "business": {
+                        "context_path": "business-os",
+                        "context_files": ["README.md"],
+                    }
+                },
+            }
+        },
+    )
+
+    items = handlers._build_feature_suggestions(
+        project_key="acme",
+        text="Propose top 1 feature",
+        deps=deps,
+        preferred_agent_type="business",
+        feature_count=1,
+    )
+
+    assert len(items) == 1
+    assert items[0]["title"] == "Copilot-generated roadmap slice"
+    assert any(
+        "Feature ideation success: provider=copilot primary_success=false fallback_used=true items=1"
+        in msg
+        for msg in logger.messages
+    )

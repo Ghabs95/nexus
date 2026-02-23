@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 from chat_agents_schema import get_project_chat_agent_types
 from handlers.agent_definition_utils import extract_agent_identity
 from handlers.agent_resolution_handler import resolve_agents_for_project
+from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
@@ -105,7 +106,7 @@ def _build_direct_chat_persona(base_persona: str, project: str, agent_name: str,
 async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Audit trail requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -191,7 +192,7 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Stats requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     msg = await update.effective_message.reply_text(
@@ -257,7 +258,7 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
 async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Agents requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -298,7 +299,7 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
     deps.logger.info(f"Direct request by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if len(context.args) < 3:

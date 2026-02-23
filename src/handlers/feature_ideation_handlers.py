@@ -24,6 +24,11 @@ from handlers.agent_context_utils import (
     resolve_path,
     resolve_project_root,
 )
+from utils.log_utils import (
+    log_feature_ideation_success,
+    log_unauthorized_callback_access,
+    truncate_for_log,
+)
 
 
 FEATURE_STATE_KEY = "feature_suggestions"
@@ -151,13 +156,6 @@ def _extract_json_payload(raw_text: str) -> Any:
         return parsed_dict
 
     return None
-
-
-def _truncate_for_log(value: str, limit: int = 600) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}..."
 
 
 def _normalize_generated_features(items: Any, limit: int) -> List[Dict[str, Any]]:
@@ -374,6 +372,18 @@ def _build_feature_suggestions(
         )
         generated = _extract_items_from_result(result or {})
         if generated:
+            provider = "primary"
+            if isinstance(result, dict):
+                provider = str(result.get("provider") or result.get("model") or "primary")
+            log_feature_ideation_success(
+                getattr(deps, "logger", None),
+                provider=provider,
+                primary_success=True,
+                fallback_used=False,
+                item_count=len(generated),
+                project_key=project_key,
+                agent_type=routed_agent_type,
+            )
             return generated
 
         if getattr(deps, "logger", None):
@@ -387,11 +397,11 @@ def _build_feature_suggestions(
                 )
                 deps.logger.warning(
                     "Primary feature ideation structured response payload (truncated): %s",
-                    _truncate_for_log(json.dumps(result, ensure_ascii=False)),
+                    truncate_for_log(json.dumps(result, ensure_ascii=False)),
                 )
             deps.logger.warning(
                 "Primary feature ideation raw response (truncated): %s",
-                _truncate_for_log(raw_text),
+                truncate_for_log(raw_text),
             )
             deps.logger.warning(
                 "Dynamic feature ideation returned non-JSON/empty output (primary path), retrying with Copilot"
@@ -406,6 +416,15 @@ def _build_feature_suggestions(
             copilot_result = run_copilot(text, task="advisor_chat", persona=persona)
             generated = _extract_items_from_result(copilot_result or {})
             if generated:
+                log_feature_ideation_success(
+                    getattr(deps, "logger", None),
+                    provider="copilot",
+                    primary_success=False,
+                    fallback_used=True,
+                    item_count=len(generated),
+                    project_key=project_key,
+                    agent_type=routed_agent_type,
+                )
                 return generated
             if getattr(deps, "logger", None):
                 deps.logger.warning("Dynamic feature ideation Copilot retry returned non-JSON/empty output")
@@ -574,7 +593,7 @@ async def feature_callback_handler(
     await query.answer()
 
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized callback access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_callback_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     data = query.data or ""

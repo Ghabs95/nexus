@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from telegram import Update
 from telegram.ext import ContextTypes
+from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
@@ -44,7 +45,7 @@ class IssueHandlerDeps:
 async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Assign triggered by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -97,7 +98,7 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Implement requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -171,7 +172,7 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Prepare requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -257,7 +258,7 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
 async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Track requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     user = update.effective_user
@@ -340,7 +341,7 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
 async def untrack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Untrack requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     user = update.effective_user
@@ -372,7 +373,7 @@ async def untrack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
 async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"My issues requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     user = update.effective_user
@@ -409,7 +410,7 @@ async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
     """Show globally tracked issues stored in StateManager."""
     deps.logger.info(f"Global tracked issues requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     tracked = deps.tracked_issues_ref or {}
@@ -446,7 +447,7 @@ async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
 async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Comments requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -561,7 +562,7 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, d
 async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
     deps.logger.info(f"Respond requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:

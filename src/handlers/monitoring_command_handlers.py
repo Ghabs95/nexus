@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from telegram import Update
 from telegram.ext import ContextTypes
+from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
@@ -57,7 +58,7 @@ class MonitoringHandlerDeps:
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Status triggered by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     project_filter = None
@@ -185,7 +186,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Active triggered by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     cleanup_mode = any(arg.lower() in {"cleanup", "--cleanup"} for arg in (context.args or []))
@@ -321,7 +322,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Logs requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -414,7 +415,7 @@ async def logsfull_handler(
 ) -> None:
     deps.logger.info(f"Logsfull requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -488,7 +489,7 @@ async def logsfull_handler(
 async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Tail requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -622,7 +623,7 @@ async def tailstop_handler(
 ) -> None:
     deps.logger.info(f"Tailstop requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     session_key = (update.effective_chat.id, update.effective_user.id)
@@ -640,7 +641,7 @@ async def tailstop_handler(
 async def fuse_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
     deps.logger.info(f"Fuse status requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:

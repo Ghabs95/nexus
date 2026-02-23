@@ -14,6 +14,7 @@ from telegram.ext import ContextTypes
 from config import NEXUS_CORE_STORAGE_DIR
 from state_manager import StateManager
 from runtime.agent_launcher import clear_launch_guard
+from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
@@ -61,7 +62,7 @@ async def reprocess_handler(
 ) -> None:
     deps.logger.info(f"Reprocess requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -171,7 +172,7 @@ async def continue_handler(
 ) -> None:
     deps.logger.info(f"Continue requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -314,7 +315,7 @@ async def kill_handler(
 ) -> None:
     deps.logger.info(f"Kill requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -355,7 +356,7 @@ async def reconcile_handler(
 ) -> None:
     deps.logger.info(f"Reconcile requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -412,7 +413,7 @@ async def wfstate_handler(
 ) -> None:
     deps.logger.info(f"Wfstate requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
@@ -566,7 +567,7 @@ async def forget_handler(
 ) -> None:
     deps.logger.info(f"Forget requested by user: {update.effective_user.id}")
     if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        deps.logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
+        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
         return
 
     if not context.args:
