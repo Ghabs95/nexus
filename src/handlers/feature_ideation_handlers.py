@@ -9,7 +9,21 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+from chat_agents_schema import (
+    get_default_project_chat_agent_type,
+    get_project_chat_agent_config,
+)
 from handlers.common_routing import extract_json_dict
+from handlers.agent_context_utils import (
+    collect_context_candidate_files,
+    extract_agent_prompt_metadata_from_yaml,
+    extract_referenced_paths_from_markdown,
+    load_agent_prompt_from_definition,
+    load_role_context,
+    normalize_paths,
+    resolve_path,
+    resolve_project_root,
+)
 
 
 FEATURE_STATE_KEY = "feature_suggestions"
@@ -22,6 +36,8 @@ class FeatureIdeationHandlerDeps:
     projects: Dict[str, str]
     get_project_label: Callable[[str], str]
     orchestrator: Any
+    base_dir: str = ""
+    project_config: Optional[Dict[str, Any]] = None
 
 
 def is_feature_ideation_request(text: str) -> bool:
@@ -103,6 +119,47 @@ def _extract_json_dict(raw_text: str) -> Optional[Dict[str, Any]]:
     return parsed if parsed else None
 
 
+def _extract_json_payload(raw_text: str) -> Any:
+    if not raw_text:
+        return None
+
+    cleaned = str(raw_text).replace("```json", "").replace("```", "").strip()
+
+    for candidate in (str(raw_text).strip(), cleaned):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, (dict, list)):
+                return parsed
+        except Exception:
+            pass
+
+    text = str(raw_text)
+    if "[" in text and "]" in text:
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        try:
+            parsed = json.loads(text[start:end])
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+
+    parsed_dict = _extract_json_dict(raw_text)
+    if parsed_dict is not None:
+        return parsed_dict
+
+    return None
+
+
+def _truncate_for_log(value: str, limit: int = 600) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
 def _normalize_generated_features(items: Any, limit: int) -> List[Dict[str, Any]]:
     if not isinstance(items, list):
         return []
@@ -133,6 +190,103 @@ def _normalize_generated_features(items: Any, limit: int) -> List[Dict[str, Any]
     return normalized
 
 
+def _project_config_for_key(project_key: str, deps: FeatureIdeationHandlerDeps) -> Dict[str, Any]:
+    config = deps.project_config if isinstance(deps.project_config, dict) else {}
+    project_cfg = config.get(project_key)
+    if not isinstance(project_cfg, dict):
+        return {}
+    return project_cfg
+
+
+def _default_chat_agent_type_for_project(project_key: str, deps: FeatureIdeationHandlerDeps) -> str:
+    project_cfg = _project_config_for_key(project_key, deps)
+    return get_default_project_chat_agent_type(project_cfg)
+
+
+def _chat_agent_config_for_project(
+    project_key: str,
+    routed_agent_type: str,
+    deps: FeatureIdeationHandlerDeps,
+) -> Dict[str, Any]:
+    project_cfg = _project_config_for_key(project_key, deps)
+    return get_project_chat_agent_config(project_cfg, routed_agent_type)
+
+
+def _resolve_project_root(project_key: str, deps: FeatureIdeationHandlerDeps) -> str:
+    project_cfg = _project_config_for_key(project_key, deps)
+    return resolve_project_root(str(getattr(deps, "base_dir", "") or ""), project_key, project_cfg)
+
+
+def _resolve_path(project_root: str, raw_path: str) -> str:
+    return resolve_path(project_root, raw_path)
+
+
+def _normalize_paths(value: Any) -> List[str]:
+    return normalize_paths(value)
+
+
+def _extract_referenced_paths_from_agents(agents_text: str) -> List[str]:
+    return extract_referenced_paths_from_markdown(agents_text)
+
+
+def _collect_context_candidate_files(context_root: str, seed_files: Optional[List[str]] = None) -> List[str]:
+    return collect_context_candidate_files(context_root, seed_files=seed_files)
+
+
+def _extract_agent_prompt_metadata_from_yaml(path: str, max_chars: int = 3000) -> tuple[str, str]:
+    return extract_agent_prompt_metadata_from_yaml(path, max_chars=max_chars)
+
+
+def _load_agent_prompt_from_definition(
+    project_key: str,
+    routed_agent_type: str,
+    deps: FeatureIdeationHandlerDeps,
+) -> str:
+    project_root = _resolve_project_root(project_key, deps)
+    project_cfg = _project_config_for_key(project_key, deps)
+    return load_agent_prompt_from_definition(
+        base_dir=str(deps.base_dir or ""),
+        project_root=project_root,
+        project_cfg=project_cfg,
+        routed_agent_type=routed_agent_type,
+    )
+
+
+def _load_role_context(
+    project_key: str,
+    routed_agent_type: str,
+    deps: FeatureIdeationHandlerDeps,
+    max_chars: int = 18000,
+) -> str:
+    """Load project context for prompts based on chat_agents config and AGENTS protocol."""
+    agent_cfg = _chat_agent_config_for_project(project_key, routed_agent_type, deps)
+    project_root = _resolve_project_root(project_key, deps)
+    return load_role_context(project_root=project_root, agent_cfg=agent_cfg, max_chars=max_chars)
+
+
+def _build_feature_persona(
+    project_label: str,
+    routed_agent_type: str,
+    feature_count: int,
+    context_block: str,
+    agent_prompt: str,
+) -> str:
+    role = str(routed_agent_type or "").strip().lower()
+    role_prompt = (
+        f"Use this dedicated agent definition as your operating role and voice for `{role}`:\n"
+        f"{agent_prompt}"
+    )
+
+    return (
+        f"{role_prompt}\n"
+        f"Project: {project_label}\n"
+        "Return ONLY JSON with this schema:\n"
+        "{\"items\":[{\"title\":\"...\",\"summary\":\"...\",\"why\":\"...\",\"steps\":[\"...\",\"...\",\"...\"]}]}\n"
+        f"Generate exactly {feature_count} items. Keep titles concise and action-oriented."
+        f"{context_block}"
+    )
+
+
 def _build_feature_suggestions(
     project_key: str,
     text: str,
@@ -141,26 +295,76 @@ def _build_feature_suggestions(
     feature_count: int,
 ) -> List[Dict[str, Any]]:
     project_label = deps.get_project_label(project_key)
-    routed_agent_type = str(preferred_agent_type or "advisor").strip().lower()
-    persona = (
-        "You are a senior product strategy assistant. "
-        f"Respond in the perspective of agent_type `{routed_agent_type}` for project `{project_label}`.\n"
-        "Return ONLY JSON with this schema:\n"
-        "{\"items\":[{\"title\":\"...\",\"summary\":\"...\",\"why\":\"...\",\"steps\":[\"...\",\"...\",\"...\"]}]}\n"
-        f"Generate exactly {feature_count} items. Keep each title concise and action-oriented."
+    routed_agent_type = str(preferred_agent_type or "").strip().lower()
+    if not routed_agent_type:
+        routed_agent_type = _default_chat_agent_type_for_project(project_key, deps)
+    if not routed_agent_type:
+        if getattr(deps, "logger", None):
+            deps.logger.warning(
+                "Feature ideation requires configured chat_agents for project '%s'",
+                project_key,
+            )
+        return []
+
+    agent_prompt = _load_agent_prompt_from_definition(project_key, routed_agent_type, deps)
+    if not agent_prompt:
+        if getattr(deps, "logger", None):
+            deps.logger.warning(
+                "Feature ideation requires agent prompt definition for agent_type '%s' in project '%s'",
+                routed_agent_type,
+                project_key,
+            )
+        return []
+
+    context_block = _load_role_context(project_key, routed_agent_type, deps)
+    persona = _build_feature_persona(
+        project_label,
+        routed_agent_type,
+        feature_count,
+        context_block,
+        agent_prompt,
     )
 
     def _extract_items_from_result(result: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(result, dict):
             return []
 
+        if isinstance(result.get("title"), str) and isinstance(result.get("summary"), str):
+            single = _normalize_generated_features([result], feature_count)
+            if single:
+                return single
+
         if isinstance(result.get("items"), list):
             direct = _normalize_generated_features(result.get("items"), feature_count)
             if direct:
                 return direct
 
-        payload = _extract_json_dict(str(result.get("text", "")))
-        return _normalize_generated_features((payload or {}).get("items"), feature_count)
+        for list_key in ("features", "suggestions", "proposals"):
+            if isinstance(result.get(list_key), list):
+                direct = _normalize_generated_features(result.get(list_key), feature_count)
+                if direct:
+                    return direct
+
+        for wrapped_key in ("response", "content", "message"):
+            wrapped_value = result.get(wrapped_key)
+            if not isinstance(wrapped_value, str) or not wrapped_value.strip():
+                continue
+            payload = _extract_json_payload(wrapped_value)
+            if isinstance(payload, list):
+                direct = _normalize_generated_features(payload, feature_count)
+                if direct:
+                    return direct
+            if isinstance(payload, dict):
+                direct = _normalize_generated_features(payload.get("items"), feature_count)
+                if direct:
+                    return direct
+
+        payload = _extract_json_payload(str(result.get("text", "")))
+        if isinstance(payload, list):
+            return _normalize_generated_features(payload, feature_count)
+        if isinstance(payload, dict):
+            return _normalize_generated_features(payload.get("items"), feature_count)
+        return []
 
     try:
         result = deps.orchestrator.run_text_to_speech_analysis(
@@ -172,11 +376,29 @@ def _build_feature_suggestions(
         if generated:
             return generated
 
-        deps.logger.warning(
-            "Dynamic feature ideation returned non-JSON/empty output (primary path), retrying with Copilot"
-        )
+        if getattr(deps, "logger", None):
+            raw_text = ""
+            if isinstance(result, dict):
+                raw_text = str(result.get("text", ""))
+            if not raw_text and isinstance(result, dict):
+                deps.logger.warning(
+                    "Primary feature ideation structured response keys: %s",
+                    sorted(result.keys()),
+                )
+                deps.logger.warning(
+                    "Primary feature ideation structured response payload (truncated): %s",
+                    _truncate_for_log(json.dumps(result, ensure_ascii=False)),
+                )
+            deps.logger.warning(
+                "Primary feature ideation raw response (truncated): %s",
+                _truncate_for_log(raw_text),
+            )
+            deps.logger.warning(
+                "Dynamic feature ideation returned non-JSON/empty output (primary path), retrying with Copilot"
+            )
     except Exception as exc:
-        deps.logger.warning("Dynamic feature ideation failed on primary path: %s", exc)
+        if getattr(deps, "logger", None):
+            deps.logger.warning("Dynamic feature ideation failed on primary path: %s", exc)
 
     try:
         run_copilot = getattr(deps.orchestrator, "_run_copilot_analysis", None)
@@ -185,9 +407,11 @@ def _build_feature_suggestions(
             generated = _extract_items_from_result(copilot_result or {})
             if generated:
                 return generated
-            deps.logger.warning("Dynamic feature ideation Copilot retry returned non-JSON/empty output")
+            if getattr(deps, "logger", None):
+                deps.logger.warning("Dynamic feature ideation Copilot retry returned non-JSON/empty output")
     except Exception as exc:
-        deps.logger.warning("Dynamic feature ideation failed on Copilot retry: %s", exc)
+        if getattr(deps, "logger", None):
+            deps.logger.warning("Dynamic feature ideation failed on Copilot retry: %s", exc)
 
     return []
 
@@ -205,7 +429,10 @@ def _feature_list_text(
     deps: FeatureIdeationHandlerDeps,
     preferred_agent_type: Optional[str],
 ) -> str:
-    agent_label = str(preferred_agent_type or "advisor")
+    routed_agent_type = str(preferred_agent_type or "").strip().lower()
+    if not routed_agent_type:
+        routed_agent_type = _default_chat_agent_type_for_project(project_key, deps)
+    agent_label = routed_agent_type or "unknown"
     lines = [
         f"💡 *Feature proposals for {deps.get_project_label(project_key)}*",
         f"Perspective: `{agent_label}`",

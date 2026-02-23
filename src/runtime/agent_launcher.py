@@ -33,6 +33,10 @@ from audit_store import AuditStore
 from integrations.notifications import notify_agent_completed, send_telegram_alert
 from orchestration.ai_orchestrator import get_orchestrator, ToolUnavailableError
 from orchestration.plugin_runtime import get_profiled_plugin
+from project_repo_utils import (
+    iter_project_configs as _iter_project_configs,
+    project_repos_from_config as _project_repos,
+)
 
 logger = logging.getLogger(__name__)
 _issue_plugin_cache = {}
@@ -83,46 +87,9 @@ def _get_issue_plugin(repo: str):
     return plugin
 
 
-def _iter_project_configs():
-    """Yield (project_key, project_cfg) for configured projects only."""
-    for project_key, project_cfg in PROJECT_CONFIG.items():
-        if not isinstance(project_cfg, dict) or not project_cfg.get("workspace"):
-            continue
-        if _project_repos(project_key, project_cfg):
-            yield project_key, project_cfg
-
-
-def _project_repos(project_key: str, project_cfg: dict) -> list[str]:
-    """Return configured repository list for a project config entry."""
-    repos: list[str] = []
-    single_repo = None
-    if isinstance(project_cfg, dict):
-        single_repo = project_cfg.get("git_repo")
-    if isinstance(single_repo, str) and single_repo.strip():
-        repos.append(single_repo.strip())
-
-    repo_list = None
-    if isinstance(project_cfg, dict):
-        repo_list = project_cfg.get("git_repos")
-    if isinstance(repo_list, list):
-        for repo_name in repo_list:
-            if isinstance(repo_name, str):
-                value = repo_name.strip()
-                if value and value not in repos:
-                    repos.append(value)
-
-    if repos:
-        return repos
-
-    try:
-        return get_github_repos(project_key)
-    except Exception:
-        return []
-
-
 def _resolve_project_from_task_file(task_file: str) -> str:
     """Resolve project key by matching task file path against project workspaces."""
-    for project_key, project_cfg in _iter_project_configs():
+    for project_key, project_cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
         workspace_abs = os.path.join(BASE_DIR, project_cfg["workspace"])
         if task_file.startswith(workspace_abs):
             return project_key
@@ -137,8 +104,8 @@ def _load_issue_body_from_project_repo(issue_number: str):
     """
     issue_number = str(issue_number)
     candidate_repos = []
-    for project_key, cfg in _iter_project_configs():
-        project_repos = _project_repos(project_key, cfg)
+    for project_key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
+        project_repos = _project_repos(project_key, cfg, get_github_repos)
         for repo_name in project_repos:
             if repo_name not in candidate_repos:
                 candidate_repos.append(repo_name)
@@ -170,7 +137,7 @@ def _load_issue_body_from_project_repo(issue_number: str):
             continue
 
         project_cfg = PROJECT_CONFIG.get(project_key, {})
-        expected_repos = _project_repos(project_key, project_cfg)
+        expected_repos = _project_repos(project_key, project_cfg, get_github_repos)
         if repo_name not in expected_repos:
             continue
 
@@ -734,7 +701,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
         logger.warning(f"No project config for task file: {task_file}")
         return None, None
 
-    expected_repos = _project_repos(project_root, config)
+    expected_repos = _project_repos(project_root, config, get_github_repos)
     if resolved_repo and expected_repos and resolved_repo not in expected_repos:
         logger.error(
             f"Project boundary violation for issue #{issue_number}: "

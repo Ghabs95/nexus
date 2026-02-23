@@ -143,3 +143,51 @@ def test_get_track_short_projects_derives_from_aliases(monkeypatch):
     )
 
     assert config.get_track_short_projects() == ["casit", "wlbl", "bm", "nxs"]
+
+
+def test_get_chat_agents_reads_mapping_shape(monkeypatch):
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "_get_project_config",
+        lambda: {
+            "wallible": {
+                "workspace": "wallible",
+                "chat_agents": {
+                    "business": {"context_path": "wlbl-business-os", "label": "Business"},
+                    "marketing": {"context_path": "wlbl-marketing-os", "label": "Marketing"},
+                },
+            }
+        },
+    )
+
+    agents = config.get_chat_agents("wallible")
+
+    assert [item["agent_type"] for item in agents] == ["business", "marketing"]
+    assert agents[0]["context_path"] == "wlbl-business-os"
+    assert agents[0]["label"] == "Business"
+
+
+def test_get_chat_agents_reads_list_shape(monkeypatch):
+    import config
+
+    monkeypatch.setattr(
+        config,
+        "_get_project_config",
+        lambda: {
+            "wallible": {
+                "workspace": "wallible",
+                "chat_agents": [
+                    {"business": {"context_path": "wlbl-business-os"}},
+                    {"agent_type": "marketing", "context_path": "wlbl-marketing-os"},
+                ],
+            }
+        },
+    )
+
+    agents = config.get_chat_agents("wallible")
+
+    assert [item["agent_type"] for item in agents] == ["business", "marketing"]
+    assert agents[0]["context_path"] == "wlbl-business-os"
+    assert agents[1]["context_path"] == "wlbl-marketing-os"

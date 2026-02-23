@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from chat_agents_schema import get_default_project_chat_agent_type
 from handlers.common_routing import parse_intent_result, route_task_with_context, run_conversation_turn
 
 
@@ -25,6 +26,41 @@ class HandsFreeRoutingDeps:
     normalize_project_key: Callable[[str], Optional[str]]
     save_resolved_task: Callable[[dict, str, str], Awaitable[Dict[str, Any]]]
     task_confirmation_mode: str
+
+
+def _configured_primary_agent_type(project_key: str) -> str:
+    normalized_project_key = str(project_key or "").strip().lower()
+    if not normalized_project_key:
+        return ""
+
+    try:
+        from config import _get_project_config
+
+        full_config = _get_project_config()
+    except Exception:
+        return ""
+
+    if not isinstance(full_config, dict):
+        return ""
+
+    project_cfg = full_config.get(normalized_project_key)
+    if not isinstance(project_cfg, dict):
+        return ""
+
+    return get_default_project_chat_agent_type(project_cfg)
+
+
+def _resolve_primary_agent_type(metadata: Dict[str, Any]) -> str:
+    primary = str(metadata.get("primary_agent_type") or "").strip().lower()
+    if primary:
+        return primary
+
+    allowed = _normalize_allowed_agent_types(metadata)
+    if allowed:
+        return allowed[0]
+
+    project_key = str(metadata.get("project_key") or "").strip().lower()
+    return _configured_primary_agent_type(project_key)
 
 
 def _normalize_allowed_agent_types(metadata: Dict[str, Any]) -> list[str]:
@@ -90,12 +126,12 @@ def _detect_conversation_intent(text: str) -> str:
 
 def _select_conversation_agent_type(metadata: Dict[str, Any], text: str) -> tuple[str, str, str]:
     allowed_agent_types = _normalize_allowed_agent_types(metadata)
-    primary_agent_type = str(metadata.get("primary_agent_type") or "").strip().lower()
-    if not primary_agent_type:
-        primary_agent_type = allowed_agent_types[0] if allowed_agent_types else "advisor"
+    primary_agent_type = _resolve_primary_agent_type(metadata)
     chat_mode = str(metadata.get("chat_mode", "strategy")).lower().strip() or "strategy"
     intent = _detect_conversation_intent(text)
-    business_role = "advisor" if "advisor" in allowed_agent_types else "business"
+    business_role = "business"
+    if allowed_agent_types and business_role not in allowed_agent_types:
+        business_role = primary_agent_type
 
     preferred_by_intent = {
         "gtm": "marketing",
@@ -121,7 +157,10 @@ def _select_conversation_agent_type(metadata: Dict[str, Any], text: str) -> tupl
             return primary_agent_type, intent, f"intent={intent}, mode={chat_mode}, primary_fallback"
         return allowed_agent_types[0], intent, f"intent={intent}, mode={chat_mode}, first_allowed_fallback"
 
-    return preferred, intent, f"intent={intent}, mode={chat_mode}, unrestricted"
+    if preferred:
+        return preferred, intent, f"intent={intent}, mode={chat_mode}, unrestricted"
+
+    return "triage", intent, f"intent={intent}, mode={chat_mode}, global_fallback"
 
 
 def _build_chat_persona(
@@ -138,10 +177,7 @@ def _build_chat_persona(
     project_key = metadata.get("project_key")
     project_label = deps.projects.get(project_key, project_key or "Not set")
     chat_mode = str(metadata.get("chat_mode", "strategy"))
-    primary_agent_type = str(metadata.get("primary_agent_type") or "").strip().lower()
-    if not primary_agent_type:
-        allowed = _normalize_allowed_agent_types(metadata)
-        primary_agent_type = allowed[0] if allowed else "advisor"
+    primary_agent_type = _resolve_primary_agent_type(metadata) or "unknown"
 
     context_block = (
         "\n\nActive Chat Context:\n"

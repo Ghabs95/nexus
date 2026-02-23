@@ -21,7 +21,6 @@ from config import (
     DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, get_github_repos, get_default_github_repo,
     get_default_project,
     get_track_short_projects,
-    normalize_project_key,
     PROJECT_CONFIG, ensure_data_dir,
     TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
     get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir, get_tasks_logs_dir, get_nexus_dir_name,
@@ -57,6 +56,7 @@ from services.workflow_control_service import (
     prepare_continue_context,
 )
 from integrations.git_platform_utils import build_issue_url, resolve_repo
+from project_key_utils import normalize_project_key_optional as _normalize_project_key
 from handlers.workflow_command_handlers import (
     WorkflowHandlerDeps,
     continue_handler as workflow_continue_handler,
@@ -331,6 +331,8 @@ def _feature_ideation_handler_deps() -> FeatureIdeationHandlerDeps:
         projects=PROJECTS,
         get_project_label=_get_project_label,
         orchestrator=orchestrator,
+        base_dir=BASE_DIR,
+        project_config=PROJECT_CONFIG,
     )
 
 
@@ -683,10 +685,6 @@ def find_task_file_by_issue(issue_num):
             except Exception:
                 continue
     return None
-
-
-def _normalize_project_key(project: str) -> Optional[str]:
-    return normalize_project_key(project)
 
 
 def _iter_project_keys() -> List[str]:

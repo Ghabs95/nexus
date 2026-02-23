@@ -4,10 +4,12 @@ import sys
 import logging
 import subprocess
 import urllib.parse
-from typing import List
+from typing import Any, List
 
 import yaml
 from dotenv import load_dotenv
+
+from chat_agents_schema import get_project_chat_agents
 
 # Load secrets from local file if exists
 SECRET_FILE = "vars.secret"
@@ -281,30 +283,49 @@ def get_chat_agent_types(project: str = "nexus") -> list[str]:
     """Get ordered chat agent types for a project.
 
     Priority:
-    1. Project-specific ``chat_agent_types`` in PROJECT_CONFIG (ordered)
+    1. Project-specific ``chat_agents`` in PROJECT_CONFIG (ordered)
     2. Keys of ``get_ai_tool_preferences(project)`` (ordered)
     3. ["triage"] fallback
 
     The first item is treated as the default primary chat agent.
     """
-    config = _get_project_config()
+    entries = get_chat_agents(project)
+    if entries:
+        return [entry["agent_type"] for entry in entries]
+    return ["triage"]
 
-    if project in config:
-        proj_config = config[project]
-        if isinstance(proj_config, dict) and isinstance(proj_config.get("chat_agent_types"), list):
-            cleaned = [
-                str(agent_type).strip().lower()
-                for agent_type in proj_config.get("chat_agent_types", [])
-                if isinstance(agent_type, str) and str(agent_type).strip()
-            ]
-            if cleaned:
-                return cleaned
+
+def get_chat_agents(project: str = "nexus") -> list[dict[str, Any]]:
+    """Return ordered chat agent metadata for a project.
+
+    Supported config shapes for ``chat_agents``:
+    - Mapping form:
+        ``chat_agents: {business: {label: "Business"}, marketing: {...}}``
+    - List form:
+        ``chat_agents: [{business: {..}}, {agent_type: "marketing", ...}]``
+
+    Fallbacks:
+    1. keys of ``ai_tool_preferences``
+    """
+    config = _get_project_config()
+    entries: list[dict[str, Any]] = []
+
+    project_cfg = config.get(project)
+    if isinstance(project_cfg, dict):
+        entries = get_project_chat_agents(project_cfg)
+        if entries:
+            return entries
 
     preferences = get_ai_tool_preferences(project)
     if isinstance(preferences, dict) and preferences:
-        return [str(agent_type).strip().lower() for agent_type in preferences.keys() if str(agent_type).strip()]
+        for agent_type in preferences.keys():
+            normalized = str(agent_type).strip().lower()
+            if normalized:
+                entries.append({"agent_type": normalized})
+        if entries:
+            return entries
 
-    return ["triage"]
+    return [{"agent_type": "triage"}]
 
 
 def get_project_registry() -> dict[str, dict[str, object]]:
@@ -480,6 +501,7 @@ def _get_orchestrator_config():
             "fallback_enabled": os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true",
             "rate_limit_ttl": int(os.getenv("AI_RATE_LIMIT_TTL", "3600")),
             "max_retries": int(os.getenv("AI_MAX_RETRIES", "2")),
+            "analysis_timeout": _get_int_env("AI_ANALYSIS_TIMEOUT", 120),
             "transcription_primary": os.getenv("TRANSCRIPTION_PRIMARY", "gemini").strip().lower(),
             "gemini_transcription_timeout": _get_int_env("GEMINI_TRANSCRIPTION_TIMEOUT", 60),
             "copilot_transcription_timeout": _get_int_env("COPILOT_TRANSCRIPTION_TIMEOUT", 120),

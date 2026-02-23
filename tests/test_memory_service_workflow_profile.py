@@ -11,7 +11,7 @@ def test_default_chat_metadata_uses_project_workflow_profile(monkeypatch):
 
 def test_normalize_chat_data_replaces_generic_profile_with_project_specific(monkeypatch):
     monkeypatch.setattr(memory_service, "get_workflow_profile", lambda project: "wallible/wlbl-workflow-os/workflows/master.yaml")
-    monkeypatch.setattr(memory_service, "get_chat_agent_types", lambda project: ["advisor", "marketing"])
+    monkeypatch.setattr(memory_service, "get_chat_agent_types", lambda project: ["business", "marketing"])
 
     normalized = memory_service._normalize_chat_data(
         {
@@ -26,4 +26,4 @@ def test_normalize_chat_data_replaces_generic_profile_with_project_specific(monk
     metadata = normalized["metadata"]
     assert metadata["project_key"] == "wallible"
     assert metadata["workflow_profile"] == "wallible/wlbl-workflow-os/workflows/master.yaml"
-    assert metadata["primary_agent_type"] == "advisor"
+    assert metadata["primary_agent_type"] == "business"

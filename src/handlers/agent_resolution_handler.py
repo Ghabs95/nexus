@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Dict
 
-import yaml
+from handlers.agent_definition_utils import extract_agent_identity, load_agent_yaml
 
 
 logger = logging.getLogger(__name__)
@@ -64,20 +64,15 @@ def resolve_agents_for_project(project_dir: str, nexus_dir_name: str) -> Dict[st
 
                 if filename.endswith(".yaml") or filename.endswith(".yml"):
                     try:
-                        with open(filepath, "r", encoding="utf-8") as file_handle:
-                            data = yaml.safe_load(file_handle)
+                        data = load_agent_yaml(filepath)
                         if not isinstance(data, dict):
                             continue
                         if str(data.get("kind", "")).lower() != "agent":
                             continue
 
-                        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-                        spec = data.get("spec") if isinstance(data.get("spec"), dict) else {}
-                        agent_name = (
-                            str(metadata.get("name") or "").strip()
-                            or str(spec.get("agent_type") or "").strip()
-                            or os.path.splitext(filename)[0]
-                        )
+                        agent_name, _agent_type = extract_agent_identity(filepath)
+                        if not agent_name:
+                            continue
                         agents_map[agent_name] = filename
                     except Exception as exc:
                         logger.warning(f"Failed to parse agent YAML {filename}: {exc}")

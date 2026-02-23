@@ -4,8 +4,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from state_manager import StateManager
 from audit_store import AuditStore
-from config import TELEGRAM_ALLOWED_USER_IDS, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR, normalize_project_key
+from config import TELEGRAM_ALLOWED_USER_IDS, PROJECT_CONFIG, NEXUS_CORE_STORAGE_DIR
 from orchestration.plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
+from project_key_utils import normalize_project_key_str as _normalize_project_key
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +15,6 @@ _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
     "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
 }
-
-
-def _normalize_project_key(project: str) -> str:
-    normalized = normalize_project_key(project)
-    return str(normalized or "")
 
 
 def _get_project_repo(project_key: str) -> str:

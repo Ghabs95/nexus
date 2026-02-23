@@ -29,8 +29,8 @@ from config import (
     AI_PERSONA,
     ORCHESTRATOR_CONFIG,
     get_inbox_dir,
-    normalize_project_key,
 )
+from project_key_utils import normalize_project_key_str as _normalize_project_key
 
 install_secret_redaction([DISCORD_TOKEN or ""], logging.getLogger())
 
@@ -77,11 +77,6 @@ def check_permission(user_id: int) -> bool:
     if not DISCORD_ALLOWED_USER_IDS:
         return True
     return user_id in DISCORD_ALLOWED_USER_IDS
-
-
-def _normalize_project_key(value: str) -> str:
-    normalized = normalize_project_key(value)
-    return str(normalized or "")
 
 
 def _active_status(value: str) -> bool:

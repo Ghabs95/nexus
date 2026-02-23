@@ -94,16 +94,16 @@ case_italia:
   agents_dir: ghabs/agents/casit-agents
   workspace: case_italia
   git_repo: Ghabs95/agents
-  chat_agent_types:
-    - advisor
-    - marketing
-    - triage
-    - developer
-    - reviewer
-    - compliance
-    - deployer
-    - designer
-    - docs
+  chat_agents:
+    business: {}
+    marketing: {}
+    triage: {}
+    developer: {}
+    reviewer: {}
+    compliance: {}
+    deployer: {}
+    designer: {}
+    docs: {}
 
 wallible:
   agents_dir: wallible/wlbl-workflow-os/agents
@@ -117,16 +117,26 @@ wallible:
     - wallible/wlbl-business-os
     - wallible/wlbl-marketing-os
     - wallible/wlbl-workflow-os
-  chat_agent_types:
-    - ceo
-    - advisor
-    - marketing
-    - cto
+  chat_agents:
+    ceo: {}
+    business:
+      context_path: wlbl-business-os
+      context_files:
+        - AGENTS.md
+        - README.md
+        - WORKFLOWS.md
+    marketing:
+      context_path: wlbl-marketing-os
+      context_files:
+        - AGENTS.md
+        - README.md
+        - WORKFLOWS.md
+    cto: {}
   # Wallible-specific AI tool preferences (complete role set)
   ai_tool_preferences:
     ceo: gemini              # Vision and scope approval
     cto: gemini              # Strategic technical feasibility
-    advisor: gemini          # Business strategy
+    business: gemini         # Business strategy
     marketing: gemini        # GTM and growth
     architect: copilot       # System design and architecture
     developer: copilot       # Code implementation
@@ -141,16 +151,16 @@ biome:
   agents_dir: ghabs/agents/bm-agents
   workspace: biome
   git_repo: Ghabs95/agents
-  chat_agent_types:
-    - advisor
-    - marketing
-    - triage
-    - developer
-    - reviewer
-    - compliance
-    - deployer
-    - designer
-    - docs
+  chat_agents:
+    business: {}
+    marketing: {}
+    triage: {}
+    developer: {}
+    reviewer: {}
+    compliance: {}
+    deployer: {}
+    designer: {}
+    docs: {}
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
@@ -159,11 +169,11 @@ nexus:
   git_repos:
     - Ghabs95/nexus-core
     - Ghabs95/nexus
-  chat_agent_types:
-    - designer
-    - triage
-    - compliance
-    - writer
+  chat_agents:
+    designer: {}
+    triage: {}
+    compliance: {}
+    writer: {}
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
   workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
   # AI tool preferences for enterprise workflow agent types

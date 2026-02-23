@@ -7,10 +7,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-import yaml
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from chat_agents_schema import get_project_chat_agent_types
+from handlers.agent_definition_utils import extract_agent_identity
 from handlers.agent_resolution_handler import resolve_agents_for_project
 
 
@@ -38,9 +39,6 @@ class OpsHandlerDeps:
     create_chat: Callable[..., str]
 
 
-_CHAT_FIRST_AGENT_TYPES = {"ceo", "cto", "advisor", "marketing"}
-
-
 def _normalize_agent_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
 
@@ -50,6 +48,7 @@ def _resolve_agent_type(
     source_filename: str,
     agents_dir: str,
     nexus_dir_name: str,
+    available_agent_types: Optional[List[str]] = None,
 ) -> Optional[str]:
     candidate_paths = [
         os.path.join(agents_dir, nexus_dir_name, "agents", source_filename),
@@ -62,25 +61,30 @@ def _resolve_agent_type(
 
         if candidate_path.endswith((".yaml", ".yml")):
             try:
-                with open(candidate_path, "r", encoding="utf-8") as file_handle:
-                    data = yaml.safe_load(file_handle) or {}
-                spec = data.get("spec") if isinstance(data.get("spec"), dict) else {}
-                agent_type = str(spec.get("agent_type") or "").strip().lower()
+                _agent_name, agent_type = extract_agent_identity(candidate_path)
                 if agent_type:
                     return agent_type
             except Exception:
                 continue
 
-    alias_map = {
-        "vision": "ceo",
-        "atlas": "cto",
-        "business": "advisor",
-        "marketing": "marketing",
-        "growthlead": "marketing",
-        "webdirector": "marketing",
-    }
     normalized = _normalize_agent_key(agent_name)
-    return alias_map.get(normalized)
+
+    normalized_types: List[str] = []
+    if isinstance(available_agent_types, list):
+        for item in available_agent_types:
+            candidate = str(item or "").strip().lower()
+            if candidate and candidate not in normalized_types:
+                normalized_types.append(candidate)
+
+    if normalized in normalized_types:
+        return normalized
+
+    source_stem = os.path.splitext(os.path.basename(source_filename or ""))[0]
+    normalized_stem = _normalize_agent_key(source_stem)
+    if normalized_stem in normalized_types:
+        return normalized_stem
+
+    return None
 
 
 def _build_direct_chat_persona(base_persona: str, project: str, agent_name: str, agent_type: str) -> str:
@@ -334,9 +338,17 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         return
 
     source_filename = agents_map.get(agent, "")
-    agent_type = _resolve_agent_type(agent, source_filename, agents_dir, deps.nexus_dir_name)
+    project_cfg = deps.project_config.get(project) if isinstance(deps.project_config, dict) else {}
+    project_chat_agent_types = get_project_chat_agent_types(project_cfg if isinstance(project_cfg, dict) else {})
+    agent_type = _resolve_agent_type(
+        agent,
+        source_filename,
+        agents_dir,
+        deps.nexus_dir_name,
+        available_agent_types=project_chat_agent_types,
+    )
 
-    if agent_type in _CHAT_FIRST_AGENT_TYPES:
+    if agent_type and agent_type in project_chat_agent_types:
         msg = await update.effective_message.reply_text(f"🤖 Asking @{agent} directly...")
         try:
             user_id = update.effective_user.id

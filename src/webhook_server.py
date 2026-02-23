@@ -40,6 +40,7 @@ from integrations.notifications import (
     notify_workflow_completed,
     send_telegram_alert
 )
+from project_repo_utils import project_repos_from_config as _project_repos
 
 # Configure logging
 logging.basicConfig(
@@ -56,36 +57,6 @@ app = Flask(__name__)
 
 # Track processed events to avoid duplicates
 processed_events = set()
-
-
-def _project_repos(project_key: str, project_cfg: dict) -> list[str]:
-    """Return configured repositories for a project entry."""
-    repos: list[str] = []
-
-    single_repo = None
-    if isinstance(project_cfg, dict):
-        single_repo = project_cfg.get("git_repo")
-    if isinstance(single_repo, str) and single_repo.strip():
-        repos.append(single_repo.strip())
-
-    repo_list = None
-    if isinstance(project_cfg, dict):
-        repo_list = project_cfg.get("git_repos")
-    if isinstance(repo_list, list):
-        for repo_name in repo_list:
-            if isinstance(repo_name, str):
-                value = repo_name.strip()
-                if value and value not in repos:
-                    repos.append(value)
-
-    if repos:
-        return repos
-
-    try:
-        return get_github_repos(project_key)
-    except Exception:
-        return []
-
 
 def _get_webhook_policy():
     """Get framework webhook policy plugin."""
@@ -177,7 +148,7 @@ def handle_issue_opened(payload, event):
     # Also skip if an active task file already exists for this issue
     try:
         for _key, _cfg in PROJECT_CONFIG.items():
-            if isinstance(_cfg, dict) and repo_name in _project_repos(_key, _cfg):
+            if isinstance(_cfg, dict) and repo_name in _project_repos(_key, _cfg, get_github_repos):
                 _ws = os.path.join(BASE_DIR, _cfg.get("workspace", ""))
                 _active = get_tasks_active_dir(_ws, _key)
                 _task = os.path.join(_active, f"issue_{issue_number}.md")
@@ -222,7 +193,7 @@ def handle_issue_opened(payload, event):
         for project_key, project_cfg in PROJECT_CONFIG.items():
             if not isinstance(project_cfg, dict):
                 continue
-            project_repos = _project_repos(project_key, project_cfg)
+            project_repos = _project_repos(project_key, project_cfg, get_github_repos)
             if repo_name in project_repos:
                 project_workspace = project_cfg.get("workspace")
                 logger.info(

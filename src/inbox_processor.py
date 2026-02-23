@@ -53,6 +53,11 @@ from integrations.notifications import (
     notify_workflow_completed,
     send_telegram_alert
 )
+from project_repo_utils import (
+    iter_project_configs as _iter_project_configs,
+    project_repos_from_config as _project_repos_from_config,
+)
+from services.workflow_signal_sync import normalize_agent_reference as _normalize_agent_reference
 
 _STEP_COMPLETE_COMMENT_RE = re.compile(
     r"^\s*##\s+.+?\bcomplete\b\s+—\s+([a-zA-Z0-9_-]+)\s*$",
@@ -281,51 +286,13 @@ def slugify(text):
     return text[:50]
 
 
-def _iter_project_configs():
-    """Yield (project_name, config) pairs for dict-based project configs."""
-    for project_name, cfg in PROJECT_CONFIG.items():
-        if not isinstance(cfg, dict):
-            continue
-        if _project_repos_from_config(project_name, cfg):
-            yield project_name, cfg
-
-
-def _project_repos_from_config(project_name: str, cfg: dict) -> list[str]:
-    """Return configured repo list for project config dict."""
-    repos: list[str] = []
-
-    repo = None
-    if isinstance(cfg, dict):
-        repo = cfg.get("git_repo")
-    if isinstance(repo, str) and repo.strip():
-        repos.append(repo.strip())
-
-    repo_list = None
-    if isinstance(cfg, dict):
-        repo_list = cfg.get("git_repos")
-    if isinstance(repo_list, list):
-        for repo_name in repo_list:
-            if isinstance(repo_name, str):
-                value = repo_name.strip()
-                if value and value not in repos:
-                    repos.append(value)
-
-    if repos:
-        return repos
-
-    try:
-        return get_github_repos(project_name)
-    except Exception:
-        return []
-
-
 def _resolve_project_from_path(summary_path: str) -> str:
     """Resolve project name from a completion_summary file path.
 
     Matches the path against configured project workspaces.
     Returns project key or empty string if no match.
     """
-    for key, cfg in _iter_project_configs():
+    for key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
         workspace = cfg.get("workspace")
         if not workspace:
             continue
@@ -359,8 +326,8 @@ def _extract_repo_from_issue_url(issue_url: str) -> str:
 
 def _resolve_project_for_repo(repo_name: str) -> Optional[str]:
     """Resolve configured project key for a repository full name."""
-    for key, cfg in _iter_project_configs():
-        if repo_name in _project_repos_from_config(key, cfg):
+    for key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
+        if repo_name in _project_repos_from_config(key, cfg, get_github_repos):
             return key
     return None
 
@@ -402,20 +369,20 @@ def _resolve_repo_for_issue(issue_num: str, default_project: Optional[str] = Non
     repo_candidates: list[str] = []
     if default_project and default_project in PROJECT_CONFIG:
         repo_candidates.extend(
-            _project_repos_from_config(default_project, PROJECT_CONFIG[default_project])
+            _project_repos_from_config(default_project, PROJECT_CONFIG[default_project], get_github_repos)
         )
     if default_repo and default_repo not in repo_candidates:
         repo_candidates.append(default_repo)
 
-    for project_key, cfg in _iter_project_configs():
-        for repo_name in _project_repos_from_config(project_key, cfg):
+    for project_key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
+        for repo_name in _project_repos_from_config(project_key, cfg, get_github_repos):
             if repo_name not in repo_candidates:
                 repo_candidates.append(repo_name)
 
     for repo_name in repo_candidates:
         matched_project = None
-        for project_key, cfg in _iter_project_configs():
-            if repo_name in _project_repos_from_config(project_key, cfg):
+        for project_key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
+            if repo_name in _project_repos_from_config(project_key, cfg, get_github_repos):
                 matched_project = project_key
                 break
         if not matched_project:
@@ -439,13 +406,13 @@ def _resolve_repo_for_issue(issue_num: str, default_project: Optional[str] = Non
         task_file_match = re.search(r"\*\*Task File:\*\*\s*`([^`]+)`", body)
         if task_file_match:
             task_file = task_file_match.group(1)
-            for project_key, cfg in _iter_project_configs():
+            for project_key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
                 workspace = cfg.get("workspace")
                 if not workspace:
                     continue
                 workspace_abs = os.path.join(BASE_DIR, workspace)
                 if task_file.startswith(workspace_abs):
-                    project_repos = _project_repos_from_config(project_key, cfg)
+                    project_repos = _project_repos_from_config(project_key, cfg, get_github_repos)
                     if repo_name in project_repos:
                         return repo_name
 
@@ -458,7 +425,11 @@ def _resolve_repo_strict(project_name: str, issue_num: str) -> str:
     """Resolve repo with boundary checks between project and issue context."""
     project_repos: list[str] = []
     if project_name and project_name in PROJECT_CONFIG:
-        project_repos = _project_repos_from_config(project_name, PROJECT_CONFIG[project_name])
+        project_repos = _project_repos_from_config(
+            project_name,
+            PROJECT_CONFIG[project_name],
+            get_github_repos,
+        )
 
     issue_repo = _resolve_repo_for_issue(
         issue_num,
@@ -475,25 +446,6 @@ def _resolve_repo_strict(project_name: str, issue_num: str) -> str:
         raise ValueError(message)
 
     return issue_repo or (project_repos[0] if project_repos else get_github_repo(get_default_project()))
-
-
-def _normalize_agent_reference(agent_ref: str) -> str:
-    """Normalize next-agent references emitted by completion summaries."""
-    value = (agent_ref or "").strip()
-    value = value.lstrip("@").strip()
-    return value.strip("`").strip()
-
-
-def _extract_repo_from_issue_url(issue_url: str) -> str:
-    """Extract owner/repo from a GitHub issue URL."""
-    try:
-        parsed = urlparse(str(issue_url or "").strip())
-        parts = [p for p in parsed.path.split("/") if p]
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
-    except Exception:
-        pass
-    return ""
 
 
 def _read_latest_local_completion(issue_num: str) -> Optional[dict]:
@@ -1008,7 +960,7 @@ def check_stuck_agents():
 def _resolve_project_for_issue(issue_num: str) -> Optional[str]:
     """Best-effort project resolution from config for an issue number."""
     # Try to find which project this issue belongs to by checking agents data
-    for project_name, _ in _iter_project_configs():
+    for project_name, _ in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
         return project_name
     return None
 
@@ -1019,7 +971,7 @@ def check_agent_comments():
     try:
         # Query issues from all project repos
         all_issue_nums = []
-        for project_name, _ in _iter_project_configs():
+        for project_name, _ in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
             project_platform = (get_project_platform(project_name) or "github").lower().strip()
             if project_platform != "github":
                 logger.debug(
@@ -1384,7 +1336,7 @@ def process_file(filepath):
 
         # Fallback: look up project by matching workspace path
         if not config:
-            for key, cfg in _iter_project_configs():
+            for key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
                 workspace = cfg.get("workspace")
                 if not workspace:
                     continue
