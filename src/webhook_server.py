@@ -40,7 +40,7 @@ from integrations.notifications import (
     notify_workflow_completed,
     send_telegram_alert
 )
-from project_repo_utils import project_repos_from_config as _project_repos
+from nexus.core.project.repo_utils import project_repos_from_config as _project_repos
 
 # Configure logging
 logging.basicConfig(

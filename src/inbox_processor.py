@@ -23,7 +23,6 @@ from config import (
     get_tasks_logs_dir, get_nexus_dir_name
 )
 from state_manager import StateManager
-from models import WorkflowState
 from runtime.agent_monitor import AgentMonitor, WorkflowRouter
 from runtime.agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
 from orchestration.ai_orchestrator import get_orchestrator
@@ -53,7 +52,7 @@ from integrations.notifications import (
     notify_workflow_completed,
     send_telegram_alert
 )
-from project_repo_utils import (
+from nexus.core.project.repo_utils import (
     iter_project_configs as _iter_project_configs,
     project_repos_from_config as _project_repos_from_config,
 )

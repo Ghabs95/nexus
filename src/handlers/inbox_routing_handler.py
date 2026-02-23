@@ -3,7 +3,7 @@ import logging
 from typing import Dict, Any, Optional
 from config import BASE_DIR, PROJECT_CONFIG, get_inbox_dir
 from handlers.common_routing import extract_json_dict
-from utils.task_name_utils import generate_task_name, normalize_task_name
+from nexus.core.utils.task_name import generate_task_name, normalize_task_name
 
 logger = logging.getLogger(__name__)
 

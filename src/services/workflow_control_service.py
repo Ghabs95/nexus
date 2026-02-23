@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from integrations.git_platform_utils import build_issue_url, resolve_repo
+from nexus.adapters.git.utils import build_issue_url, resolve_repo
 
 logger = logging.getLogger(__name__)
 

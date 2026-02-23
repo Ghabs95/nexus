@@ -33,7 +33,7 @@ from audit_store import AuditStore
 from integrations.notifications import notify_agent_completed, send_telegram_alert
 from orchestration.ai_orchestrator import get_orchestrator, ToolUnavailableError
 from orchestration.plugin_runtime import get_profiled_plugin
-from project_repo_utils import (
+from nexus.core.project.repo_utils import (
     iter_project_configs as _iter_project_configs,
     project_repos_from_config as _project_repos,
 )
@@ -548,9 +548,19 @@ def invoke_copilot_agent(
         }
     
     try:
+        from nexus.core.workspace import WorkspaceManager
+        
+        # Extract issue number for tracking
+        issue_match = re.search(r"/issues/(\d+)", issue_url or "")
+        issue_num = issue_match.group(1) if issue_match else "unknown"
+
+        isolated_workspace = workspace_dir
+        if issue_num != "unknown":
+            isolated_workspace = WorkspaceManager.provision_worktree(workspace_dir, issue_num)
+
         pid, tool_used = orchestrator.invoke_agent(
             agent_prompt=prompt,
-            workspace_dir=workspace_dir,
+            workspace_dir=isolated_workspace,
             agents_dir=agents_dir,
             base_dir=BASE_DIR,
             issue_url=issue_url,
@@ -563,9 +573,6 @@ def invoke_copilot_agent(
         
         logger.info(f"🚀 Agent launched with {tool_used.value} (PID: {pid})")
         
-        # Extract issue number for tracking
-        issue_match = re.search(r"/issues/(\d+)", issue_url or "")
-        issue_num = issue_match.group(1) if issue_match else "unknown"
         
         # Save to launched agents tracker
         if issue_num != "unknown":

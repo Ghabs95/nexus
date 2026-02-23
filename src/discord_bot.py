@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 import discord
 from discord.ext import commands
-from utils.logging_filters import install_secret_redaction
+from nexus.core.utils.logging_filters import install_secret_redaction
 
 # Setup logging
 logging.basicConfig(

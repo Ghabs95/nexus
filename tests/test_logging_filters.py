@@ -1,6 +1,6 @@
 import logging
 
-from utils.logging_filters import SecretRedactingFilter
+from nexus.core.utils.logging_filters import SecretRedactingFilter
 
 
 def test_secret_redacting_filter_redacts_message_and_args():

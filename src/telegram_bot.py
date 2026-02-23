@@ -30,7 +30,6 @@ from config import (
 from services.memory_service import append_message, create_chat, get_chat, get_chat_history, rename_chat, get_active_chat
 from state_manager import StateManager
 from audit_store import AuditStore
-from models import WorkflowState
 from commands.workflow import (
     pause_handler as workflow_pause_handler,
     resume_handler as workflow_resume_handler,
@@ -55,7 +54,7 @@ from services.workflow_control_service import (
     kill_issue_agent,
     prepare_continue_context,
 )
-from integrations.git_platform_utils import build_issue_url, resolve_repo
+from nexus.adapters.git.utils import build_issue_url, resolve_repo
 from project_key_utils import normalize_project_key_optional as _normalize_project_key
 from handlers.workflow_command_handlers import (
     WorkflowHandlerDeps,
@@ -129,7 +128,7 @@ from alerting import init_alerting_system
 from handlers.inbox_routing_handler import process_inbox_task, save_resolved_task, PROJECTS, TYPES
 from handlers.common_routing import route_task_with_context, extract_json_dict
 from services.command_contract import validate_command_parity, validate_required_command_interface
-from utils.logging_filters import install_secret_redaction
+from nexus.core.utils.logging_filters import install_secret_redaction
 
 
 # --- LOGGING ---

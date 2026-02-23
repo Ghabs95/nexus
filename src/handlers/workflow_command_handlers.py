@@ -99,7 +99,7 @@ async def reprocess_handler(
         await update.effective_message.reply_text(f"❌ No agents config for project '{name}'.")
         return
 
-    from integrations.git_platform_utils import build_issue_url, resolve_repo
+    from nexus.adapters.git.utils import build_issue_url, resolve_repo
 
     repo = resolve_repo(config, deps.default_repo)
     if not details:
