@@ -27,7 +27,6 @@ class VisualizeHandlerDeps:
     ensure_project_issue: Callable[
         [Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[Tuple[Optional[str], Optional[str], List[str]]]
     ]
-    project_repo: Callable[[str], str]
 
 
 async def visualize_handler(
