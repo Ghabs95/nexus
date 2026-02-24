@@ -189,6 +189,7 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ),
         "workflow": (
             "🔁 **Workflow Control**\n"
+            "- /visualize <project> <issue#> — Show Mermaid workflow diagram\n"
             "- /reprocess <project> <issue#> — Re-run agent processing\n"
             "- /wfstate <project> <issue#> — Show workflow state + drift\n"
             "- /reconcile <project> <issue#> — Reconcile workflow/comment/local state\n"

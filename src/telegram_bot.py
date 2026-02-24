@@ -215,10 +215,8 @@ def _visualize_handler_deps() -> VisualizeHandlerDeps:
     return VisualizeHandlerDeps(
         logger=logger,
         allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
-        project_config=PROJECT_CONFIG,
         prompt_project_selection=_prompt_project_selection,
         ensure_project_issue=_ensure_project_issue,
-        project_repo=_project_repo,
     )
 
 
@@ -999,6 +997,7 @@ def _command_handler_map():
         "audit": audit_handler,
         "comments": comments_handler,
         "wfstate": wfstate_handler,
+        "visualize": visualize_handler,
         "reprocess": reprocess_handler,
         "reconcile": reconcile_handler,
         "continue": continue_handler,
