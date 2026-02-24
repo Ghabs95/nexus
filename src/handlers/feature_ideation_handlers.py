@@ -467,6 +467,7 @@ def _feature_list_text(
     features: List[Dict[str, Any]],
     deps: FeatureIdeationHandlerDeps,
     preferred_agent_type: Optional[str],
+    selected_features: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     routed_agent_type = str(preferred_agent_type or "").strip().lower()
     if not routed_agent_type:
@@ -480,6 +481,14 @@ def _feature_list_text(
     ]
     for index, item in enumerate(features, start=1):
         lines.append(f"{index}. *{item['title']}* — {item['summary']}")
+    done_items = selected_features if isinstance(selected_features, list) else []
+    if done_items:
+        lines.append("")
+        lines.append("Already selected:")
+        for item in done_items:
+            title = str(item.get("title") or "").strip()
+            if title:
+                lines.append(f"✅ {title}")
     return "\n".join(lines)
 
 
@@ -614,6 +623,7 @@ async def show_feature_suggestions(
     context.user_data[FEATURE_STATE_KEY] = {
         "project": project_key,
         "items": features,
+        "selected_items": [],
         "agent_type": preferred_agent_type,
         "feature_count": feature_count,
         "source_text": text,
@@ -639,7 +649,13 @@ async def show_feature_suggestions(
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
         message_id=status_msg.message_id,
-        text=_feature_list_text(project_key, features, deps, preferred_agent_type),
+        text=_feature_list_text(
+            project_key,
+            features,
+            deps,
+            preferred_agent_type,
+            selected_features=[],
+        ),
         reply_markup=_feature_list_keyboard(features, allow_project_change=not project_locked),
         parse_mode="Markdown",
     )
@@ -668,6 +684,7 @@ async def handle_feature_ideation_request(
         "project": project_key,
         "project_locked": project_locked,
         "items": [],
+        "selected_items": [],
         "agent_type": preferred_agent_type,
         "feature_count": None,
         "source_text": text,
@@ -715,6 +732,7 @@ async def feature_callback_handler(
             **feature_state,
             "project": None,
             "items": [],
+            "selected_items": [],
         }
         await query.edit_message_text(
             text="📁 Select a project to continue feature ideation:",
@@ -736,6 +754,7 @@ async def feature_callback_handler(
             **feature_state,
             "feature_count": feature_count,
             "items": [],
+            "selected_items": [],
         }
 
         if not project_key:
@@ -765,6 +784,7 @@ async def feature_callback_handler(
             **feature_state,
             "project": project_key,
             "items": features,
+            "selected_items": [],
             "agent_type": preferred_agent_type,
             "feature_count": feature_count,
             "source_text": source_text,
@@ -786,7 +806,13 @@ async def feature_callback_handler(
         project_locked = _is_project_locked(feature_state)
 
         await query.edit_message_text(
-            text=_feature_list_text(project_key, features, deps, preferred_agent_type),
+            text=_feature_list_text(
+                project_key,
+                features,
+                deps,
+                preferred_agent_type,
+                selected_features=[],
+            ),
             reply_markup=_feature_list_keyboard(features, allow_project_change=not project_locked),
             parse_mode="Markdown",
         )
@@ -801,6 +827,11 @@ async def feature_callback_handler(
         project_locked = _is_project_locked(feature_state)
         current_project = str(feature_state.get("project") or "")
         current_items = feature_state.get("items") if isinstance(feature_state.get("items"), list) else []
+        selected_items = (
+            feature_state.get("selected_items")
+            if isinstance(feature_state.get("selected_items"), list)
+            else []
+        )
         if project_locked and current_project and project_key != current_project:
             await query.edit_message_text(
                 text=(
@@ -813,7 +844,13 @@ async def feature_callback_handler(
         preferred_agent_type = feature_state.get("agent_type")
         if project_key == current_project and current_items:
             await query.edit_message_text(
-                text=_feature_list_text(project_key, current_items, deps, preferred_agent_type),
+                text=_feature_list_text(
+                    project_key,
+                    current_items,
+                    deps,
+                    preferred_agent_type,
+                    selected_features=selected_items,
+                ),
                 reply_markup=_feature_list_keyboard(current_items, allow_project_change=not project_locked),
                 parse_mode="Markdown",
             )
@@ -828,6 +865,7 @@ async def feature_callback_handler(
                 **feature_state,
                 "project": project_key,
                 "items": [],
+                "selected_items": [],
             }
             await query.edit_message_text(
                 text=_feature_count_prompt_text(project_key, deps),
@@ -852,6 +890,7 @@ async def feature_callback_handler(
             **feature_state,
             "project": project_key,
             "items": features,
+            "selected_items": [],
             "agent_type": preferred_agent_type,
             "feature_count": feature_count,
             "source_text": source_text,
@@ -873,7 +912,13 @@ async def feature_callback_handler(
         project_locked = _is_project_locked(feature_state)
 
         await query.edit_message_text(
-            text=_feature_list_text(project_key, features, deps, preferred_agent_type),
+            text=_feature_list_text(
+                project_key,
+                features,
+                deps,
+                preferred_agent_type,
+                selected_features=[],
+            ),
             reply_markup=_feature_list_keyboard(features, allow_project_change=not project_locked),
             parse_mode="Markdown",
         )
@@ -905,17 +950,41 @@ async def feature_callback_handler(
             return
 
         selected = features[selected_index]
+        selected_items = (
+            feature_state.get("selected_items")
+            if isinstance(feature_state.get("selected_items"), list)
+            else []
+        )
+        remaining_features = [item for idx, item in enumerate(features) if idx != selected_index]
+        context.user_data[FEATURE_STATE_KEY] = {
+            **feature_state,
+            "project": project_key,
+            "items": remaining_features,
+            "selected_items": [*selected_items, selected],
+        }
 
         create_feature_task = getattr(deps, "create_feature_task", None)
         if callable(create_feature_task):
+            await query.edit_message_text(
+                text="🧠 *Nexus thinking...*",
+                parse_mode="Markdown",
+            )
             task_text = _feature_to_task_text(project_key, selected, deps)
             message_id = str(getattr(query.message, "message_id", "feature-pick"))
             result = await create_feature_task(task_text, message_id, str(project_key))
             message = str(result.get("message") or "⚠️ Task processing completed.")
-            keyboard_rows = [
-                [InlineKeyboardButton("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
-            ]
-            if not _is_project_locked(feature_state):
+            project_locked = _is_project_locked(feature_state)
+            keyboard_rows = []
+            if remaining_features:
+                keyboard_rows.append(
+                    [InlineKeyboardButton("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
+                )
+            elif message:
+                message = (
+                    f"{message}\n\n"
+                    "✅ All feature proposals from this list have been selected."
+                )
+            if remaining_features and not project_locked:
                 keyboard_rows.append(
                     [InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")]
                 )
@@ -940,10 +1009,19 @@ async def feature_callback_handler(
         for idx, step in enumerate(selected.get("steps", []), start=1):
             detail_lines.append(f"{idx}. {step}")
 
-        keyboard_rows = [
-            [InlineKeyboardButton("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
-        ]
-        if not _is_project_locked(feature_state):
+        project_locked = _is_project_locked(feature_state)
+        keyboard_rows = []
+        if remaining_features:
+            keyboard_rows.append(
+                [InlineKeyboardButton("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
+            )
+        else:
+            detail_lines.extend([
+                "",
+                "✅ All feature proposals from this list have been selected.",
+            ])
+
+        if remaining_features and not project_locked:
             keyboard_rows.append(
                 [InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")]
             )
