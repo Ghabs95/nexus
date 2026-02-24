@@ -12,36 +12,36 @@ Event handlers:
 - pull_request_review.submitted: Notify about PR reviews
 """
 
-import json
 import logging
 import os
 import re
 import sys
-from flask import Flask, request, jsonify, send_from_directory
+
+from flask import Flask, jsonify, request, send_from_directory
 from flask_socketio import SocketIO
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from nexus.core.project.repo_utils import project_repos_from_config as _project_repos
+
 from config import (
-    BASE_DIR, 
+    BASE_DIR,
+    LOGS_DIR,
     PROJECT_CONFIG,
+    WEBHOOK_PORT,
+    WEBHOOK_SECRET,
     get_default_project,
     get_github_repos,
     get_inbox_dir,
     get_tasks_active_dir,
-    WEBHOOK_PORT,
-    WEBHOOK_SECRET,
-    LOGS_DIR
 )
-from runtime.agent_launcher import launch_next_agent
-from orchestration.plugin_runtime import get_github_webhook_policy_plugin
 from integrations.notifications import (
     send_notification,
-    notify_workflow_completed,
-    send_telegram_alert
+    send_telegram_alert,
 )
-from nexus.core.project.repo_utils import project_repos_from_config as _project_repos
+from orchestration.plugin_runtime import get_github_webhook_policy_plugin
+from runtime.agent_launcher import launch_next_agent
 
 # Configure logging
 logging.basicConfig(
@@ -134,7 +134,7 @@ def handle_issue_opened(payload, event):
     issue_url = event.get("url", "")
     issue_labels = event.get("labels", [])
     repo_name = event.get("repo", "unknown")
-    closed_by = event.get("closed_by", "unknown")
+    event.get("closed_by", "unknown")
     
     logger.info(f"📋 New issue: #{issue_number} - {issue_title} by {issue_author}")
     
@@ -387,10 +387,10 @@ def handle_pull_request(payload, event):
     pr_number = event.get("number")
     pr_title = event.get("title", "")
     pr_author = event.get("author", "")
-    pr_url = event.get("url", "")
+    event.get("url", "")
     repo_name = event.get("repo", "unknown")
     merged = bool(event.get("merged"))
-    merged_by = event.get("merged_by", "unknown")
+    event.get("merged_by", "unknown")
     
     logger.info(f"🔀 Pull request #{pr_number}: {action} by {pr_author}")
 
@@ -502,7 +502,7 @@ def completion():
     issue_number = str(data.get("issue_number", "")).strip()
     next_agent = str(data.get("next_agent", "")).strip()
     agent_type = str(data.get("agent_type", "unknown")).strip()
-    summary = data.get("summary", "")
+    data.get("summary", "")
 
     if not issue_number or not next_agent:
         return jsonify({"status": "error", "message": "issue_number and next_agent required"}), 400

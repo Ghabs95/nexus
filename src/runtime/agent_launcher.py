@@ -7,36 +7,40 @@ or webhooks (webhook server).
 """
 
 import asyncio
+import glob
 import logging
 import os
 import re
 import subprocess
 import time
-import glob
+
 import yaml
 
 # Nexus Core framework imports
 from nexus.core.agents import find_agent_yaml
 from nexus.core.guards import LaunchGuard
-
-from config import (
-    BASE_DIR,
-    get_github_repo,
-    get_github_repos,
-    get_project_platform,
-    PROJECT_CONFIG,
-    ORCHESTRATOR_CONFIG,
-    get_nexus_dir_name
-)
-from state_manager import StateManager
-from audit_store import AuditStore
-from integrations.notifications import notify_agent_completed, send_telegram_alert
-from orchestration.ai_orchestrator import get_orchestrator, ToolUnavailableError
-from orchestration.plugin_runtime import get_profiled_plugin
 from nexus.core.project.repo_utils import (
     iter_project_configs as _iter_project_configs,
+)
+from nexus.core.project.repo_utils import (
     project_repos_from_config as _project_repos,
 )
+
+from audit_store import AuditStore
+from config import (
+    BASE_DIR,
+    ORCHESTRATOR_CONFIG,
+    PROJECT_CONFIG,
+    get_github_repo,
+    get_github_repos,
+    get_nexus_dir_name,
+    get_project_platform,
+)
+from integrations.notifications import notify_agent_completed, send_telegram_alert
+from nexus.plugins.builtin.ai_runtime_plugin import ToolUnavailableError
+from orchestration.ai_orchestrator import get_orchestrator
+from orchestration.plugin_runtime import get_profiled_plugin
+from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 _issue_plugin_cache = {}
@@ -324,7 +328,7 @@ def _normalize_skill_name(value: str) -> str:
 def _resolve_skill_name(yaml_path: str, agent_type: str) -> str:
     """Resolve workspace skill name from YAML metadata, with agent_type fallback."""
     try:
-        with open(yaml_path, "r", encoding="utf-8") as handle:
+        with open(yaml_path, encoding="utf-8") as handle:
             payload = yaml.safe_load(handle) or {}
         metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
         candidate = metadata.get("name") if isinstance(metadata, dict) else None
@@ -382,7 +386,7 @@ def _ensure_agent_definition(agents_dir: str, agent_type: str, workspace_dir: st
     if os.path.exists(agent_md_path):
         if os.path.getmtime(agent_md_path) >= os.path.getmtime(yaml_path):
             try:
-                with open(agent_md_path, "r", encoding="utf-8") as handle:
+                with open(agent_md_path, encoding="utf-8") as handle:
                     _ensure_workspace_skill(workspace_dir, yaml_path, agent_type, handle.read())
             except Exception as exc:
                 logger.warning(
@@ -426,6 +430,7 @@ def get_sop_tier_from_issue(issue_number, project="nexus", repo_override: str | 
     Returns: tier_name (full/shortened/fast-track) or None
     """
     from nexus.adapters.git.github import GitHubPlatform
+
     from orchestration.nexus_core_helpers import get_git_platform
 
     try:
@@ -734,7 +739,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
 
     # Read task content
     try:
-        with open(task_file, "r") as f:
+        with open(task_file) as f:
             task_content = f.read()
     except Exception as e:
         logger.error(f"Failed to read task file {task_file}: {e}")

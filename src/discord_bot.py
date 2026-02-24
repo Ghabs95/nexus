@@ -1,11 +1,11 @@
+import glob
+import io
+import logging
 import os
 import sys
-import logging
-import asyncio
-import io
-import glob
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import discord
 from discord.ext import commands
 from nexus.core.utils.logging_filters import install_secret_redaction
@@ -22,37 +22,21 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
+    AI_PERSONA,
     BASE_DIR,
-    PROJECT_CONFIG,
-    DISCORD_TOKEN,
     DISCORD_ALLOWED_USER_IDS,
     DISCORD_GUILD_ID,
-    AI_PERSONA,
+    DISCORD_TOKEN,
     ORCHESTRATOR_CONFIG,
+    PROJECT_CONFIG,
     get_inbox_dir,
 )
 from project_key_utils import normalize_project_key_str as _normalize_project_key
 
 install_secret_redaction([DISCORD_TOKEN or ""], logging.getLogger())
 
-from services.memory_service import (
-    get_chat_history,
-    append_message,
-    create_chat,
-    get_chat,
-    list_chats,
-    delete_chat,
-    switch_chat,
-    get_active_chat,
-    rename_chat,
-)
-from state_manager import StateManager
-from user_manager import get_user_manager
-from orchestration.ai_orchestrator import get_orchestrator
 from utils.voice_utils import transcribe_audio
-from handlers.inbox_routing_handler import process_inbox_task
-from handlers.inbox_routing_handler import PROJECTS as ROUTING_PROJECTS
-from handlers.inbox_routing_handler import save_resolved_task
+
 from handlers.common_routing import (
     extract_json_dict,
     parse_intent_result,
@@ -61,13 +45,30 @@ from handlers.common_routing import (
 )
 from handlers.feature_ideation_handlers import (
     FeatureIdeationHandlerDeps,
+    _build_feature_suggestions,
     detect_feature_project,
     is_feature_ideation_request,
-    _build_feature_suggestions,
 )
-from services.command_contract import validate_command_parity
-from services.command_contract import validate_required_command_interface
-
+from handlers.inbox_routing_handler import PROJECTS as ROUTING_PROJECTS
+from handlers.inbox_routing_handler import process_inbox_task, save_resolved_task
+from orchestration.ai_orchestrator import get_orchestrator
+from services.command_contract import (
+    validate_command_parity,
+    validate_required_command_interface,
+)
+from services.memory_service import (
+    append_message,
+    create_chat,
+    delete_chat,
+    get_active_chat,
+    get_chat,
+    get_chat_history,
+    list_chats,
+    rename_chat,
+    switch_chat,
+)
+from state_manager import StateManager
+from user_manager import get_user_manager
 
 # --- SETUP BOT ---
 intents = discord.Intents.default()
@@ -105,7 +106,7 @@ def _clamp_feature_count(value: Any) -> int:
     return max(1, min(5, parsed))
 
 
-def _build_feature_task_text(project_key: str, selected: Dict[str, Any]) -> str:
+def _build_feature_task_text(project_key: str, selected: dict[str, Any]) -> str:
     lines = [
         f"New feature proposal for {_get_project_label(project_key)}",
         "",
@@ -130,7 +131,7 @@ def _build_feature_task_text(project_key: str, selected: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def _feature_list_text(project_key: str, features: List[Dict[str, Any]], feature_count: int) -> str:
+def _feature_list_text(project_key: str, features: list[dict[str, Any]], feature_count: int) -> str:
     lines = [
         f"💡 **Feature proposals for {_get_project_label(project_key)}**",
         f"Requested: {feature_count}",
@@ -144,7 +145,7 @@ def _feature_list_text(project_key: str, features: List[Dict[str, Any]], feature
     return "\n".join(lines)
 
 
-def _parse_count_reply(text: str) -> Optional[int]:
+def _parse_count_reply(text: str) -> int | None:
     candidate = str(text or "").strip().lower()
     if not candidate:
         return None
@@ -495,11 +496,11 @@ async def send_chat_menu(interaction: discord.Interaction, user_id: int, notice:
             active_chat_title = c.get("title")
             break
 
-    text = f"🗣️ **Nexus Chat Menu**\n\n"
+    text = "🗣️ **Nexus Chat Menu**\n\n"
     if notice:
         text += f"{notice}\n"
     text += f"**Active Chat:** {active_chat_title}\n"
-    text += f"_(All conversational history is saved under this thread)_"
+    text += "_(All conversational history is saved under this thread)_"
     
     view = ChatMenuView(user_id)
     
@@ -528,9 +529,9 @@ async def chat_command(interaction: discord.Interaction):
             active_chat_title = c.get("title")
             break
 
-    text = f"🗣️ **Nexus Chat Menu**\n\n"
+    text = "🗣️ **Nexus Chat Menu**\n\n"
     text += f"**Active Chat:** {active_chat_title}\n"
-    text += f"_(All conversational history is saved under this thread)_"
+    text += "_(All conversational history is saved under this thread)_"
     
     view = ChatMenuView(user_id)
     await interaction.response.send_message(content=text, view=view)

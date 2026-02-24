@@ -76,7 +76,7 @@ def test_reroute_webhook_task_moves_file(tmp_path, monkeypatch):
 
 @patch("webhook_server.send_telegram_alert", return_value=True)
 def test_webhook_blocks_unmapped_repository(mock_alert):
-    from webhook_server import handle_issue_opened, _get_webhook_policy
+    from webhook_server import _get_webhook_policy, handle_issue_opened
 
     payload = {
         "action": "opened",

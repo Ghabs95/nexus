@@ -2,14 +2,16 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
+
 import redis
+
 from config import REDIS_URL, get_chat_agent_types, get_workflow_profile
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_project_agent_types(project_key: Optional[str]) -> list[str]:
+def _resolve_project_agent_types(project_key: str | None) -> list[str]:
     try:
         configured_types = get_chat_agent_types(project_key or "nexus") or []
     except Exception:
@@ -19,7 +21,7 @@ def _resolve_project_agent_types(project_key: Optional[str]) -> list[str]:
     return [str(agent_type).strip().lower() for agent_type in configured_types if str(agent_type).strip()]
 
 
-def _resolve_primary_agent_type(project_key: Optional[str], allowed_agent_types: list[str]) -> str:
+def _resolve_primary_agent_type(project_key: str | None, allowed_agent_types: list[str]) -> str:
     candidates = [agent for agent in allowed_agent_types if isinstance(agent, str) and agent.strip()]
     if not candidates:
         candidates = _resolve_project_agent_types(project_key)
@@ -29,7 +31,7 @@ def _resolve_primary_agent_type(project_key: Optional[str], allowed_agent_types:
     return candidates[0]
 
 
-def _resolve_workflow_profile(project_key: Optional[str]) -> str:
+def _resolve_workflow_profile(project_key: str | None) -> str:
     try:
         value = get_workflow_profile(project_key or "nexus")
         normalized = str(value).strip()
@@ -40,7 +42,7 @@ def _resolve_workflow_profile(project_key: Optional[str]) -> str:
     return "ghabs_org_workflow"
 
 
-def _default_chat_metadata(project_key: Optional[str] = None) -> Dict[str, Any]:
+def _default_chat_metadata(project_key: str | None = None) -> dict[str, Any]:
     return {
         "project_key": project_key,
         "chat_mode": "strategy",
@@ -51,7 +53,7 @@ def _default_chat_metadata(project_key: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
-def _normalize_chat_data(chat_data: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_chat_data(chat_data: dict[str, Any]) -> dict[str, Any]:
     merged = dict(chat_data or {})
     metadata = merged.get("metadata")
     if not isinstance(metadata, dict):
@@ -113,7 +115,7 @@ def get_redis() -> redis.Redis:
             raise
     return _redis_client
 
-def create_chat(user_id: int, title: str = None, metadata: Optional[Dict[str, Any]] = None) -> str:
+def create_chat(user_id: int, title: str = None, metadata: dict[str, Any] | None = None) -> str:
     """Creates a new chat and sets it as active."""
     r = get_redis()
     chat_id = uuid.uuid4().hex
@@ -176,7 +178,7 @@ def list_chats(user_id: int) -> list:
     return chats
 
 
-def get_chat(user_id: int, chat_id: Optional[str] = None) -> Dict[str, Any]:
+def get_chat(user_id: int, chat_id: str | None = None) -> dict[str, Any]:
     """Return a single chat payload (active chat by default)."""
     r = get_redis()
     resolved_chat_id = chat_id or get_active_chat(user_id)
@@ -190,7 +192,7 @@ def get_chat(user_id: int, chat_id: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
 
-def update_chat_metadata(user_id: int, chat_id: str, updates: Dict[str, Any]) -> bool:
+def update_chat_metadata(user_id: int, chat_id: str, updates: dict[str, Any]) -> bool:
     """Update metadata fields for a chat and persist the change."""
     if not chat_id or not isinstance(updates, dict):
         return False

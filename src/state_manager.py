@@ -1,10 +1,15 @@
 """State management for Nexus - handles persistent storage."""
 import logging
 import time
-from typing import Any, Callable, Dict, Optional, List
+from collections.abc import Callable
+from typing import Any
+
 from config import (
-    LAUNCHED_AGENTS_FILE, TRACKED_ISSUES_FILE,
-    AGENT_RECENT_WINDOW, ensure_data_dir, ensure_logs_dir
+    AGENT_RECENT_WINDOW,
+    LAUNCHED_AGENTS_FILE,
+    TRACKED_ISSUES_FILE,
+    ensure_data_dir,
+    ensure_logs_dir,
 )
 from orchestration.plugin_runtime import get_profiled_plugin
 
@@ -12,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Optional SocketIO emitter injected at startup by webhook_server.py.
 # Signature: (event_name: str, data: dict) -> None
-_socketio_emitter: Optional[Callable[[str, Any], None]] = None
+_socketio_emitter: Callable[[str, Any], None] | None = None
 
 
 def set_socketio_emitter(emitter: Callable[[str, Any], None]) -> None:
@@ -69,7 +74,7 @@ class StateManager:
         plugin.save_json(path, data)
 
     @staticmethod
-    def load_launched_agents(recent_only: bool = True) -> Dict[str, dict]:
+    def load_launched_agents(recent_only: bool = True) -> dict[str, dict]:
         """Load launched agents from persistent storage.
 
         Args:
@@ -84,7 +89,7 @@ class StateManager:
         return {k: v for k, v in data.items() if v.get("timestamp", 0) > cutoff}
 
     @staticmethod
-    def save_launched_agents(data: Dict[str, dict]) -> None:
+    def save_launched_agents(data: dict[str, dict]) -> None:
         """Save launched agents to persistent storage."""
         StateManager._save_json_state(
             LAUNCHED_AGENTS_FILE,
@@ -93,7 +98,7 @@ class StateManager:
         )
 
     @staticmethod
-    def get_last_tier_for_issue(issue_num: str) -> Optional[str]:
+    def get_last_tier_for_issue(issue_num: str) -> str | None:
         """Get the last known workflow tier for an issue from launched_agents.
 
         Unlike :meth:`load_launched_agents`, this reads without the recency
@@ -136,12 +141,12 @@ class StateManager:
         return key in data
 
     @staticmethod
-    def load_tracked_issues() -> Dict[int, dict]:
+    def load_tracked_issues() -> dict[int, dict]:
         """Load tracked issues from file."""
         return StateManager._load_json_state(TRACKED_ISSUES_FILE, default={})
 
     @staticmethod
-    def save_tracked_issues(data: Dict[int, dict]) -> None:
+    def save_tracked_issues(data: dict[int, dict]) -> None:
         """Save tracked issues to file."""
         StateManager._save_json_state(
             TRACKED_ISSUES_FILE,
@@ -173,13 +178,13 @@ class StateManager:
     # --- NEXUS-CORE INTEGRATION ---
     
     @staticmethod
-    def load_workflow_mapping() -> Dict[str, str]:
+    def load_workflow_mapping() -> dict[str, str]:
         """Load issue_number -> workflow_id mapping."""
         from config import WORKFLOW_ID_MAPPING_FILE
         return StateManager._load_json_state(WORKFLOW_ID_MAPPING_FILE, default={})
 
     @staticmethod
-    def save_workflow_mapping(data: Dict[str, str]) -> None:
+    def save_workflow_mapping(data: dict[str, str]) -> None:
         """Save issue_number -> workflow_id mapping."""
         from config import WORKFLOW_ID_MAPPING_FILE
         StateManager._save_json_state(
@@ -202,7 +207,7 @@ class StateManager:
         })
 
     @staticmethod
-    def get_workflow_id_for_issue(issue_num: str) -> Optional[str]:
+    def get_workflow_id_for_issue(issue_num: str) -> str | None:
         """Get workflow ID for an issue number."""
         data = StateManager.load_workflow_mapping()
         return data.get(str(issue_num))
@@ -218,13 +223,13 @@ class StateManager:
     # --- APPROVAL GATE STATE ---
 
     @staticmethod
-    def load_approval_state() -> Dict[str, dict]:
+    def load_approval_state() -> dict[str, dict]:
         """Load pending approval state from persistent storage."""
         from config import APPROVAL_STATE_FILE
         return StateManager._load_json_state(APPROVAL_STATE_FILE, default={})
 
     @staticmethod
-    def save_approval_state(data: Dict[str, dict]) -> None:
+    def save_approval_state(data: dict[str, dict]) -> None:
         """Save approval state to persistent storage."""
         from config import APPROVAL_STATE_FILE
         StateManager._save_json_state(
@@ -238,7 +243,7 @@ class StateManager:
         issue_num: str,
         step_num: int,
         step_name: str,
-        approvers: List[str],
+        approvers: list[str],
         approval_timeout: int,
     ) -> None:
         """Record that a workflow step is waiting for approval."""
@@ -264,7 +269,7 @@ class StateManager:
         logger.info(f"Cleared pending approval for issue #{issue_num}")
 
     @staticmethod
-    def get_pending_approval(issue_num: str) -> Optional[dict]:
+    def get_pending_approval(issue_num: str) -> dict | None:
         """Return pending approval info for an issue, or None if not awaiting approval."""
         data = StateManager.load_approval_state()
         return data.get(str(issue_num))

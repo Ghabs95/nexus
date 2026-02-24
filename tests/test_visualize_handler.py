@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-from io import BytesIO
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from services.mermaid_render_service import build_mermaid_diagram
 
-
 # ---------------------------------------------------------------------------
 # build_mermaid_diagram
 # ---------------------------------------------------------------------------
 
 
-def _make_step(name: str, status: str, agent_name: str = "") -> Dict[str, Any]:
+def _make_step(name: str, status: str, agent_name: str = "") -> dict[str, Any]:
     return {"name": name, "status": status, "agent": {"name": agent_name} if agent_name else {}}
 
 
@@ -65,7 +62,7 @@ class TestBuildMermaidDiagram:
         assert "my-agent" in diagram
 
     def test_non_dict_steps_skipped(self):
-        steps: List[Any] = ["not-a-dict", None, _make_step("real", "pending")]
+        steps: list[Any] = ["not-a-dict", None, _make_step("real", "pending")]
         # Should not raise and should contain the real step
         diagram = build_mermaid_diagram(steps, "1")
         assert "real" in diagram
@@ -79,20 +76,15 @@ class TestBuildMermaidDiagram:
 # visualize_handler — fallback-to-text vs photo path
 # ---------------------------------------------------------------------------
 
-
-def _make_update(user_id: int = 12345, args: List[str] | None = None):
-    update = MagicMock()
-    update.effective_user.id = user_id
-    update.effective_chat.id = 100
-    context = MagicMock()
-    context.args = args or []
-    context.bot = AsyncMock()
-    msg = AsyncMock()
-    msg.message_id = 1
-    update.effective_message.reply_text = AsyncMock(return_value=msg)
-    update.effective_message.reply_photo = AsyncMock()
-    return update, context
-
+def _make_ctx(user_id: str = "12345", args: list[str] | None = None):
+    ctx = MagicMock()
+    ctx.user_id = user_id
+    ctx.channel = "telegram"
+    ctx.args = args or []
+    ctx.reply_text = AsyncMock(return_value="msg1")
+    ctx.reply_image = AsyncMock()
+    ctx.edit_message_text = AsyncMock()
+    return ctx
 
 def _make_deps(logger=None):
     from handlers.visualize_command_handlers import VisualizeHandlerDeps
@@ -111,76 +103,49 @@ _SAMPLE_STEPS = [
     {"name": "impl", "status": "running", "agent": {"name": "coder"}},
 ]
 
-
 @pytest.mark.asyncio
 async def test_handler_prompts_project_selection_when_no_args():
     from handlers.visualize_command_handlers import visualize_handler
 
-    update, context = _make_update(args=[])
+    ctx = _make_ctx(args=[])
     deps = _make_deps()
-    await visualize_handler(update, context, deps)
-    deps.prompt_project_selection.assert_awaited_once_with(update, context, "visualize")
-
+    await visualize_handler(ctx, deps)
+    deps.prompt_project_selection.assert_awaited_once_with(ctx, "visualize")
 
 @pytest.mark.asyncio
-async def test_handler_sends_photo_when_png_available(tmp_path, monkeypatch):
-    from handlers.visualize_command_handlers import visualize_handler
+async def test_handler_sends_mermaid_text_with_steps(tmp_path, monkeypatch):
     import handlers.visualize_command_handlers as vch
+    from handlers.visualize_command_handlers import visualize_handler
 
-    update, context = _make_update(args=["myproject", "42"])
+    ctx = _make_ctx(args=["myproject", "42"])
     deps = _make_deps()
 
-    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", staticmethod(lambda _: "wf-1"))
+    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", lambda _: "wf-1")
     workflows_dir = tmp_path / "workflows"
     workflows_dir.mkdir()
     workflow_file = workflows_dir / "wf-1.json"
     workflow_file.write_text(json.dumps({"steps": _SAMPLE_STEPS, "state": "running"}))
     monkeypatch.setattr(vch, "NEXUS_CORE_STORAGE_DIR", str(tmp_path))
 
-    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
-    with patch("handlers.visualize_command_handlers.render_mermaid_to_png", return_value=fake_png):
-        await visualize_handler(update, context, deps)
+    await visualize_handler(ctx, deps)
 
-    update.effective_message.reply_photo.assert_awaited_once()
-    photo_kwarg = update.effective_message.reply_photo.call_args
-    assert photo_kwarg is not None
-
-
-@pytest.mark.asyncio
-async def test_handler_falls_back_to_text_when_no_png(tmp_path, monkeypatch):
-    from handlers.visualize_command_handlers import visualize_handler
-    import handlers.visualize_command_handlers as vch
-
-    update, context = _make_update(args=["myproject", "42"])
-    deps = _make_deps()
-
-    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", staticmethod(lambda _: "wf-1"))
-    workflows_dir = tmp_path / "workflows"
-    workflows_dir.mkdir()
-    workflow_file = workflows_dir / "wf-1.json"
-    workflow_file.write_text(json.dumps({"steps": _SAMPLE_STEPS, "state": "running"}))
-    monkeypatch.setattr(vch, "NEXUS_CORE_STORAGE_DIR", str(tmp_path))
-
-    with patch("handlers.visualize_command_handlers.render_mermaid_to_png", return_value=None):
-        await visualize_handler(update, context, deps)
-
-    context.bot.edit_message_text.assert_awaited_once()
-    call_kwargs = context.bot.edit_message_text.call_args.kwargs
+    ctx.edit_message_text.assert_awaited_once()
+    call_kwargs = ctx.edit_message_text.call_args.kwargs
     assert "```mermaid" in call_kwargs.get("text", "")
 
 
 @pytest.mark.asyncio
 async def test_handler_reports_no_steps_when_workflow_missing(monkeypatch):
-    from handlers.visualize_command_handlers import visualize_handler
     import handlers.visualize_command_handlers as vch
+    from handlers.visualize_command_handlers import visualize_handler
 
-    update, context = _make_update(args=["myproject", "42"])
+    ctx = _make_ctx(args=["myproject", "42"])
     deps = _make_deps()
 
-    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", staticmethod(lambda _: None))
+    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", lambda _: None)
 
-    await visualize_handler(update, context, deps)
+    await visualize_handler(ctx, deps)
 
-    context.bot.edit_message_text.assert_awaited_once()
-    call_kwargs = context.bot.edit_message_text.call_args.kwargs
+    ctx.edit_message_text.assert_awaited_once()
+    call_kwargs = ctx.edit_message_text.call_args.kwargs
     assert "No workflow steps found" in call_kwargs.get("text", "")

@@ -5,13 +5,14 @@ Sends automated reports to Telegram at configured times.
 import logging
 import os
 from datetime import datetime, timedelta
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram import Bot
-from state_manager import StateManager
+
 from audit_store import AuditStore
+from state_manager import StateManager
 from user_manager import get_user_manager
-from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -211,11 +212,11 @@ class ReportScheduler:
         """Build daily digest message."""
         now = datetime.now()
         
-        message = f"📊 <b>Daily Digest</b>\n"
+        message = "📊 <b>Daily Digest</b>\n"
         message += f"📅 {now.strftime('%A, %B %d, %Y')}\n\n"
         
         # Activity section
-        message += f"<b>📈 Activity (Last 24 Hours)</b>\n"
+        message += "<b>📈 Activity (Last 24 Hours)</b>\n"
         if "error" in activity:
             message += f"⚠️ {activity['error']}\n"
         else:
@@ -230,7 +231,7 @@ class ReportScheduler:
         message += "\n"
         
         # Tracked issues section
-        message += f"<b>🎯 Tracked Issues</b>\n"
+        message += "<b>🎯 Tracked Issues</b>\n"
         if "error" in tracked_status:
             message += f"⚠️ {tracked_status['error']}\n"
         else:
@@ -245,7 +246,7 @@ class ReportScheduler:
         message += "\n"
         
         # User section
-        message += f"<b>👥 Users</b>\n"
+        message += "<b>👥 Users</b>\n"
         total_users = user_stats.get('total_users', 0)
         total_tracked = user_stats.get('total_tracked_issues', 0)
         message += f"Active Users: {total_users}\n"
@@ -263,11 +264,11 @@ class ReportScheduler:
         now = datetime.now()
         week_start = now - timedelta(days=7)
         
-        message = f"📊 <b>Weekly Summary</b>\n"
+        message = "📊 <b>Weekly Summary</b>\n"
         message += f"📅 {week_start.strftime('%b %d')} - {now.strftime('%b %d, %Y')}\n\n"
         
         # Activity section
-        message += f"<b>📈 Activity (Last 7 Days)</b>\n"
+        message += "<b>📈 Activity (Last 7 Days)</b>\n"
         if "error" in activity:
             message += f"⚠️ {activity['error']}\n"
         else:
@@ -276,14 +277,14 @@ class ReportScheduler:
             
             if total > 0:
                 event_types = activity.get('event_types', {})
-                message += f"\nTop Events:\n"
+                message += "\nTop Events:\n"
                 for event_type, count in sorted(event_types.items(), key=lambda x: x[1], reverse=True)[:10]:
                     message += f"  • {event_type}: {count}\n"
         
         message += "\n"
         
         # Tracked issues section
-        message += f"<b>🎯 Tracked Issues</b>\n"
+        message += "<b>🎯 Tracked Issues</b>\n"
         if "error" in tracked_status:
             message += f"⚠️ {tracked_status['error']}\n"
         else:
@@ -298,7 +299,7 @@ class ReportScheduler:
         message += "\n"
         
         # User section
-        message += f"<b>👥 User Engagement</b>\n"
+        message += "<b>👥 User Engagement</b>\n"
         total_users = user_stats.get('total_users', 0)
         total_tracked = user_stats.get('total_tracked_issues', 0)
         total_projects = user_stats.get('total_projects', 0)

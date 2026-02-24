@@ -3,18 +3,20 @@
 Tests retry logic, error formatting, and configuration validation.
 """
 
-import pytest
 import subprocess
-from unittest.mock import Mock, patch
+from unittest.mock import patch
+
+import pytest
+
 from error_handling import (
+    ConfigurationError,
+    RetryExhaustedError,
+    format_error_for_user,
     retry_with_backoff,
     run_command_with_retry,
-    RetryExhaustedError,
-    ConfigurationError,
-    validate_required_env_vars,
-    format_error_for_user,
     safe_file_read,
-    safe_file_write
+    safe_file_write,
+    validate_required_env_vars,
 )
 
 

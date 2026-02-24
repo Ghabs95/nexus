@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
-from chat_agents_schema import (
+
+if TYPE_CHECKING:
+    from interactive_context import InteractiveContext
+from nexus.adapters.notifications.base import Button
+from nexus.core.chat_agents_schema import (
     get_default_project_chat_agent_type,
     get_project_chat_agent_config,
 )
-from handlers.common_routing import extract_json_dict
+
 from handlers.agent_context_utils import (
     collect_context_candidate_files,
     extract_agent_prompt_metadata_from_yaml,
@@ -24,12 +27,12 @@ from handlers.agent_context_utils import (
     resolve_path,
     resolve_project_root,
 )
+from handlers.common_routing import extract_json_dict
 from utils.log_utils import (
     log_feature_ideation_success,
     log_unauthorized_callback_access,
     truncate_for_log,
 )
-
 
 FEATURE_STATE_KEY = "feature_suggestions"
 FEATURE_MIN_COUNT = 1
@@ -40,13 +43,13 @@ FEATURE_DEFAULT_COUNT = 3
 @dataclass
 class FeatureIdeationHandlerDeps:
     logger: Any
-    allowed_user_ids: List[int]
-    projects: Dict[str, str]
+    allowed_user_ids: list[int]
+    projects: dict[str, str]
     get_project_label: Callable[[str], str]
     orchestrator: Any
     base_dir: str = ""
-    project_config: Optional[Dict[str, Any]] = None
-    create_feature_task: Optional[Callable[[str, str, str], Awaitable[Dict[str, Any]]]] = None
+    project_config: dict[str, Any] | None = None
+    create_feature_task: Callable[[str, str, str], Awaitable[dict[str, Any]]] | None = None
 
 
 def is_feature_ideation_request(text: str) -> bool:
@@ -76,12 +79,12 @@ def is_feature_ideation_request(text: str) -> bool:
     return any(trigger in candidate for trigger in triggers)
 
 
-def detect_feature_project(text: str, projects: Optional[Dict[str, str]] = None) -> Optional[str]:
+def detect_feature_project(text: str, projects: dict[str, str] | None = None) -> str | None:
     candidate = (text or "").strip().lower()
     if not candidate:
         return None
 
-    aliases: Dict[str, str] = {}
+    aliases: dict[str, str] = {}
     try:
         from config import get_project_aliases
 
@@ -90,7 +93,7 @@ def detect_feature_project(text: str, projects: Optional[Dict[str, str]] = None)
         pass
 
     if isinstance(projects, dict):
-        for key in projects.keys():
+        for key in projects:
             normalized = str(key).strip().lower()
             if normalized:
                 aliases.setdefault(normalized, normalized)
@@ -129,7 +132,7 @@ def _clamp_feature_count(value: Any, default_count: int = FEATURE_DEFAULT_COUNT)
     return max(FEATURE_MIN_COUNT, min(FEATURE_MAX_COUNT, parsed))
 
 
-def _is_project_locked(feature_state: Dict[str, Any]) -> bool:
+def _is_project_locked(feature_state: dict[str, Any]) -> bool:
     if not isinstance(feature_state, dict):
         return False
     if "project_locked" in feature_state:
@@ -137,7 +140,7 @@ def _is_project_locked(feature_state: Dict[str, Any]) -> bool:
     return bool(feature_state.get("project"))
 
 
-def _extract_json_dict(raw_text: str) -> Optional[Dict[str, Any]]:
+def _extract_json_dict(raw_text: str) -> dict[str, Any] | None:
     if not raw_text:
         return None
     parsed = extract_json_dict(raw_text)
@@ -178,11 +181,11 @@ def _extract_json_payload(raw_text: str) -> Any:
     return None
 
 
-def _normalize_generated_features(items: Any, limit: int) -> List[Dict[str, Any]]:
+def _normalize_generated_features(items: Any, limit: int) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
 
-    normalized: List[Dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -208,7 +211,7 @@ def _normalize_generated_features(items: Any, limit: int) -> List[Dict[str, Any]
     return normalized
 
 
-def _project_config_for_key(project_key: str, deps: FeatureIdeationHandlerDeps) -> Dict[str, Any]:
+def _project_config_for_key(project_key: str, deps: FeatureIdeationHandlerDeps) -> dict[str, Any]:
     config = deps.project_config if isinstance(deps.project_config, dict) else {}
     project_cfg = config.get(project_key)
     if not isinstance(project_cfg, dict):
@@ -225,7 +228,7 @@ def _chat_agent_config_for_project(
     project_key: str,
     routed_agent_type: str,
     deps: FeatureIdeationHandlerDeps,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     project_cfg = _project_config_for_key(project_key, deps)
     return get_project_chat_agent_config(project_cfg, routed_agent_type)
 
@@ -239,15 +242,15 @@ def _resolve_path(project_root: str, raw_path: str) -> str:
     return resolve_path(project_root, raw_path)
 
 
-def _normalize_paths(value: Any) -> List[str]:
+def _normalize_paths(value: Any) -> list[str]:
     return normalize_paths(value)
 
 
-def _extract_referenced_paths_from_agents(agents_text: str) -> List[str]:
+def _extract_referenced_paths_from_agents(agents_text: str) -> list[str]:
     return extract_referenced_paths_from_markdown(agents_text)
 
 
-def _collect_context_candidate_files(context_root: str, seed_files: Optional[List[str]] = None) -> List[str]:
+def _collect_context_candidate_files(context_root: str, seed_files: list[str] | None = None) -> list[str]:
     return collect_context_candidate_files(context_root, seed_files=seed_files)
 
 
@@ -309,9 +312,9 @@ def _build_feature_suggestions(
     project_key: str,
     text: str,
     deps: FeatureIdeationHandlerDeps,
-    preferred_agent_type: Optional[str],
+    preferred_agent_type: str | None,
     feature_count: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     project_label = deps.get_project_label(project_key)
     routed_agent_type = str(preferred_agent_type or "").strip().lower()
     if not routed_agent_type:
@@ -343,7 +346,7 @@ def _build_feature_suggestions(
         agent_prompt,
     )
 
-    def _extract_items_from_result(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_items_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(result, dict):
             return []
 
@@ -464,10 +467,10 @@ def _feature_generation_retry_text(project_key: str, deps: FeatureIdeationHandle
 
 def _feature_list_text(
     project_key: str,
-    features: List[Dict[str, Any]],
+    features: list[dict[str, Any]],
     deps: FeatureIdeationHandlerDeps,
-    preferred_agent_type: Optional[str],
-    selected_features: Optional[List[Dict[str, Any]]] = None,
+    preferred_agent_type: str | None,
+    selected_features: list[dict[str, Any]] | None = None,
 ) -> str:
     routed_agent_type = str(preferred_agent_type or "").strip().lower()
     if not routed_agent_type:
@@ -493,30 +496,30 @@ def _feature_list_text(
 
 
 def _feature_list_keyboard(
-    features: List[Dict[str, Any]],
+    features: list[dict[str, Any]],
     allow_project_change: bool,
-) -> InlineKeyboardMarkup:
+) -> list[list[Button]]:
     keyboard = [
-        [InlineKeyboardButton(item["title"], callback_data=f"feat:pick:{idx}")]
+        [Button(item["title"], callback_data=f"feat:pick:{idx}")]
         for idx, item in enumerate(features)
     ]
     if allow_project_change:
-        keyboard.append([InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")])
-    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-    return InlineKeyboardMarkup(keyboard)
+        keyboard.append([Button("📁 Choose project", callback_data="feat:choose_project")])
+    keyboard.append([Button("❌ Close", callback_data="flow:close")])
+    return keyboard
 
 
-def _feature_count_keyboard(allow_project_change: bool) -> InlineKeyboardMarkup:
-    keyboard: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(str(value), callback_data=f"feat:count:{value}") for value in range(1, 6)]
+def _feature_count_keyboard(allow_project_change: bool) -> list[list[Button]]:
+    keyboard: list[list[Button]] = [
+        [Button(str(value), callback_data=f"feat:count:{value}") for value in range(1, 6)]
     ]
     if allow_project_change:
-        keyboard.append([InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")])
-    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-    return InlineKeyboardMarkup(keyboard)
+        keyboard.append([Button("📁 Choose project", callback_data="feat:choose_project")])
+    keyboard.append([Button("❌ Close", callback_data="flow:close")])
+    return keyboard
 
 
-def _feature_count_prompt_text(project_key: Optional[str], deps: FeatureIdeationHandlerDeps) -> str:
+def _feature_count_prompt_text(project_key: str | None, deps: FeatureIdeationHandlerDeps) -> str:
     project_label = deps.get_project_label(project_key) if project_key else "not selected"
     return (
         "🔢 How many feature proposals do you want?\n"
@@ -525,7 +528,7 @@ def _feature_count_prompt_text(project_key: Optional[str], deps: FeatureIdeation
     )
 
 
-def _feature_to_task_text(project_key: str, selected: Dict[str, Any], deps: FeatureIdeationHandlerDeps) -> str:
+def _feature_to_task_text(project_key: str, selected: dict[str, Any], deps: FeatureIdeationHandlerDeps) -> str:
     lines = [
         f"New feature proposal for {deps.get_project_label(project_key)}",
         "",
@@ -547,72 +550,65 @@ def _feature_to_task_text(project_key: str, selected: Dict[str, Any], deps: Feat
 
 
 async def _prompt_feature_count(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    status_msg: Any,
+    ctx: InteractiveContext,
+    status_msg_id: str,
     deps: FeatureIdeationHandlerDeps,
 ) -> None:
-    feature_state = context.user_data.get(FEATURE_STATE_KEY) or {}
+    feature_state = ctx.user_state.get(FEATURE_STATE_KEY) or {}
     project_key = feature_state.get("project")
     project_locked = _is_project_locked(feature_state)
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=status_msg.message_id,
+    await ctx.edit_message_text(
+        message_id=status_msg_id,
         text=_feature_count_prompt_text(project_key, deps),
-        reply_markup=_feature_count_keyboard(allow_project_change=not project_locked),
-        parse_mode="Markdown",
+        buttons=_feature_count_keyboard(allow_project_change=not project_locked),
     )
 
 
-def _feature_project_keyboard(deps: FeatureIdeationHandlerDeps) -> InlineKeyboardMarkup:
+def _feature_project_keyboard(deps: FeatureIdeationHandlerDeps) -> list[list[Button]]:
     keyboard = [
-        [InlineKeyboardButton(deps.get_project_label(key), callback_data=f"feat:project:{key}")]
+        [Button(deps.get_project_label(key), callback_data=f"feat:project:{key}")]
         for key in sorted(deps.projects.keys())
     ]
-    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-    return InlineKeyboardMarkup(keyboard)
+    keyboard.append([Button("❌ Close", callback_data="flow:close")])
+    return keyboard
 
 
 async def show_feature_project_picker(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    status_msg: Any,
+    ctx: InteractiveContext,
+    status_msg_id: str,
     deps: FeatureIdeationHandlerDeps,
 ) -> None:
-    feature_state = context.user_data.get(FEATURE_STATE_KEY) or {}
+    feature_state = ctx.user_state.get(FEATURE_STATE_KEY) or {}
     selected_count = feature_state.get("feature_count")
     count_suffix = ""
     if selected_count is not None:
         count_suffix = f"\n\nSelected count: *{_clamp_feature_count(selected_count)}*"
 
-    context.user_data[FEATURE_STATE_KEY] = {
+    ctx.user_state[FEATURE_STATE_KEY] = {
         **feature_state,
         "project": None,
         "items": [],
     }
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=status_msg.message_id,
+    await ctx.edit_message_text(
+        message_id=status_msg_id,
         text=(
             "📁 I couldn't detect the project. Select one to continue feature ideation:"
             f"{count_suffix}"
         ),
-        reply_markup=_feature_project_keyboard(deps),
-        parse_mode="Markdown",
+        buttons=_feature_project_keyboard(deps),
     )
 
 
 async def show_feature_suggestions(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    status_msg: Any,
+    ctx: InteractiveContext,
+    status_msg_id: str,
     project_key: str,
     text: str,
-    preferred_agent_type: Optional[str],
+    preferred_agent_type: str | None,
     feature_count: int,
     deps: FeatureIdeationHandlerDeps,
 ) -> None:
-    feature_state = context.user_data.get(FEATURE_STATE_KEY) or {}
+    feature_state = ctx.user_state.get(FEATURE_STATE_KEY) or {}
     features = _build_feature_suggestions(
         project_key=project_key,
         text=text,
@@ -620,7 +616,7 @@ async def show_feature_suggestions(
         preferred_agent_type=preferred_agent_type,
         feature_count=feature_count,
     )
-    context.user_data[FEATURE_STATE_KEY] = {
+    ctx.user_state[FEATURE_STATE_KEY] = {
         "project": project_key,
         "items": features,
         "selected_items": [],
@@ -633,22 +629,19 @@ async def show_feature_suggestions(
         project_locked = _is_project_locked(feature_state)
         retry_keyboard_rows = []
         if not project_locked:
-            retry_keyboard_rows.append([InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")])
-        retry_keyboard_rows.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=status_msg.message_id,
+            retry_keyboard_rows.append([Button("📁 Choose project", callback_data="feat:choose_project")])
+        retry_keyboard_rows.append([Button("❌ Close", callback_data="flow:close")])
+        await ctx.edit_message_text(
+            message_id=status_msg_id,
             text=_feature_generation_retry_text(project_key, deps),
-            reply_markup=InlineKeyboardMarkup(retry_keyboard_rows),
-            parse_mode="Markdown",
+            buttons=retry_keyboard_rows,
         )
         return
 
     project_locked = _is_project_locked(feature_state)
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=status_msg.message_id,
+    await ctx.edit_message_text(
+        message_id=status_msg_id,
         text=_feature_list_text(
             project_key,
             features,
@@ -656,19 +649,17 @@ async def show_feature_suggestions(
             preferred_agent_type,
             selected_features=[],
         ),
-        reply_markup=_feature_list_keyboard(features, allow_project_change=not project_locked),
-        parse_mode="Markdown",
+        buttons=_feature_list_keyboard(features, allow_project_change=not project_locked),
     )
 
 
 async def handle_feature_ideation_request(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    status_msg: Any,
+    ctx: InteractiveContext,
+    status_msg_id: str,
     text: str,
     deps: FeatureIdeationHandlerDeps,
-    preferred_project_key: Optional[str] = None,
-    preferred_agent_type: Optional[str] = None,
+    preferred_project_key: str | None = None,
+    preferred_agent_type: str | None = None,
 ) -> bool:
     if not is_feature_ideation_request(text):
         return False
@@ -680,7 +671,7 @@ async def handle_feature_ideation_request(
     if not project_key:
         project_key = None
 
-    context.user_data[FEATURE_STATE_KEY] = {
+    ctx.user_state[FEATURE_STATE_KEY] = {
         "project": project_key,
         "project_locked": project_locked,
         "items": [],
@@ -690,20 +681,16 @@ async def handle_feature_ideation_request(
         "source_text": text,
         "requested_feature_count": _requested_feature_count(text),
     }
-    await _prompt_feature_count(update, context, status_msg, deps)
+    await _prompt_feature_count(ctx, status_msg_id, deps)
     return True
 
 
 async def feature_callback_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: FeatureIdeationHandlerDeps,
 ) -> None:
-    query = update.callback_query
-    if not query:
-        return
     try:
-        await query.answer()
+        await ctx.answer_callback_query()
     except Exception as exc:
         logger = getattr(deps, "logger", None)
         if logger is not None:
@@ -711,16 +698,16 @@ async def feature_callback_handler(
             if callable(log_warning):
                 log_warning("Feature callback answer failed (continuing): %s", exc)
 
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_callback_access(getattr(deps, "logger", None), update.effective_user.id)
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_callback_access(getattr(deps, "logger", None), ctx.user_id)
         return
 
-    data = query.data or ""
-    feature_state = context.user_data.get(FEATURE_STATE_KEY) or {}
+    data = ctx.query.data or ""
+    feature_state = ctx.user_state.get(FEATURE_STATE_KEY) or {}
 
     if data == "feat:choose_project":
         if _is_project_locked(feature_state):
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text=(
                     "🔒 Project is fixed by your active context for this ideation flow.\n"
                     "Start a new request to use a different project context."
@@ -728,29 +715,29 @@ async def feature_callback_handler(
             )
             return
 
-        context.user_data[FEATURE_STATE_KEY] = {
+        ctx.user_state[FEATURE_STATE_KEY] = {
             **feature_state,
             "project": None,
             "items": [],
             "selected_items": [],
         }
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             text="📁 Select a project to continue feature ideation:",
-            reply_markup=_feature_project_keyboard(deps),
+            buttons=_feature_project_keyboard(deps),
         )
         return
 
     if data.startswith("feat:count:"):
         parts = data.split(":")
         if len(parts) != 3:
-            await query.edit_message_text("⚠️ Invalid count selection.")
+            await ctx.edit_message_text("⚠️ Invalid count selection.")
             return
 
         feature_count = _clamp_feature_count(parts[2])
         project_key = feature_state.get("project")
         preferred_agent_type = feature_state.get("agent_type")
         source_text = str(feature_state.get("source_text") or "")
-        context.user_data[FEATURE_STATE_KEY] = {
+        ctx.user_state[FEATURE_STATE_KEY] = {
             **feature_state,
             "feature_count": feature_count,
             "items": [],
@@ -758,19 +745,17 @@ async def feature_callback_handler(
         }
 
         if not project_key:
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text=(
                     "📁 Great — now choose a project to continue.\n\n"
                     f"Selected count: *{feature_count}*"
                 ),
-                reply_markup=_feature_project_keyboard(deps),
-                parse_mode="Markdown",
+                buttons=_feature_project_keyboard(deps),
             )
             return
 
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             text="🧠 *Nexus thinking...*",
-            parse_mode="Markdown",
         )
 
         features = _build_feature_suggestions(
@@ -780,7 +765,7 @@ async def feature_callback_handler(
             preferred_agent_type=preferred_agent_type,
             feature_count=feature_count,
         )
-        context.user_data[FEATURE_STATE_KEY] = {
+        ctx.user_state[FEATURE_STATE_KEY] = {
             **feature_state,
             "project": project_key,
             "items": features,
@@ -794,18 +779,17 @@ async def feature_callback_handler(
             project_locked = _is_project_locked(feature_state)
             retry_keyboard_rows = []
             if not project_locked:
-                retry_keyboard_rows.append([InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")])
-            retry_keyboard_rows.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-            await query.edit_message_text(
+                retry_keyboard_rows.append([Button("📁 Choose project", callback_data="feat:choose_project")])
+            retry_keyboard_rows.append([Button("❌ Close", callback_data="flow:close")])
+            await ctx.edit_message_text(
                 text=_feature_generation_retry_text(project_key, deps),
-                reply_markup=InlineKeyboardMarkup(retry_keyboard_rows),
-                parse_mode="Markdown",
+                buttons=retry_keyboard_rows,
             )
             return
 
         project_locked = _is_project_locked(feature_state)
 
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             text=_feature_list_text(
                 project_key,
                 features,
@@ -813,15 +797,14 @@ async def feature_callback_handler(
                 preferred_agent_type,
                 selected_features=[],
             ),
-            reply_markup=_feature_list_keyboard(features, allow_project_change=not project_locked),
-            parse_mode="Markdown",
+            buttons=_feature_list_keyboard(features, allow_project_change=not project_locked),
         )
         return
 
     if data.startswith("feat:project:"):
         project_key = data.split(":", 2)[2]
         if project_key not in deps.projects:
-            await query.edit_message_text("⚠️ Invalid project selection.")
+            await ctx.edit_message_text("⚠️ Invalid project selection.")
             return
 
         project_locked = _is_project_locked(feature_state)
@@ -833,7 +816,7 @@ async def feature_callback_handler(
             else []
         )
         if project_locked and current_project and project_key != current_project:
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text=(
                     "🔒 Project is fixed by your active context for this ideation flow.\n"
                     "Start a new request to use a different project context."
@@ -843,7 +826,7 @@ async def feature_callback_handler(
 
         preferred_agent_type = feature_state.get("agent_type")
         if project_key == current_project and current_items:
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text=_feature_list_text(
                     project_key,
                     current_items,
@@ -851,8 +834,7 @@ async def feature_callback_handler(
                     preferred_agent_type,
                     selected_features=selected_items,
                 ),
-                reply_markup=_feature_list_keyboard(current_items, allow_project_change=not project_locked),
-                parse_mode="Markdown",
+                buttons=_feature_list_keyboard(current_items, allow_project_change=not project_locked),
             )
             return
 
@@ -861,23 +843,21 @@ async def feature_callback_handler(
         source_text = str(feature_state.get("source_text") or "")
 
         if feature_count_raw is None:
-            context.user_data[FEATURE_STATE_KEY] = {
+            ctx.user_state[FEATURE_STATE_KEY] = {
                 **feature_state,
                 "project": project_key,
                 "items": [],
                 "selected_items": [],
             }
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text=_feature_count_prompt_text(project_key, deps),
-                reply_markup=_feature_count_keyboard(allow_project_change=not project_locked),
-                parse_mode="Markdown",
+                buttons=_feature_count_keyboard(allow_project_change=not project_locked),
             )
             return
 
         feature_count = _clamp_feature_count(feature_count_raw)
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             text="🧠 *Nexus thinking...*",
-            parse_mode="Markdown",
         )
         features = _build_feature_suggestions(
             project_key=project_key,
@@ -886,7 +866,7 @@ async def feature_callback_handler(
             preferred_agent_type=preferred_agent_type,
             feature_count=feature_count,
         )
-        context.user_data[FEATURE_STATE_KEY] = {
+        ctx.user_state[FEATURE_STATE_KEY] = {
             **feature_state,
             "project": project_key,
             "items": features,
@@ -900,18 +880,17 @@ async def feature_callback_handler(
             project_locked = _is_project_locked(feature_state)
             retry_keyboard_rows = []
             if not project_locked:
-                retry_keyboard_rows.append([InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")])
-            retry_keyboard_rows.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-            await query.edit_message_text(
+                retry_keyboard_rows.append([Button("📁 Choose project", callback_data="feat:choose_project")])
+            retry_keyboard_rows.append([Button("❌ Close", callback_data="flow:close")])
+            await ctx.edit_message_text(
                 text=_feature_generation_retry_text(project_key, deps),
-                reply_markup=InlineKeyboardMarkup(retry_keyboard_rows),
-                parse_mode="Markdown",
+                buttons=retry_keyboard_rows,
             )
             return
 
         project_locked = _is_project_locked(feature_state)
 
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             text=_feature_list_text(
                 project_key,
                 features,
@@ -919,34 +898,33 @@ async def feature_callback_handler(
                 preferred_agent_type,
                 selected_features=[],
             ),
-            reply_markup=_feature_list_keyboard(features, allow_project_change=not project_locked),
-            parse_mode="Markdown",
+            buttons=_feature_list_keyboard(features, allow_project_change=not project_locked),
         )
         return
 
     if data.startswith("feat:pick:"):
         parts = data.split(":")
         if len(parts) != 3:
-            await query.edit_message_text("⚠️ Invalid selection.")
+            await ctx.edit_message_text("⚠️ Invalid selection.")
             return
 
         project_key = feature_state.get("project")
         features = feature_state.get("items") or []
         if not project_key or not features:
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text="📁 Session expired. Select a project to get feature proposals:",
-                reply_markup=_feature_project_keyboard(deps),
+                buttons=_feature_project_keyboard(deps),
             )
             return
 
         try:
             selected_index = int(parts[2])
         except ValueError:
-            await query.edit_message_text("⚠️ Invalid feature selection.")
+            await ctx.edit_message_text("⚠️ Invalid feature selection.")
             return
 
         if selected_index < 0 or selected_index >= len(features):
-            await query.edit_message_text("⚠️ Invalid feature selection.")
+            await ctx.edit_message_text("⚠️ Invalid feature selection.")
             return
 
         selected = features[selected_index]
@@ -956,7 +934,7 @@ async def feature_callback_handler(
             else []
         )
         remaining_features = [item for idx, item in enumerate(features) if idx != selected_index]
-        context.user_data[FEATURE_STATE_KEY] = {
+        ctx.user_state[FEATURE_STATE_KEY] = {
             **feature_state,
             "project": project_key,
             "items": remaining_features,
@@ -965,19 +943,22 @@ async def feature_callback_handler(
 
         create_feature_task = getattr(deps, "create_feature_task", None)
         if callable(create_feature_task):
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 text="🧠 *Nexus thinking...*",
-                parse_mode="Markdown",
             )
             task_text = _feature_to_task_text(project_key, selected, deps)
-            message_id = str(getattr(query.message, "message_id", "feature-pick"))
-            result = await create_feature_task(task_text, message_id, str(project_key))
+            
+            trigger_message_id = getattr(ctx.raw_event, "message_id", "feature-pick") if hasattr(ctx.raw_event, "message_id") else "feature-pick"
+            if hasattr(ctx.raw_event, "message") and hasattr(ctx.raw_event.message, "message_id"):
+                trigger_message_id = str(ctx.raw_event.message.message_id)
+
+            result = await create_feature_task(task_text, trigger_message_id, str(project_key))
             message = str(result.get("message") or "⚠️ Task processing completed.")
             project_locked = _is_project_locked(feature_state)
-            keyboard_rows = []
+            keyboard_rows: list[list[Button]] = []
             if remaining_features:
                 keyboard_rows.append(
-                    [InlineKeyboardButton("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
+                    [Button("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
                 )
             elif message:
                 message = (
@@ -986,13 +967,12 @@ async def feature_callback_handler(
                 )
             if remaining_features and not project_locked:
                 keyboard_rows.append(
-                    [InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")]
+                    [Button("📁 Choose project", callback_data="feat:choose_project")]
                 )
-            keyboard_rows.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-            keyboard = InlineKeyboardMarkup(keyboard_rows)
-            await query.edit_message_text(
+            keyboard_rows.append([Button("❌ Close", callback_data="flow:close")])
+            await ctx.edit_message_text(
                 text=message,
-                reply_markup=keyboard,
+                buttons=keyboard_rows,
             )
             return
 
@@ -1013,7 +993,7 @@ async def feature_callback_handler(
         keyboard_rows = []
         if remaining_features:
             keyboard_rows.append(
-                [InlineKeyboardButton("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
+                [Button("⬅️ Back to feature list", callback_data=f"feat:project:{project_key}")]
             )
         else:
             detail_lines.extend([
@@ -1023,15 +1003,13 @@ async def feature_callback_handler(
 
         if remaining_features and not project_locked:
             keyboard_rows.append(
-                [InlineKeyboardButton("📁 Choose project", callback_data="feat:choose_project")]
+                [Button("📁 Choose project", callback_data="feat:choose_project")]
             )
-        keyboard_rows.append([InlineKeyboardButton("❌ Close", callback_data="flow:close")])
-        keyboard = InlineKeyboardMarkup(keyboard_rows)
-        await query.edit_message_text(
+        keyboard_rows.append([Button("❌ Close", callback_data="flow:close")])
+        await ctx.edit_message_text(
             text="\n".join(detail_lines),
-            reply_markup=keyboard,
-            parse_mode="Markdown",
+            buttons=keyboard_rows,
         )
         return
 
-    await query.edit_message_text("⚠️ Unknown feature action.")
+    await ctx.edit_message_text("⚠️ Unknown feature action.")

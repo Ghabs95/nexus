@@ -6,25 +6,25 @@ and the nexus-core workflow framework.
 """
 import logging
 import os
-from typing import Optional, Dict, List, Any
+from typing import Any
 
-from config import (
-    get_github_repo,
-    get_default_github_repo,
-    get_default_project,
-    get_project_platform,
-    get_gitlab_base_url,
-    _get_project_config,
-    NEXUS_CORE_STORAGE_DIR,
-    BASE_DIR,
-)
-from state_manager import StateManager
-from audit_store import AuditStore
-from orchestration.plugin_runtime import get_workflow_state_plugin
-from nexus.adapters.storage.file import FileStorage
 from nexus.adapters.git.github import GitHubPlatform
 from nexus.adapters.git.gitlab import GitLabPlatform
+from nexus.adapters.storage.file import FileStorage
 from nexus.core.workflow import WorkflowEngine
+
+from audit_store import AuditStore
+from config import (
+    BASE_DIR,
+    NEXUS_CORE_STORAGE_DIR,
+    _get_project_config,
+    get_default_project,
+    get_github_repo,
+    get_gitlab_base_url,
+    get_project_platform,
+)
+from orchestration.plugin_runtime import get_workflow_state_plugin
+from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ def get_git_platform(repo: str = None, project_name: str = None):
     return GitHubPlatform(repo=repo_name, token=token)
 
 
-def get_workflow_definition_path(project_name: str) -> Optional[str]:
+def get_workflow_definition_path(project_name: str) -> str | None:
     """Get workflow definition path for a project with fallback logic.
     
     Priority:
@@ -123,7 +123,7 @@ async def create_workflow_for_issue(
     tier_name: str,
     task_type: str,
     description: str = ""
-) -> Optional[str]:
+) -> str | None:
     """
     Create a nexus-core workflow for a GitHub issue.
     
@@ -233,7 +233,7 @@ async def resume_workflow(issue_number: str) -> bool:
     return await workflow_plugin.resume_workflow(issue_number)
 
 
-async def get_workflow_status(issue_number: str) -> Optional[Dict]:
+async def get_workflow_status(issue_number: str) -> dict | None:
     """
     Get workflow status for an issue.
     
@@ -256,7 +256,7 @@ async def handle_approval_gate(
     step_num: int,
     step_name: str,
     agent_name: str,
-    approvers: List[str],
+    approvers: list[str],
     approval_timeout: int,
     project: str = "nexus",
 ) -> None:
@@ -305,7 +305,7 @@ async def handle_approval_gate(
 async def complete_step_for_issue(
     issue_number: str,
     completed_agent_type: str,
-    outputs: Dict[str, Any],
+    outputs: dict[str, Any],
     event_id: str = "",
 ):
     """Mark the current running step for *issue_number* as complete.

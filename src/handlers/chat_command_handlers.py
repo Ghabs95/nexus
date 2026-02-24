@@ -1,8 +1,10 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler
+
+from nexus.adapters.notifications.base import Button
+
 from config import get_chat_agent_types, get_chat_agents
 from handlers.inbox_routing_handler import PROJECTS
+from interactive_context import InteractiveContext
 from services.memory_service import (
     create_chat,
     delete_chat,
@@ -11,7 +13,6 @@ from services.memory_service import (
     list_chats,
     set_active_chat,
     update_chat_metadata,
-    rename_chat,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,19 +97,19 @@ def _available_primary_agent_types(chat_data: dict) -> list[str]:
     return [item["agent_type"] for item in _available_chat_agents(chat_data)]
 
 
-def _build_main_menu_keyboard(active_chat_id: str) -> InlineKeyboardMarkup:
+def _build_main_menu_keyboard(active_chat_id: str) -> list[list[Button]]:
     keyboard = [
         [
-            InlineKeyboardButton("📝 New Chat", callback_data="chat:new"),
-            InlineKeyboardButton("📋 Switch Chat", callback_data="chat:list"),
+            Button("📝 New Chat", callback_data="chat:new"),
+            Button("📋 Switch Chat", callback_data="chat:list"),
         ],
         [
-            InlineKeyboardButton("⚙️ Context", callback_data="chat:context"),
-            InlineKeyboardButton("✏️ Rename", callback_data="chat:rename"),
+            Button("⚙️ Context", callback_data="chat:context"),
+            Button("✏️ Rename", callback_data="chat:rename"),
         ],
-        [InlineKeyboardButton("🗑️ Delete Current", callback_data=f"chat:delete:{active_chat_id}")],
+        [Button("🗑️ Delete Current", callback_data=f"chat:delete:{active_chat_id}")],
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return keyboard
 
 
 def _resolve_active_chat_title(chats: list, active_chat_id: str) -> str:
@@ -138,17 +139,17 @@ def _chat_context_summary(chat_data: dict) -> str:
     )
 
 
-def _build_chat_context_keyboard() -> InlineKeyboardMarkup:
+def _build_chat_context_keyboard() -> list[list[Button]]:
     keyboard = [
-        [InlineKeyboardButton("📁 Set Project", callback_data="chat:ctx:project")],
-        [InlineKeyboardButton("🧭 Set Mode", callback_data="chat:ctx:mode")],
-        [InlineKeyboardButton("🤖 Set Primary Agent", callback_data="chat:ctx:agent")],
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data="chat:menu")],
+        [Button("📁 Set Project", callback_data="chat:ctx:project")],
+        [Button("🧭 Set Mode", callback_data="chat:ctx:mode")],
+        [Button("🤖 Set Primary Agent", callback_data="chat:ctx:agent")],
+        [Button("🔙 Back to Menu", callback_data="chat:menu")],
     ]
-    return InlineKeyboardMarkup(keyboard)
+    return keyboard
 
 
-async def _render_menu(query, user_id: int, notice: str = "") -> None:
+async def _render_menu(ctx: InteractiveContext, user_id: int, notice: str = "") -> None:
     active_chat_id = get_active_chat(user_id)
     chats = list_chats(user_id)
     active_chat_title = _resolve_active_chat_title(chats, active_chat_id)
@@ -161,14 +162,20 @@ async def _render_menu(query, user_id: int, notice: str = "") -> None:
     text += f"{_chat_context_summary(active_chat)}\n"
     text += "_(All conversational history is saved under this thread)_"
 
-    await query.edit_message_text(
-        text=text,
-        reply_markup=_build_main_menu_keyboard(active_chat_id),
-        parse_mode="Markdown",
-    )
+    if ctx.query:
+        await ctx.edit_message_text(
+            message_id=ctx.query.message_id,
+            text=text,
+            buttons=_build_main_menu_keyboard(active_chat_id),
+        )
+    else:
+        await ctx.reply_text(
+            text=text,
+            buttons=_build_main_menu_keyboard(active_chat_id),
+        )
 
 
-async def _render_context_menu(query, user_id: int, notice: str = "") -> None:
+async def _render_context_menu(ctx: InteractiveContext, user_id: int, notice: str = "") -> None:
     active_chat_id = get_active_chat(user_id)
     active_chat = get_chat(user_id, active_chat_id)
 
@@ -177,48 +184,54 @@ async def _render_context_menu(query, user_id: int, notice: str = "") -> None:
         text += f"{notice}\n"
     text += _chat_context_summary(active_chat)
 
-    await query.edit_message_text(
-        text=text,
-        reply_markup=_build_chat_context_keyboard(),
-        parse_mode="Markdown",
-    )
+    if ctx.query:
+        await ctx.edit_message_text(
+            message_id=ctx.query.message_id,
+            text=text,
+            buttons=_build_chat_context_keyboard(),
+        )
+    else:
+        await ctx.reply_text(
+            text=text,
+            buttons=_build_chat_context_keyboard(),
+        )
 
 
-def _project_picker_keyboard() -> InlineKeyboardMarkup:
+def _project_picker_keyboard() -> list[list[Button]]:
     keyboard = [
-        [InlineKeyboardButton(label, callback_data=f"chat:ctx:setproject:{key}")]
+        [Button(label, callback_data=f"chat:ctx:setproject:{key}")]
         for key, label in PROJECTS.items()
     ]
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="chat:context")])
-    return InlineKeyboardMarkup(keyboard)
+    keyboard.append([Button("🔙 Back", callback_data="chat:context")])
+    return keyboard
 
 
-def _mode_picker_keyboard() -> InlineKeyboardMarkup:
+def _mode_picker_keyboard() -> list[list[Button]]:
     keyboard = [
-        [InlineKeyboardButton(label, callback_data=f"chat:ctx:setmode:{mode}")]
+        [Button(label, callback_data=f"chat:ctx:setmode:{mode}")]
         for mode, label in CHAT_MODES.items()
     ]
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="chat:context")])
-    return InlineKeyboardMarkup(keyboard)
+    keyboard.append([Button("🔙 Back", callback_data="chat:context")])
+    return keyboard
 
 
-def _agent_picker_keyboard(chat_data: dict) -> InlineKeyboardMarkup:
+def _agent_picker_keyboard(chat_data: dict) -> list[list[Button]]:
     available_agents = _available_chat_agents(chat_data)
     keyboard = [
         [
-            InlineKeyboardButton(
+            Button(
                 _agent_display_label(agent),
                 callback_data=f"chat:ctx:setagent:{agent['agent_type']}",
             )
         ]
         for agent in available_agents
     ]
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="chat:context")])
-    return InlineKeyboardMarkup(keyboard)
+    keyboard.append([Button("🔙 Back", callback_data="chat:context")])
+    return keyboard
 
-async def chat_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def chat_menu_handler(ctx: InteractiveContext):
     """Handler for the /chat command to show the active chat and options."""
-    user_id = update.effective_user.id
+    user_id = int(ctx.user_id)
     
     active_chat_id = get_active_chat(user_id)
     chats = list_chats(user_id)
@@ -226,35 +239,37 @@ async def chat_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_chat_title = _resolve_active_chat_title(chats, active_chat_id)
     active_chat = get_chat(user_id, active_chat_id)
 
-    text = f"🗣️ *Nexus Chat Menu*\n\n"
+    text = "🗣️ *Nexus Chat Menu*\n\n"
     text += f"*Active Chat:* {active_chat_title}\n"
     text += f"{_chat_context_summary(active_chat)}\n"
     text += "_(All conversational history is saved under this thread)_"
     
-    await update.message.reply_text(
+    await ctx.reply_text(
         text=text,
-        reply_markup=_build_main_menu_keyboard(active_chat_id),
-        parse_mode="Markdown"
+        buttons=_build_main_menu_keyboard(active_chat_id)
     )
 
-async def chat_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def chat_callback_handler(ctx: InteractiveContext):
     """Handles inline keyboard callbacks for the chat menu."""
-    query = update.callback_query
-    await query.answer()
+    if not ctx.query:
+        return
+        
+    await ctx.answer_callback_query()
     
-    user_id = update.effective_user.id
-    data = query.data
+    user_id = int(ctx.user_id)
+    data = ctx.query.action_data
+    message_id = ctx.query.message_id
     
     if data == "chat:new":
         chat_id = create_chat(user_id)
-        await _render_menu(query, user_id, notice="✅ *New Chat Created & Activated!*")
+        await _render_menu(ctx, user_id, notice="✅ *New Chat Created & Activated!*")
         
     elif data == "chat:list":
         chats = list_chats(user_id)
         active_chat_id = get_active_chat(user_id)
         
         if not chats:
-            await query.edit_message_text(text="You have no saved chats.")
+            await ctx.edit_message_text(message_id=message_id, text="You have no saved chats.")
             return
             
         text = "📋 *Select a Chat Thread:*"
@@ -263,73 +278,71 @@ async def chat_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id = c.get("id")
             title = c.get("title")
             prefix = "✅ " if chat_id == active_chat_id else ""
-            keyboard.append([InlineKeyboardButton(f"{prefix}{title}", callback_data=f"chat:select:{chat_id}")])
+            keyboard.append([Button(f"{prefix}{title}", callback_data=f"chat:select:{chat_id}")])
             
-        keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="chat:menu")])
-        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        keyboard.append([Button("🔙 Back to Menu", callback_data="chat:menu")])
+        await ctx.edit_message_text(message_id=message_id, text=text, buttons=keyboard)
         
     elif data.startswith("chat:delete:"):
         chat_id = data.split(":")[2]
         delete_chat(user_id, chat_id)
-        await _render_menu(query, user_id, notice="🗑️ *Chat Deleted!*")
+        await _render_menu(ctx, user_id, notice="🗑️ *Chat Deleted!*")
         
     elif data.startswith("chat:select:"):
         chat_id = data.split(":")[2]
         set_active_chat(user_id, chat_id)
-        await _render_menu(query, user_id, notice="✅ *Switched Active Chat!*")
+        await _render_menu(ctx, user_id, notice="✅ *Switched Active Chat!*")
 
     elif data == "chat:rename":
-        context.user_data["pending_chat_rename"] = True
-        await query.edit_message_text(
+        ctx.user_state["pending_chat_rename"] = True
+        await ctx.edit_message_text(
+            message_id=message_id,
             text=(
                 "✏️ *Rename Active Chat*\n\n"
                 "Send the new chat name as a message.\n"
                 "Or tap cancel below."
             ),
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("❌ Cancel", callback_data="chat:rename:cancel")],
-                    [InlineKeyboardButton("🔙 Back to Menu", callback_data="chat:menu")],
-                ]
-            ),
-            parse_mode="Markdown",
+            buttons=[
+                [Button("❌ Cancel", callback_data="chat:rename:cancel")],
+                [Button("🔙 Back to Menu", callback_data="chat:menu")],
+            ]
         )
 
     elif data == "chat:rename:cancel":
-        context.user_data.pop("pending_chat_rename", None)
-        await _render_menu(query, user_id, notice="❎ *Rename canceled.*")
+        ctx.user_state.pop("pending_chat_rename", None)
+        await _render_menu(ctx, user_id, notice="❎ *Rename canceled.*")
 
     elif data == "chat:context":
-        await _render_context_menu(query, user_id)
+        await _render_context_menu(ctx, user_id)
 
     elif data == "chat:ctx:project":
-        await query.edit_message_text(
+        await ctx.edit_message_text(
+            message_id=message_id,
             text="📁 *Select project for active chat:*",
-            reply_markup=_project_picker_keyboard(),
-            parse_mode="Markdown",
+            buttons=_project_picker_keyboard(),
         )
 
     elif data == "chat:ctx:mode":
-        await query.edit_message_text(
+        await ctx.edit_message_text(
+            message_id=message_id,
             text="🧭 *Select mode for active chat:*",
-            reply_markup=_mode_picker_keyboard(),
-            parse_mode="Markdown",
+            buttons=_mode_picker_keyboard(),
         )
 
     elif data == "chat:ctx:agent":
         active_chat_id = get_active_chat(user_id)
         active_chat = get_chat(user_id, active_chat_id)
-        await query.edit_message_text(
+        await ctx.edit_message_text(
+            message_id=message_id,
             text="🤖 *Select primary agent type for active chat:*",
-            reply_markup=_agent_picker_keyboard(active_chat),
-            parse_mode="Markdown",
+            buttons=_agent_picker_keyboard(active_chat),
         )
 
     elif data.startswith("chat:ctx:setproject:"):
         project_key = data.split(":", 3)[3]
         active_chat_id = get_active_chat(user_id)
         if project_key not in PROJECTS:
-            await _render_context_menu(query, user_id, notice="⚠️ Invalid project.")
+            await _render_context_menu(ctx, user_id, notice="⚠️ Invalid project.")
             return
         project_agent_types = get_chat_agent_types(project_key)
         primary_agent_type = project_agent_types[0] if project_agent_types else "triage"
@@ -343,7 +356,7 @@ async def chat_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             },
         )
         await _render_context_menu(
-            query,
+            ctx,
             user_id,
             notice=(
                 f"✅ Project set to *{PROJECTS[project_key]}*.\n"
@@ -355,43 +368,43 @@ async def chat_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         mode = data.split(":", 3)[3]
         active_chat_id = get_active_chat(user_id)
         if mode not in CHAT_MODES:
-            await _render_context_menu(query, user_id, notice="⚠️ Invalid mode.")
+            await _render_context_menu(ctx, user_id, notice="⚠️ Invalid mode.")
             return
         update_chat_metadata(user_id, active_chat_id, {"chat_mode": mode})
-        await _render_context_menu(query, user_id, notice=f"✅ Mode set to *{CHAT_MODES[mode]}*.")
+        await _render_context_menu(ctx, user_id, notice=f"✅ Mode set to *{CHAT_MODES[mode]}*.")
 
     elif data.startswith("chat:ctx:setagent:"):
         agent_type = data.split(":", 3)[3]
         active_chat_id = get_active_chat(user_id)
         active_chat = get_chat(user_id, active_chat_id)
         if agent_type not in _available_primary_agent_types(active_chat):
-            await _render_context_menu(query, user_id, notice="⚠️ Invalid primary agent.")
+            await _render_context_menu(ctx, user_id, notice="⚠️ Invalid primary agent.")
             return
         update_chat_metadata(user_id, active_chat_id, {"primary_agent_type": agent_type})
         await _render_context_menu(
-            query,
+            ctx,
             user_id,
             notice=f"✅ Primary agent set to *{_agent_type_label(agent_type)}* (`{agent_type}`).",
         )
         
     elif data == "chat:menu":
-        context.user_data.pop("pending_chat_rename", None)
-        await _render_menu(query, user_id)
+        ctx.user_state.pop("pending_chat_rename", None)
+        await _render_menu(ctx, user_id)
 
 
-async def chat_agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def chat_agents_handler(ctx: InteractiveContext):
     """Show effective ordered chat agent types for a project.
 
     Usage:
     - /chatagents              -> uses active chat project (or nexus fallback)
     - /chatagents <project>    -> explicit project
     """
-    user_id = update.effective_user.id
+    user_id = int(ctx.user_id)
     active_chat = get_chat(user_id, get_active_chat(user_id))
     metadata = (active_chat or {}).get("metadata") or {}
 
-    if context.args:
-        project_key = str(context.args[0]).strip().lower()
+    if ctx.args:
+        project_key = str(ctx.args[0]).strip().lower()
     else:
         project_key = str(metadata.get("project_key") or "").strip().lower()
 
@@ -400,17 +413,15 @@ async def chat_agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if project_key not in PROJECTS and project_key != "nexus":
         available = ", ".join(sorted(PROJECTS.keys()))
-        await update.message.reply_text(
-            f"⚠️ Unknown project `{project_key}`.\n\nAvailable: {available}",
-            parse_mode="Markdown",
+        await ctx.reply_text(
+            f"⚠️ Unknown project `{project_key}`.\n\nAvailable: {available}"
         )
         return
 
     effective_types = get_chat_agent_types(project_key)
     if not effective_types:
-        await update.message.reply_text(
-            f"⚠️ No chat agent types configured for `{project_key}`.",
-            parse_mode="Markdown",
+        await ctx.reply_text(
+            f"⚠️ No chat agent types configured for `{project_key}`."
         )
         return
 
@@ -419,4 +430,4 @@ async def chat_agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         marker = " *(primary)*" if index == 1 else ""
         lines.append(f"{index}. {_agent_type_label(agent_type)} (`{agent_type}`){marker}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await ctx.reply_text("\n".join(lines))

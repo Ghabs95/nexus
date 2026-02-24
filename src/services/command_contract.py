@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Set
 
-
-TELEGRAM_COMMANDS: Set[str] = {
+TELEGRAM_COMMANDS: set[str] = {
     "start",
     "help",
     "menu",
@@ -48,7 +46,7 @@ TELEGRAM_COMMANDS: Set[str] = {
 }
 
 
-DISCORD_COMMANDS: Set[str] = {
+DISCORD_COMMANDS: set[str] = {
     "chat",
     "track",
     "tracked",
@@ -57,7 +55,7 @@ DISCORD_COMMANDS: Set[str] = {
 }
 
 
-REQUIRED_PARITY_COMMANDS: Set[str] = {
+REQUIRED_PARITY_COMMANDS: set[str] = {
     "chat",
     "track",
     "tracked",
@@ -66,7 +64,7 @@ REQUIRED_PARITY_COMMANDS: Set[str] = {
 }
 
 
-PLATFORM_COMMANDS: Dict[str, Set[str]] = {
+PLATFORM_COMMANDS: dict[str, set[str]] = {
     "telegram": TELEGRAM_COMMANDS,
     "discord": DISCORD_COMMANDS,
 }
@@ -77,7 +75,7 @@ def is_parity_strict_enabled() -> bool:
     return os.getenv("COMMAND_PARITY_STRICT", "false").strip().lower() == "true"
 
 
-def get_command_parity_report() -> Dict[str, Set[str]]:
+def get_command_parity_report() -> dict[str, set[str]]:
     """Build a parity report between Telegram and Discord command sets."""
     telegram = set(PLATFORM_COMMANDS.get("telegram", set()))
     discord = set(PLATFORM_COMMANDS.get("discord", set()))
@@ -88,7 +86,7 @@ def get_command_parity_report() -> Dict[str, Set[str]]:
     }
 
 
-def validate_command_parity(strict: bool | None = None) -> Dict[str, Set[str]]:
+def validate_command_parity(strict: bool | None = None) -> dict[str, set[str]]:
     """Validate command parity and optionally raise when strict mode is enabled."""
     report = get_command_parity_report()
     strict_mode = is_parity_strict_enabled() if strict is None else strict
@@ -105,7 +103,7 @@ def validate_command_parity(strict: bool | None = None) -> Dict[str, Set[str]]:
 
 def validate_required_command_interface() -> None:
     """Ensure both platforms implement required parity commands."""
-    missing: Dict[str, Set[str]] = {}
+    missing: dict[str, set[str]] = {}
     for platform, commands in PLATFORM_COMMANDS.items():
         gap = REQUIRED_PARITY_COMMANDS - set(commands)
         if gap:

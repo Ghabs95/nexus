@@ -5,54 +5,54 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
-from telegram import Update
-from telegram.ext import ContextTypes
+from interactive_context import InteractiveContext
 from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
 class IssueHandlerDeps:
     logger: Any
-    allowed_user_ids: List[int]
+    allowed_user_ids: list[int]
     base_dir: str
     default_repo: str
-    prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
+    prompt_project_selection: Callable[[InteractiveContext, str], Awaitable[None]]
     ensure_project_issue: Callable[
-        [Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[Tuple[Optional[str], Optional[str], List[str]]]
+        [InteractiveContext, str], Awaitable[tuple[str | None, str | None, list[str]]]
     ]
     project_repo: Callable[[str], str]
     project_issue_url: Callable[[str, str], str]
-    get_issue_details: Callable[[str, Optional[str]], Optional[Dict[str, Any]]]
+    get_issue_details: Callable[[str, str | None], dict[str, Any] | None]
     get_direct_issue_plugin: Callable[[str], Any]
-    resolve_project_config_from_task: Callable[[str], Tuple[Optional[str], Optional[Dict[str, Any]]]]
-    invoke_copilot_agent: Callable[..., Tuple[Optional[int], Optional[str]]]
-    get_sop_tier: Callable[[str], Tuple[str, Any, Any]]
-    find_task_file_by_issue: Callable[[str], Optional[str]]
-    resolve_repo: Callable[[Optional[Dict[str, Any]], str], str]
-    build_issue_url: Callable[[str, str, Optional[Dict[str, Any]]], str]
+    resolve_project_config_from_task: Callable[[str], tuple[str | None, dict[str, Any] | None]]
+    invoke_copilot_agent: Callable[..., tuple[int | None, str | None]]
+    get_sop_tier: Callable[[str], tuple[str, Any, Any]]
+    find_task_file_by_issue: Callable[[str], str | None]
+    resolve_repo: Callable[[dict[str, Any] | None, str], str]
+    build_issue_url: Callable[[str, str, dict[str, Any] | None], str]
     user_manager: Any
-    save_tracked_issues: Callable[[Dict[str, Any]], None]
-    tracked_issues_ref: Dict[str, Any]
+    save_tracked_issues: Callable[[dict[str, Any]], None]
+    tracked_issues_ref: dict[str, Any]
     default_issue_url: Callable[[str], str]
     get_project_label: Callable[[str], str]
-    track_short_projects: List[str]
+    track_short_projects: list[str]
 
 
-async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Assign triggered by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def assign_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Assign triggered by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "assign")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "assign")
         return
 
-    project_key, issue_number, rest = await deps.ensure_project_issue(update, context, "assign")
+    project_key, issue_number, rest = await deps.ensure_project_issue(ctx, "assign")
     if not project_key:
         return
 
@@ -66,14 +66,13 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         else:
             assignee = raw_assignee
 
-    msg = await update.effective_message.reply_text(f"🔄 Assigning issue #{issue_number}...")
+    msg_id = await ctx.reply_text(f"🔄 Assigning issue #{issue_number}...")
 
     try:
         plugin = deps.get_direct_issue_plugin(repo)
         if not plugin or not plugin.add_assignee(issue_number, assignee):
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to assign issue #{issue_number}",
             )
             return
@@ -81,45 +80,41 @@ async def assign_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         display_assignee = assignee
         if display_assignee == "@me":
             display_assignee = "you (@me)"
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"✅ Issue #{issue_number} assigned to {display_assignee}!\n\n{issue_url}",
-            parse_mode="Markdown",
         )
     except Exception as exc:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Failed to assign issue #{issue_number}\n\nError: {exc}",
         )
 
 
-async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Implement requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def implement_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Implement requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "implement")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "implement")
         return
 
-    project_key, issue_number, _ = await deps.ensure_project_issue(update, context, "implement")
+    project_key, issue_number, _ = await deps.ensure_project_issue(ctx, "implement")
     if not project_key:
         return
 
     repo = deps.project_repo(project_key)
     issue_url = deps.project_issue_url(project_key, issue_number)
 
-    msg = await update.message.reply_text(f"🔔 Requesting Copilot implementation for issue #{issue_number}...")
+    msg_id = await ctx.reply_text(f"🔔 Requesting Copilot implementation for issue #{issue_number}...")
 
     try:
         plugin = deps.get_direct_issue_plugin(repo)
         if not plugin:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text="❌ Failed to initialize GitHub issue plugin",
             )
             return
@@ -130,9 +125,8 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             "Requested Copilot implementation",
         )
         if not plugin.add_label(issue_number, "agent:requested"):
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to request implementation for issue #{issue_number}.",
             )
             return
@@ -145,64 +139,58 @@ async def implement_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
 
         if not plugin.add_comment(issue_number, comment):
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to request implementation for issue #{issue_number}.",
             )
             return
 
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=(
                 f"✅ Requested implementation for issue #{issue_number}. "
                 f"ProjectLead has been notified.\n\n{issue_url}"
             ),
-            parse_mode="Markdown",
         )
     except Exception as exc:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Failed to request implementation for issue #{issue_number}.\n\nError: {exc}",
         )
 
 
-async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Prepare requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def prepare_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Prepare requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "prepare")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "prepare")
         return
 
-    project_key, issue_number, _ = await deps.ensure_project_issue(update, context, "prepare")
+    project_key, issue_number, _ = await deps.ensure_project_issue(ctx, "prepare")
     if not project_key:
         return
 
     repo = deps.project_repo(project_key)
     issue_url = deps.project_issue_url(project_key, issue_number)
 
-    msg = await update.message.reply_text(f"🔧 Preparing issue #{issue_number} for Copilot...")
+    msg_id = await ctx.reply_text(f"🔧 Preparing issue #{issue_number} for Copilot...")
 
     try:
         plugin = deps.get_direct_issue_plugin(repo)
         if not plugin:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text="❌ Failed to initialize GitHub issue plugin",
             )
             return
 
         data = plugin.get_issue(issue_number, ["body", "title"])
         if not data:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to prepare issue #{issue_number}.",
             )
             return
@@ -214,14 +202,14 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
         branch_name = branch_match.group(1) if branch_match else "<create-branch>"
         task_file = taskfile_match.group(1) if taskfile_match else None
 
-        copilot_block = """
+        copilot_block = f"""
 ## Copilot Instructions
 
 - Follow existing repository style and tests.
-- Create a branch: `{branch}` and open a PR against the appropriate base branch.
+- Create a branch: `{branch_name}` and open a PR against the appropriate base branch.
 - Include unit tests or update existing tests when applicable.
 - Keep changes minimal and focused; reference the task file if present.
-""".format(branch=branch_name)
+"""
 
         if task_file:
             copilot_block += f"\n**Suggested files to modify:** `{task_file}`\n"
@@ -231,40 +219,34 @@ async def prepare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
         new_body = body + "\n\n---\n\n" + copilot_block
 
         if not plugin.update_issue_body(issue_number, new_body):
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to prepare issue #{issue_number}.",
             )
             return
 
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=(
                 f"✅ Prepared issue #{issue_number} for Copilot. You can now click "
                 f"'Code with agent mode' in GitHub or ask ProjectLead to approve.\n\n{issue_url}"
             ),
-            parse_mode="Markdown",
         )
     except Exception as exc:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Failed to prepare issue #{issue_number}.\n\nError: {exc}",
         )
 
 
-async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Track requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def track_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Track requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    user = update.effective_user
-
-    if not context.args:
-        await update.effective_message.reply_text(
+    if not ctx.args:
+        await ctx.reply_text(
             "⚠️ Usage:\n"
             "/track <issue#> - Track issue globally\n"
             "/track <project> <issue#> - Track issue per-project\n\n"
@@ -275,38 +257,38 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
         )
         return
 
-    if len(context.args) >= 2:
-        project = context.args[0].lower()
-        issue_num = context.args[1].lstrip("#")
+    if len(ctx.args) >= 2:
+        project = ctx.args[0].lower()
+        issue_num = ctx.args[1].lstrip("#")
 
         if project not in deps.track_short_projects:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 f"❌ Invalid project '{project}'.\n"
                 f"Valid projects: {', '.join(deps.track_short_projects)}"
             )
             return
 
         if not issue_num.isdigit():
-            await update.effective_message.reply_text("❌ Invalid issue number.")
+            await ctx.reply_text("❌ Invalid issue number.")
             return
 
         deps.user_manager.track_issue(
-            telegram_id=user.id,
+            telegram_id=int(ctx.user_id),
             project=project,
             issue_number=issue_num,
-            username=user.username,
-            first_name=user.first_name,
+            username=f"user_{ctx.user_id}",
+            first_name="User",
         )
 
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"👁️ Now tracking {project.upper()} issue #{issue_num} for you\n\n"
             "Use /myissues to see all your tracked issues\n"
             f"Use /untrack {project} {issue_num} to stop tracking"
         )
     else:
-        issue_num = context.args[0].lstrip("#")
+        issue_num = ctx.args[0].lstrip("#")
         if not issue_num.isdigit():
-            await update.effective_message.reply_text("❌ Invalid issue number.")
+            await ctx.reply_text("❌ Invalid issue number.")
             return
 
         details = deps.get_issue_details(issue_num)
@@ -323,7 +305,7 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
         deps.save_tracked_issues(deps.tracked_issues_ref)
 
         if details:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 f"👁️ Now tracking issue #{issue_num} (global)\n\n"
                 f"Title: {details.get('title', 'N/A')}\n"
                 f"Status: {details.get('state', 'N/A')}\n"
@@ -332,55 +314,52 @@ async def track_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
                 "💡 Tip: Use /track <project> <issue#> for per-project tracking"
             )
         else:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 "⚠️ Could not fetch issue details, but tracking started.\n\n"
                 f"🔗 {deps.default_issue_url(issue_num)}"
             )
 
 
-async def untrack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Untrack requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def untrack_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Untrack requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    user = update.effective_user
-
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "untrack")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "untrack")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "untrack")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "untrack")
     if not project_key:
         return
 
     success = deps.user_manager.untrack_issue(
-        telegram_id=user.id,
+        telegram_id=int(ctx.user_id),
         project=project_key,
         issue_number=issue_num,
     )
 
     if success:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"✅ Stopped tracking {deps.get_project_label(project_key)} issue #{issue_num}"
         )
     else:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"❌ You weren't tracking {deps.get_project_label(project_key)} issue #{issue_num}"
         )
 
 
-async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"My issues requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def myissues_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"My issues requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    user = update.effective_user
-    tracked = deps.user_manager.get_user_tracked_issues(user.id)
+    tracked = deps.user_manager.get_user_tracked_issues(int(ctx.user_id))
 
     if not tracked:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             "📋 You're not tracking any issues yet.\n\n"
             "Use /track <project> <issue#> to start tracking.\n\n"
             "Examples:\n"
@@ -403,19 +382,19 @@ async def myissues_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     message += f"<b>Total:</b> {total_issues} issue(s)\n\n"
     message += "<i>Use /untrack &lt;project&gt; &lt;issue#&gt; to stop tracking</i>"
 
-    await update.effective_message.reply_text(message, parse_mode="HTML")
+    await ctx.reply_text(message)
 
 
-async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
+async def tracked_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
     """Show globally tracked issues stored in StateManager."""
-    deps.logger.info(f"Global tracked issues requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Global tracked issues requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
     tracked = deps.tracked_issues_ref or {}
     if not tracked:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             "📌 No globally tracked issues.\n\n"
             "Use /track <issue#> to add one."
         )
@@ -433,7 +412,7 @@ async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
         lines.append(f"• #{issue_num} ({project}) — {status}")
 
     if active_total == 0:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             "📌 No active globally tracked issues.\n\n"
             "Use /track <issue#> to add one."
         )
@@ -441,43 +420,41 @@ async def tracked_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
 
     lines.append("")
     lines.append(f"<b>Active:</b> {active_total}")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+    await ctx.reply_text("\n".join(lines))
 
 
-async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Comments requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def comments_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Comments requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "comments")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "comments")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "comments")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "comments")
     if not project_key:
         return
 
     repo = deps.project_repo(project_key)
     issue_url = deps.project_issue_url(project_key, issue_num)
 
-    msg = await update.effective_message.reply_text(f"💬 Fetching comments for issue #{issue_num}...")
+    msg_id = await ctx.reply_text(f"💬 Fetching comments for issue #{issue_num}...")
 
     try:
         plugin = deps.get_direct_issue_plugin(repo)
         if not plugin:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to fetch comments for issue #{issue_num}",
             )
             return
 
         data = plugin.get_issue(issue_num, ["comments", "title"])
         if not data:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to fetch comments for issue #{issue_num}",
             )
             return
@@ -486,15 +463,13 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, d
         comments = data.get("comments", [])
 
         if not comments:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=(
                     f"💬 **Issue #{issue_num}: {title}**\n\n"
                     "No comments yet.\n\n"
                     f"🔗 {issue_url}"
                 ),
-                parse_mode="Markdown",
             )
             return
 
@@ -527,58 +502,46 @@ async def comments_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, d
 
         max_len = 3500
         if len(comments_text) <= max_len:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=comments_text,
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
             )
         else:
             chunks = [comments_text[i : i + max_len] for i in range(0, len(comments_text), max_len)]
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=chunks[0],
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
             )
             for part in chunks[1:]:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=part,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True,
-                )
+                await ctx.reply_text(text=part)
 
     except Exception as exc:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Error: {exc}",
         )
 
 
-async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: IssueHandlerDeps) -> None:
-    deps.logger.info(f"Respond requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def respond_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
+    deps.logger.info(f"Respond requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "respond")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "respond")
         return
 
-    project_key, issue_num, rest = await deps.ensure_project_issue(update, context, "respond")
+    project_key, issue_num, rest = await deps.ensure_project_issue(ctx, "respond")
     if not project_key:
         return
     if not rest:
-        await update.effective_message.reply_text("⚠️ Please include a response message.")
+        await ctx.reply_text("⚠️ Please include a response message.")
         return
 
     response_text = " ".join(rest)
 
-    msg = await update.effective_message.reply_text(f"📝 Posting response to issue #{issue_num}...")
+    msg_id = await ctx.reply_text(f"📝 Posting response to issue #{issue_num}...")
 
     try:
         task_file = deps.find_task_file_by_issue(issue_num)
@@ -593,14 +556,14 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
                 task_file = match.group(1) if match else None
 
         if not task_file or not os.path.exists(task_file):
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 "⚠️ Posted comment but couldn't find task file to continue agent."
             )
             return
 
         project_name, config = deps.resolve_project_config_from_task(task_file)
         if not config or not config.get("agents_dir"):
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 "⚠️ Posted comment but no agents config for project."
             )
             return
@@ -609,28 +572,26 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
 
         plugin = deps.get_direct_issue_plugin(repo)
         if not plugin or not plugin.add_comment(issue_num, response_text):
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Failed to post response to issue #{issue_num}.",
             )
             return
 
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"✅ Response posted to issue #{issue_num}.\n\n🤖 Continuing agent...",
         )
 
         if not details:
             details = deps.get_issue_details(issue_num, repo=repo)
             if not details:
-                await update.effective_message.reply_text(
+                await ctx.reply_text(
                     "⚠️ Posted comment but couldn't fetch issue details to continue agent."
                 )
                 return
 
-        with open(task_file, "r", encoding="utf-8") as handle:
+        with open(task_file, encoding="utf-8") as handle:
             content = handle.read()
 
         type_match = re.search(r"\*\*Type:\*\*\s*(.+)", content)
@@ -661,34 +622,31 @@ async def respond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, de
         )
 
         if pid:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 f"✅ Agent resumed for issue #{issue_num} (PID: {pid}, Tool: {tool_used})\n\n"
                 f"Check /logs {issue_num} to monitor progress.\n\n"
                 f"🔗 {issue_url}"
             )
         else:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 f"⚠️ Response posted but failed to continue agent.\n"
                 f"Use /continue {issue_num} to resume manually.\n\n"
                 f"🔗 {issue_url}"
             )
 
     except subprocess.TimeoutExpired:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Timeout posting comment to issue #{issue_num}",
         )
     except subprocess.CalledProcessError as exc:
         error = exc.stderr if exc.stderr else str(exc)
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Failed to post comment: {error}",
         )
     except Exception as exc:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Error: {exc}",
         )

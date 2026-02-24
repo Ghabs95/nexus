@@ -1,9 +1,8 @@
 """Agent monitoring and recovery - handles timeouts, retries, and failures."""
 import logging
-import time
 import os
-from typing import Optional, Tuple
-from datetime import datetime
+import time
+
 from audit_store import AuditStore
 from orchestration.plugin_runtime import get_runtime_ops_plugin
 
@@ -27,8 +26,8 @@ class AgentMonitor:
     def check_timeout(
         issue_num: str,
         log_file: str,
-        timeout_seconds: Optional[int] = None,
-    ) -> Tuple[bool, Optional[int]]:
+        timeout_seconds: int | None = None,
+    ) -> tuple[bool, int | None]:
         """
         Check if an agent has timed out.
         
@@ -44,8 +43,8 @@ class AgentMonitor:
     def check_timeout_with_threshold(
         issue_num: str,
         log_file: str,
-        timeout_seconds: Optional[int] = None,
-    ) -> Tuple[bool, Optional[int]]:
+        timeout_seconds: int | None = None,
+    ) -> tuple[bool, int | None]:
         """Check if an agent timed out using a provided timeout value.
 
         Falls back to 3600 seconds when timeout is missing/invalid.
@@ -139,7 +138,7 @@ class WorkflowRouter:
     """Routes workflows based on issue labels and automatic tier selection."""
 
     @staticmethod
-    def detect_workflow_tier(labels: list) -> Optional[str]:
+    def detect_workflow_tier(labels: list) -> str | None:
         """
         Detect workflow tier from issue labels.
         
@@ -177,7 +176,7 @@ class WorkflowRouter:
         return "full"
 
     @staticmethod
-    def suggest_tier_label(issue_title: str, issue_body: str) -> Optional[str]:
+    def suggest_tier_label(issue_title: str, issue_body: str) -> str | None:
         """
         Suggest a workflow tier label based on issue title/body.
         

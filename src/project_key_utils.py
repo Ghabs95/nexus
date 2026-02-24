@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
 
 from config import normalize_project_key
 
@@ -13,6 +12,6 @@ def normalize_project_key_str(value: str) -> str:
     return str(normalized or "")
 
 
-def normalize_project_key_optional(value: str) -> Optional[str]:
+def normalize_project_key_optional(value: str) -> str | None:
     """Normalize project key and preserve optional output semantics."""
     return normalize_project_key(value)

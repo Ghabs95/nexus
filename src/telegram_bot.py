@@ -1,139 +1,266 @@
-import glob
 import asyncio
+import contextlib
+import glob
 import json
 import logging
 import os
 import re
-import subprocess
-import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from typing import Any
+
+from nexus.adapters.git.utils import build_issue_url, resolve_repo
+from nexus.core.completion import scan_for_completions
+from nexus.core.utils.logging_filters import install_secret_redaction
+from nexus.plugins.builtin.ai_runtime_plugin import AIProvider
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler,
-    MessageHandler, CallbackQueryHandler, ConversationHandler, filters
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+from alerting import init_alerting_system
+from analytics import get_stats_report
+from audit_store import AuditStore
+from commands.workflow import (
+    pause_handler as workflow_pause_handler,
+)
+from commands.workflow import (
+    resume_handler as workflow_resume_handler,
+)
+from commands.workflow import (
+    stop_handler as workflow_stop_handler,
 )
 
 # Import configuration from centralized config module
 from config import (
-    TELEGRAM_TOKEN, TELEGRAM_ALLOWED_USER_IDS, BASE_DIR,
-    DATA_DIR, TRACKED_ISSUES_FILE, get_github_repo, get_github_repos, get_default_github_repo,
-    get_default_project,
-    get_track_short_projects,
-    PROJECT_CONFIG, ensure_data_dir,
-    TELEGRAM_BOT_LOG_FILE, TELEGRAM_CHAT_ID, ORCHESTRATOR_CONFIG, LOGS_DIR,
-    get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir, get_tasks_logs_dir, get_nexus_dir_name,
     AI_PERSONA,
+    BASE_DIR,
+    LOGS_DIR,
     NEXUS_CORE_STORAGE_DIR,
+    ORCHESTRATOR_CONFIG,
+    PROJECT_CONFIG,
+    TELEGRAM_ALLOWED_USER_IDS,
+    TELEGRAM_BOT_LOG_FILE,
+    TELEGRAM_CHAT_ID,
+    TELEGRAM_TOKEN,
+    get_default_github_repo,
+    get_default_project,
+    get_github_repo,
+    get_github_repos,
+    get_inbox_dir,
+    get_nexus_dir_name,
+    get_tasks_active_dir,
+    get_tasks_closed_dir,
+    get_tasks_logs_dir,
+    get_track_short_projects,
 )
-from services.memory_service import append_message, create_chat, get_chat, get_chat_history, rename_chat, get_active_chat
-from state_manager import StateManager
-from audit_store import AuditStore
-from commands.workflow import (
-    pause_handler as workflow_pause_handler,
-    resume_handler as workflow_resume_handler,
-    stop_handler as workflow_stop_handler,
-)
-from runtime.agent_launcher import invoke_copilot_agent, get_sop_tier_from_issue
-from inbox_processor import get_sop_tier, _normalize_agent_reference
-from nexus.core.completion import scan_for_completions
-from orchestration.ai_orchestrator import get_orchestrator
-from nexus.plugins.builtin.ai_runtime_plugin import AIProvider
-from orchestration.plugin_runtime import get_profiled_plugin, get_runtime_ops_plugin, get_workflow_state_plugin
-from services.workflow_signal_sync import (
-    extract_structured_completion_signals,
-    read_latest_local_completion,
-    write_local_completion_from_signal,
-)
-from services.workflow_ops_service import (
-    build_workflow_snapshot,
-    reconcile_issue_from_signals,
-)
-from services.workflow_control_service import (
-    kill_issue_agent,
-    prepare_continue_context,
-)
-from nexus.adapters.git.utils import build_issue_url, resolve_repo
-from project_key_utils import normalize_project_key_optional as _normalize_project_key
-from handlers.workflow_command_handlers import (
-    WorkflowHandlerDeps,
-    continue_handler as workflow_continue_handler,
-    forget_handler as workflow_forget_handler,
-    kill_handler as workflow_kill_handler,
-    pause_handler as workflow_pause_picker_handler,
-    reconcile_handler as workflow_reconcile_handler,
-    reprocess_handler as workflow_reprocess_handler,
-    resume_handler as workflow_resume_picker_handler,
-    stop_handler as workflow_stop_picker_handler,
-    wfstate_handler as workflow_wfstate_handler,
-)
-from handlers.visualize_command_handlers import (
-    VisualizeHandlerDeps,
-    visualize_handler as workflow_visualize_handler,
-)
-from handlers.monitoring_command_handlers import (
-    MonitoringHandlerDeps,
-    active_handler as monitoring_active_handler,
-    fuse_handler as monitoring_fuse_handler,
-    logs_handler as monitoring_logs_handler,
-    logsfull_handler as monitoring_logsfull_handler,
-    status_handler as monitoring_status_handler,
-    tail_handler as monitoring_tail_handler,
-    tailstop_handler as monitoring_tailstop_handler,
-)
-from handlers.issue_command_handlers import (
-    IssueHandlerDeps,
-    assign_handler as issue_assign_handler,
-    comments_handler as issue_comments_handler,
-    implement_handler as issue_implement_handler,
-    myissues_handler as issue_myissues_handler,
-    prepare_handler as issue_prepare_handler,
-    respond_handler as issue_respond_handler,
-    track_handler as issue_track_handler,
-    tracked_handler as issue_tracked_handler,
-    untrack_handler as issue_untrack_handler,
-)
-from handlers.ops_command_handlers import (
-    OpsHandlerDeps,
-    agents_handler as ops_agents_handler,
-    audit_handler as ops_audit_handler,
-    direct_handler as ops_direct_handler,
-    stats_handler as ops_stats_handler,
+from error_handling import format_error_for_user
+from handlers.audio_transcription_handler import (
+    AudioTranscriptionDeps,
+    transcribe_telegram_voice,
 )
 from handlers.callback_command_handlers import (
     CallbackHandlerDeps,
+)
+from handlers.callback_command_handlers import (
     close_flow_handler as callback_close_flow_handler,
+)
+from handlers.callback_command_handlers import (
     flow_close_handler as callback_flow_close_handler,
+)
+from handlers.callback_command_handlers import (
     inline_keyboard_handler as callback_inline_keyboard_handler,
+)
+from handlers.callback_command_handlers import (
     issue_picker_handler as callback_issue_picker_handler,
+)
+from handlers.callback_command_handlers import (
     menu_callback_handler as callback_menu_callback_handler,
+)
+from handlers.callback_command_handlers import (
     monitor_project_picker_handler as callback_monitor_project_picker_handler,
+)
+from handlers.callback_command_handlers import (
     project_picker_handler as callback_project_picker_handler,
 )
-from handlers.chat_command_handlers import chat_menu_handler, chat_callback_handler, chat_agents_handler
-from handlers.audio_transcription_handler import AudioTranscriptionDeps, transcribe_telegram_voice
+from handlers.chat_command_handlers import (
+    chat_agents_handler,
+    chat_callback_handler,
+    chat_menu_handler,
+)
+from handlers.common_routing import extract_json_dict, route_task_with_context
+from handlers.feature_ideation_handlers import (
+    FeatureIdeationHandlerDeps,
+    handle_feature_ideation_request,
+)
+from handlers.feature_ideation_handlers import (
+    feature_callback_handler as core_feature_callback_handler,
+)
 from handlers.hands_free_routing_handler import (
     HandsFreeRoutingDeps,
     resolve_pending_project_selection,
     route_hands_free_text,
 )
-from handlers.feature_ideation_handlers import (
-    FeatureIdeationHandlerDeps,
-    feature_callback_handler as core_feature_callback_handler,
-    handle_feature_ideation_request,
+from handlers.inbox_routing_handler import (
+    PROJECTS,
+    TYPES,
+    process_inbox_task,
+    save_resolved_task,
 )
-from error_handling import format_error_for_user, run_command_with_retry
-from analytics import get_stats_report
-from rate_limiter import get_rate_limiter, RateLimit
+from handlers.issue_command_handlers import (
+    IssueHandlerDeps,
+)
+from handlers.issue_command_handlers import (
+    assign_handler as issue_assign_handler,
+)
+from handlers.issue_command_handlers import (
+    comments_handler as issue_comments_handler,
+)
+from handlers.issue_command_handlers import (
+    implement_handler as issue_implement_handler,
+)
+from handlers.issue_command_handlers import (
+    myissues_handler as issue_myissues_handler,
+)
+from handlers.issue_command_handlers import (
+    prepare_handler as issue_prepare_handler,
+)
+from handlers.issue_command_handlers import (
+    respond_handler as issue_respond_handler,
+)
+from handlers.issue_command_handlers import (
+    track_handler as issue_track_handler,
+)
+from handlers.issue_command_handlers import (
+    tracked_handler as issue_tracked_handler,
+)
+from handlers.issue_command_handlers import (
+    untrack_handler as issue_untrack_handler,
+)
+from handlers.monitoring_command_handlers import (
+    MonitoringHandlerDeps,
+)
+from handlers.monitoring_command_handlers import (
+    active_handler as monitoring_active_handler,
+)
+from handlers.monitoring_command_handlers import (
+    fuse_handler as monitoring_fuse_handler,
+)
+from handlers.monitoring_command_handlers import (
+    logs_handler as monitoring_logs_handler,
+)
+from handlers.monitoring_command_handlers import (
+    logsfull_handler as monitoring_logsfull_handler,
+)
+from handlers.monitoring_command_handlers import (
+    status_handler as monitoring_status_handler,
+)
+from handlers.monitoring_command_handlers import (
+    tail_handler as monitoring_tail_handler,
+)
+from handlers.monitoring_command_handlers import (
+    tailstop_handler as monitoring_tailstop_handler,
+)
+from handlers.ops_command_handlers import (
+    OpsHandlerDeps,
+)
+from handlers.ops_command_handlers import (
+    agents_handler as ops_agents_handler,
+)
+from handlers.ops_command_handlers import (
+    audit_handler as ops_audit_handler,
+)
+from handlers.ops_command_handlers import (
+    direct_handler as ops_direct_handler,
+)
+from handlers.ops_command_handlers import (
+    stats_handler as ops_stats_handler,
+)
+from handlers.visualize_command_handlers import (
+    VisualizeHandlerDeps,
+)
+from handlers.visualize_command_handlers import (
+    visualize_handler as workflow_visualize_handler,
+)
+from handlers.workflow_command_handlers import (
+    WorkflowHandlerDeps,
+)
+from handlers.workflow_command_handlers import (
+    continue_handler as workflow_continue_handler,
+)
+from handlers.workflow_command_handlers import (
+    forget_handler as workflow_forget_handler,
+)
+from handlers.workflow_command_handlers import (
+    kill_handler as workflow_kill_handler,
+)
+from handlers.workflow_command_handlers import (
+    pause_handler as workflow_pause_picker_handler,
+)
+from handlers.workflow_command_handlers import (
+    reconcile_handler as workflow_reconcile_handler,
+)
+from handlers.workflow_command_handlers import (
+    reprocess_handler as workflow_reprocess_handler,
+)
+from handlers.workflow_command_handlers import (
+    resume_handler as workflow_resume_picker_handler,
+)
+from handlers.workflow_command_handlers import (
+    stop_handler as workflow_stop_picker_handler,
+)
+from handlers.workflow_command_handlers import (
+    wfstate_handler as workflow_wfstate_handler,
+)
+from inbox_processor import _normalize_agent_reference, get_sop_tier
+from orchestration.ai_orchestrator import get_orchestrator
+from orchestration.plugin_runtime import (
+    get_profiled_plugin,
+    get_runtime_ops_plugin,
+    get_workflow_state_plugin,
+)
+from project_key_utils import normalize_project_key_optional as _normalize_project_key
+from rate_limiter import RateLimit, get_rate_limiter
 from report_scheduler import ReportScheduler
+from runtime.agent_launcher import get_sop_tier_from_issue, invoke_copilot_agent
+from services.command_contract import (
+    validate_command_parity,
+    validate_required_command_interface,
+)
+from services.memory_service import (
+    append_message,
+    create_chat,
+    get_active_chat,
+    get_chat,
+    get_chat_history,
+    rename_chat,
+)
+from services.workflow_control_service import (
+    kill_issue_agent,
+    prepare_continue_context,
+)
+from services.workflow_ops_service import (
+    build_workflow_snapshot,
+    reconcile_issue_from_signals,
+)
+from services.workflow_signal_sync import (
+    extract_structured_completion_signals,
+    read_latest_local_completion,
+    write_local_completion_from_signal,
+)
+from state_manager import StateManager
 from user_manager import get_user_manager
-from alerting import init_alerting_system
-from handlers.inbox_routing_handler import process_inbox_task, save_resolved_task, PROJECTS, TYPES
-from handlers.common_routing import route_task_with_context, extract_json_dict
-from services.command_contract import validate_command_parity, validate_required_command_interface
-from nexus.core.utils.logging_filters import install_secret_redaction
-
 
 # --- LOGGING ---
 logger = logging.getLogger(__name__)
@@ -339,7 +466,7 @@ def _callback_handler_deps() -> CallbackHandlerDeps:
 
 
 def _feature_ideation_handler_deps() -> FeatureIdeationHandlerDeps:
-    async def _create_feature_task(text: str, message_id: str, project_key: str) -> Dict[str, Any]:
+    async def _create_feature_task(text: str, message_id: str, project_key: str) -> dict[str, Any]:
         return await process_inbox_task(
             text,
             orchestrator,
@@ -459,7 +586,7 @@ def get_issue_details(issue_num, repo: str = None):
         return None
 
 
-def _get_expected_running_agent_from_workflow(issue_num: str) -> Optional[str]:
+def _get_expected_running_agent_from_workflow(issue_num: str) -> str | None:
     """Return the current RUNNING workflow agent for an issue, if available."""
     workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
     if not workflow_id:
@@ -471,7 +598,7 @@ def _get_expected_running_agent_from_workflow(issue_num: str) -> Optional[str]:
         f"{workflow_id}.json",
     )
     try:
-        with open(workflow_path, "r", encoding="utf-8") as handle:
+        with open(workflow_path, encoding="utf-8") as handle:
             payload = json.load(handle)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
@@ -499,11 +626,11 @@ def _get_expected_running_agent_from_workflow(issue_num: str) -> Optional[str]:
     return None
 
 
-def _extract_structured_completion_signals(comments: List[dict]) -> List[Dict[str, str]]:
+def _extract_structured_completion_signals(comments: list[dict]) -> list[dict[str, str]]:
     return extract_structured_completion_signals(comments)
 
 
-def _write_local_completion_from_signal(project_key: str, issue_num: str, signal: Dict[str, str]) -> str:
+def _write_local_completion_from_signal(project_key: str, issue_num: str, signal: dict[str, str]) -> str:
     return write_local_completion_from_signal(
         BASE_DIR,
         get_nexus_dir_name(),
@@ -517,7 +644,7 @@ def _write_local_completion_from_signal(project_key: str, issue_num: str, signal
     )
 
 
-def _read_latest_local_completion(issue_num: str) -> Optional[Dict[str, Any]]:
+def _read_latest_local_completion(issue_num: str) -> dict[str, Any] | None:
     return read_latest_local_completion(BASE_DIR, get_nexus_dir_name(), issue_num)
 
 
@@ -552,7 +679,7 @@ def read_log_matches(log_path, issue_num, issue_url=None, max_lines=20):
     matches = []
     needle = f"#{issue_num}"
     try:
-        with open(log_path, "r") as f:
+        with open(log_path) as f:
             for line in f:
                 if needle in line or (issue_url and issue_url in line):
                     matches.append(line.rstrip())
@@ -593,7 +720,7 @@ def read_latest_log_tail(task_file, max_lines=20):
     log_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     latest = log_files[0]
     try:
-        with open(latest, "r") as f:
+        with open(latest) as f:
             lines = f.readlines()
         return [f"[{os.path.basename(latest)}] {line.rstrip()}" for line in lines[-max_lines:]]
     except Exception as e:
@@ -643,7 +770,7 @@ def read_latest_log_full(task_file):
     log_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     latest = log_files[0]
     try:
-        with open(latest, "r") as f:
+        with open(latest) as f:
             lines = f.readlines()
         return [f"[{os.path.basename(latest)}] {line.rstrip()}" for line in lines]
     except Exception as e:
@@ -698,7 +825,7 @@ def find_task_file_by_issue(issue_num):
     for pattern in patterns:
         for path in glob.glob(pattern, recursive=True):
             try:
-                with open(path, "r") as f:
+                with open(path) as f:
                     content = f.read()
                 if re.search(
                     r"\*\*Issue:\*\*\s*https?://github.com/.+/issues/" + re.escape(issue_num),
@@ -710,7 +837,7 @@ def find_task_file_by_issue(issue_num):
     return None
 
 
-def _iter_project_keys() -> List[str]:
+def _iter_project_keys() -> list[str]:
     keys = []
     for key, cfg in PROJECT_CONFIG.items():
         if not isinstance(cfg, dict):
@@ -730,7 +857,7 @@ def _get_project_label(project_key: str) -> str:
     return PROJECTS.get(project_key, project_key)
 
 
-def _get_project_root(project_key: str) -> Optional[str]:
+def _get_project_root(project_key: str) -> str | None:
     cfg = PROJECT_CONFIG.get(project_key)
     if not isinstance(cfg, dict):
         return None
@@ -740,7 +867,7 @@ def _get_project_root(project_key: str) -> Optional[str]:
     return os.path.join(BASE_DIR, workspace)
 
 
-def _get_project_logs_dir(project_key: str) -> Optional[str]:
+def _get_project_logs_dir(project_key: str) -> str | None:
     project_root = _get_project_root(project_key)
     if not project_root:
         return None
@@ -767,7 +894,7 @@ def _default_issue_url(issue_num: str) -> str:
         return f"https://github.com/{GITHUB_REPO}/issues/{issue_num}"
 
 
-def _extract_project_from_nexus_path(path: str) -> Optional[str]:
+def _extract_project_from_nexus_path(path: str) -> str | None:
     if not path or "/.nexus/" not in path:
         return None
 
@@ -801,7 +928,7 @@ async def _prompt_monitor_project_selection(
         await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-def _list_project_issues(project_key: str, state: str = "open", limit: int = 10) -> List[dict]:
+def _list_project_issues(project_key: str, state: str = "open", limit: int = 10) -> list[dict]:
     """Fetch recent issues from a project's GitHub repo.
 
     Returns a list of dicts with 'number', 'title', and 'state' keys.
@@ -913,7 +1040,7 @@ async def _prompt_project_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data["pending_command"] = command
 
 
-def _parse_project_issue_args(args: List[str]) -> Tuple[Optional[str], Optional[str], List[str]]:
+def _parse_project_issue_args(args: list[str]) -> tuple[str | None, str | None, list[str]]:
     if len(args) < 2:
         return None, None, []
     project_key = _normalize_project_key(args[0])
@@ -922,7 +1049,7 @@ def _parse_project_issue_args(args: List[str]) -> Tuple[Optional[str], Optional[
     return project_key, issue_num, rest
 
 
-async def _ensure_project_issue(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+async def _ensure_project_issue(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str) -> tuple[str | None, str | None, list[str]]:
     project_key, issue_num, rest = _parse_project_issue_args(context.args)
     if not project_key or not issue_num:
         if len(context.args) == 1:
@@ -1023,7 +1150,7 @@ async def _dispatch_command(
     command: str,
     project_key: str,
     issue_num: str,
-    rest: Optional[List[str]] = None,
+    rest: list[str] | None = None,
 ) -> None:
     project_only_commands = {"agents"}
     if command in project_only_commands:
@@ -1308,7 +1435,7 @@ async def _check_tool_health(application):
         logger.info("✅ Tool health check passed: Copilot and Gemini are available")
 
 
-def _refine_task_description(text: str, project_key: Optional[str] = None) -> str:
+def _refine_task_description(text: str, project_key: str | None = None) -> str:
     """Refine task description using orchestrator with graceful fallback."""
     candidate_text = (text or "").strip()
     if not candidate_text:
@@ -1387,7 +1514,7 @@ async def task_confirmation_callback_handler(update: Update, context: ContextTyp
     await query.edit_message_text(result.get("message", "⚠️ Task processing completed."))
 
 
-async def _transcribe_voice_message(voice_file_id: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+async def _transcribe_voice_message(voice_file_id: str, context: ContextTypes.DEFAULT_TYPE) -> str | None:
     return await transcribe_telegram_voice(voice_file_id, context, _audio_transcription_handler_deps())
 
 
@@ -1542,10 +1669,8 @@ async def hands_free_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as e:
         logger.error(f"Unexpected error in hands_free_handler: {e}", exc_info=True)
-        try:
+        with contextlib.suppress(Exception):
             await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-        except Exception:
-            pass
 
 
 # --- 2. SELECTION MODE (Menu) ---
@@ -1575,7 +1700,7 @@ async def type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data['type'] = query.data
-    await query.edit_message_text(f"📝 **Speak or Type the task:**", parse_mode='Markdown')
+    await query.edit_message_text("📝 **Speak or Type the task:**", parse_mode='Markdown')
     return INPUT_TASK
 
 
@@ -1673,7 +1798,7 @@ async def flow_close_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 def extract_issue_number_from_file(file_path):
     """Extract issue number from task file content if present."""
     try:
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             content = f.read()
         match = re.search(r"\*\*Issue:\*\*\s*https?://[^\s`]+/(?:-/)?issues/(\d+)", content)
         if match:

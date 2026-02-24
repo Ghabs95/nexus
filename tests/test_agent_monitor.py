@@ -1,7 +1,8 @@
 """Unit tests for agent_monitor module."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+
 from runtime.agent_monitor import AgentMonitor, WorkflowRouter
 
 

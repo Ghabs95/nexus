@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict
+from collections.abc import Callable
+from typing import Any
 
 
-def extract_json_dict(text: str) -> Dict[str, Any]:
+def extract_json_dict(text: str) -> dict[str, Any]:
     """Extract a JSON object from raw or markdown-wrapped text."""
     try:
         direct = json.loads(text)
@@ -38,8 +39,8 @@ def extract_json_dict(text: str) -> Dict[str, Any]:
 def parse_intent_result(
     orchestrator: Any,
     text: str,
-    extract_json_dict: Callable[[str], Dict[str, Any]],
-) -> Dict[str, Any]:
+    extract_json_dict: Callable[[str], dict[str, Any]],
+) -> dict[str, Any]:
     """Run intent detection and normalize JSON-wrapped outputs."""
     intent_result = orchestrator.run_text_to_speech_analysis(text=text, task="detect_intent")
     if not isinstance(intent_result, dict):
@@ -91,9 +92,9 @@ async def route_task_with_context(
     text: str,
     orchestrator: Any,
     message_id: str,
-    get_chat: Callable[[int], Dict[str, Any]],
+    get_chat: Callable[[int], dict[str, Any]],
     process_inbox_task: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Route task through shared inbox logic using active chat project context."""
     active_chat = get_chat(user_id)
     metadata = active_chat.get("metadata") if isinstance(active_chat, dict) else {}

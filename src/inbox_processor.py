@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import glob
 import json
 import logging
@@ -7,56 +8,65 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Any, Optional
 from urllib.parse import urlparse
 
 import yaml
+from nexus.core.process_orchestrator import ProcessOrchestrator
+from nexus.core.project.repo_utils import (
+    iter_project_configs as _iter_project_configs,
+)
+from nexus.core.project.repo_utils import (
+    project_repos_from_config as _project_repos_from_config,
+)
 
 # Nexus Core framework imports — orchestration handled by ProcessOrchestrator
-
 # Import centralized configuration
 from config import (
-    BASE_DIR, get_github_repo, get_github_repos, get_default_project, get_project_platform,
+    BASE_DIR,
+    DATA_DIR,
+    INBOX_PROCESSOR_LOG_FILE,
+    NEXUS_CORE_STORAGE_DIR,
+    ORCHESTRATOR_CONFIG,
+    PROJECT_CONFIG,
     SLEEP_INTERVAL,
-    PROJECT_CONFIG, DATA_DIR, INBOX_PROCESSOR_LOG_FILE, ORCHESTRATOR_CONFIG,
-    NEXUS_CORE_STORAGE_DIR, get_inbox_dir, get_tasks_active_dir, get_tasks_closed_dir,
-    get_tasks_logs_dir, get_nexus_dir_name
-)
-from state_manager import StateManager
-from runtime.agent_monitor import AgentMonitor, WorkflowRouter
-from runtime.agent_launcher import invoke_copilot_agent, is_recent_launch, get_sop_tier_from_issue
-from orchestration.ai_orchestrator import get_orchestrator
-from orchestration.nexus_core_helpers import (
-    get_git_platform,
-    get_workflow_definition_path,
-    complete_step_for_issue,
-    start_workflow,
-)
-from runtime.nexus_agent_runtime import NexusAgentRuntime
-from nexus.core.process_orchestrator import ProcessOrchestrator
-from orchestration.plugin_runtime import (
-    get_workflow_monitor_policy_plugin,
-    get_profiled_plugin,
-    get_runtime_ops_plugin,
-    get_workflow_policy_plugin,
-    get_workflow_state_plugin,
-)
-from error_handling import (
-    run_command_with_retry,
-    RetryExhaustedError
+    get_default_project,
+    get_github_repo,
+    get_github_repos,
+    get_inbox_dir,
+    get_nexus_dir_name,
+    get_project_platform,
+    get_tasks_active_dir,
+    get_tasks_closed_dir,
 )
 from integrations.notifications import (
     notify_agent_needs_input,
-    notify_agent_completed,
-    notify_agent_timeout,
     notify_workflow_completed,
-    send_telegram_alert
+    send_telegram_alert,
 )
-from nexus.core.project.repo_utils import (
-    iter_project_configs as _iter_project_configs,
-    project_repos_from_config as _project_repos_from_config,
+from orchestration.ai_orchestrator import get_orchestrator
+from orchestration.nexus_core_helpers import (
+    complete_step_for_issue,
+    get_git_platform,
+    get_workflow_definition_path,
+    start_workflow,
 )
-from services.workflow_signal_sync import normalize_agent_reference as _normalize_agent_reference
+from orchestration.plugin_runtime import (
+    get_profiled_plugin,
+    get_workflow_monitor_policy_plugin,
+    get_workflow_policy_plugin,
+    get_workflow_state_plugin,
+)
+from runtime.agent_launcher import (
+    get_sop_tier_from_issue,
+    invoke_copilot_agent,
+    is_recent_launch,
+)
+from runtime.agent_monitor import WorkflowRouter
+from runtime.nexus_agent_runtime import NexusAgentRuntime
+from services.workflow_signal_sync import (
+    normalize_agent_reference as _normalize_agent_reference,
+)
+from state_manager import StateManager
 
 _STEP_COMPLETE_COMMENT_RE = re.compile(
     r"^\s*##\s+.+?\bcomplete\b\s+—\s+([a-zA-Z0-9_-]+)\s*$",
@@ -121,7 +131,7 @@ def _resolve_tier_for_issue(
     repo: str,
     *,
     context: str = "auto-chain",
-) -> Optional[str]:
+) -> str | None:
     """Resolve workflow tier for an issue, halt with alert when unknown.
 
     Resolution order:
@@ -203,7 +213,7 @@ def load_failed_lookups():
     """Load failed task file lookup counters."""
     try:
         if os.path.exists(FAILED_LOOKUPS_FILE):
-            with open(FAILED_LOOKUPS_FILE, 'r') as f:
+            with open(FAILED_LOOKUPS_FILE) as f:
                 return json.load(f)
     except Exception as e:
         logger.error(f"Error loading failed lookups: {e}")
@@ -222,7 +232,7 @@ def load_completion_comments():
     """Load completion comment tracking data."""
     try:
         if os.path.exists(COMPLETION_COMMENTS_FILE):
-            with open(COMPLETION_COMMENTS_FILE, "r") as f:
+            with open(COMPLETION_COMMENTS_FILE) as f:
                 return json.load(f)
     except Exception as e:
         logger.warning(f"Failed to read completion comments file: {e}")
@@ -323,7 +333,7 @@ def _extract_repo_from_issue_url(issue_url: str) -> str:
     return ""
 
 
-def _resolve_project_for_repo(repo_name: str) -> Optional[str]:
+def _resolve_project_for_repo(repo_name: str) -> str | None:
     """Resolve configured project key for a repository full name."""
     for key, cfg in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
         if repo_name in _project_repos_from_config(key, cfg, get_github_repos):
@@ -331,7 +341,7 @@ def _resolve_project_for_repo(repo_name: str) -> Optional[str]:
     return None
 
 
-def _reroute_webhook_task_to_project(filepath: str, target_project: str) -> Optional[str]:
+def _reroute_webhook_task_to_project(filepath: str, target_project: str) -> str | None:
     """Move a webhook task file to the target project's inbox directory."""
     project_cfg = PROJECT_CONFIG.get(target_project)
     if not isinstance(project_cfg, dict):
@@ -357,7 +367,7 @@ def _reroute_webhook_task_to_project(filepath: str, target_project: str) -> Opti
     return target_path
 
 
-def _resolve_repo_for_issue(issue_num: str, default_project: Optional[str] = None) -> str:
+def _resolve_repo_for_issue(issue_num: str, default_project: str | None = None) -> str:
     """Resolve the repository that owns an issue across all configured project repos."""
     default_repo = (
         get_github_repo(default_project)
@@ -447,7 +457,7 @@ def _resolve_repo_strict(project_name: str, issue_num: str) -> str:
     return issue_repo or (project_repos[0] if project_repos else get_github_repo(get_default_project()))
 
 
-def _read_latest_local_completion(issue_num: str) -> Optional[dict]:
+def _read_latest_local_completion(issue_num: str) -> dict | None:
     """Return latest local completion summary for issue, if present."""
     nexus_dir_name = get_nexus_dir_name()
     pattern = os.path.join(
@@ -465,7 +475,7 @@ def _read_latest_local_completion(issue_num: str) -> Optional[dict]:
 
     latest = max(matches, key=os.path.getmtime)
     try:
-        with open(latest, "r", encoding="utf-8") as handle:
+        with open(latest, encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
         return None
@@ -478,7 +488,7 @@ def _read_latest_local_completion(issue_num: str) -> Optional[dict]:
     }
 
 
-def _read_latest_structured_comment(issue_num: str, repo: str, project_name: str) -> Optional[dict]:
+def _read_latest_structured_comment(issue_num: str, repo: str, project_name: str) -> dict | None:
     """Return latest structured (non-automated) agent comment signal from GitHub."""
     try:
         platform = get_git_platform(repo, project_name=project_name)
@@ -520,7 +530,7 @@ def reconcile_completion_signals_on_startup() -> None:
     for issue_num, workflow_id in mappings.items():
         wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
         try:
-            with open(wf_file, "r", encoding="utf-8") as handle:
+            with open(wf_file, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception:
             continue
@@ -663,7 +673,7 @@ def _is_terminal_agent_reference(agent_ref: str) -> bool:
     }
 
 
-def _resolve_git_dir(project_name: str) -> Optional[str]:
+def _resolve_git_dir(project_name: str) -> str | None:
     """Resolve the actual git repo directory for a project.
 
     Tries:
@@ -786,7 +796,7 @@ def _archive_closed_task_files(issue_num: str, project_name: str = "") -> int:
         projects_to_scan.append(project_name)
 
     projects_to_scan.extend(
-        key for key in PROJECT_CONFIG.keys()
+        key for key in PROJECT_CONFIG
         if key not in {"workflow_definition_path", "shared_agents_dir", "nexus_dir", "require_human_merge_approval", "github_issue_triage", "ai_tool_preferences"}
         and key not in projects_to_scan
     )
@@ -821,7 +831,7 @@ def _archive_closed_task_files(issue_num: str, project_name: str = "") -> int:
                 matched = True
             else:
                 try:
-                    with open(source_path, "r") as f:
+                    with open(source_path) as f:
                         content = f.read()
                     match = issue_pattern.search(content)
                     matched = bool(match and match.group(1) == str(issue_num))
@@ -851,7 +861,7 @@ def _archive_closed_task_files(issue_num: str, project_name: str = "") -> int:
 # ProcessOrchestrator singleton (Phase 3)
 # ---------------------------------------------------------------------------
 
-_process_orchestrator: Optional[ProcessOrchestrator] = None
+_process_orchestrator: ProcessOrchestrator | None = None
 
 
 def _get_process_orchestrator() -> ProcessOrchestrator:
@@ -956,7 +966,7 @@ def check_stuck_agents():
         _record_polling_failure(scope, e)
 
 
-def _resolve_project_for_issue(issue_num: str) -> Optional[str]:
+def _resolve_project_for_issue(issue_num: str) -> str | None:
     """Best-effort project resolution from config for an issue number."""
     # Try to find which project this issue belongs to by checking agents data
     for project_name, _ in _iter_project_configs(PROJECT_CONFIG, get_github_repos):
@@ -1138,7 +1148,7 @@ def _render_checklist_from_workflow(project_name: str, tier_name: str) -> str:
         return ""
 
     try:
-        with open(workflow_path, "r", encoding="utf-8") as handle:
+        with open(workflow_path, encoding="utf-8") as handle:
             definition = yaml.safe_load(handle)
     except Exception:
         return ""
@@ -1258,10 +1268,8 @@ def create_github_issue(title, body, project, workflow_label, task_type, tier_na
                     color = "5319E7"
                     description = "Project key"
 
-                try:
+                with contextlib.suppress(Exception):
                     creator.ensure_label(label, color, description)
-                except Exception:
-                    pass
                 creator.add_label(issue_num, label)
 
             logger.info("📋 Issue created via plugin")
@@ -1320,7 +1328,7 @@ def process_file(filepath):
     logger.info(f"Processing: {filepath}")
 
     try:
-        with open(filepath, "r") as f:
+        with open(filepath) as f:
             content = f.read()
 
         # Parse Metadata
@@ -1683,7 +1691,7 @@ def process_file(filepath):
 def main():
     logger.info(f"Inbox Processor started on {BASE_DIR}")
     logger.info("Stuck agent monitoring enabled (using workflow agent timeout)")
-    logger.info(f"Agent comment monitoring enabled")
+    logger.info("Agent comment monitoring enabled")
     try:
         reconcile_completion_signals_on_startup()
     except Exception as e:

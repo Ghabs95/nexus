@@ -12,8 +12,7 @@ This file verifies the nexus-side integration:
 """
 
 import time
-from datetime import datetime, timedelta, timezone
-import pytest
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -51,7 +50,10 @@ class TestNexusAgentRuntimeShouldRetry:
         assert result is False
 
     def test_retry_fuse_trips_and_blocks_retry(self):
-        from runtime.nexus_agent_runtime import NexusAgentRuntime, RETRY_FUSE_MAX_ATTEMPTS
+        from runtime.nexus_agent_runtime import (
+            RETRY_FUSE_MAX_ATTEMPTS,
+            NexusAgentRuntime,
+        )
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
@@ -115,9 +117,9 @@ class TestRetryFuseStatus:
 
     def test_retry_fuse_hard_stop_after_two_trips(self):
         from runtime.nexus_agent_runtime import (
-            NexusAgentRuntime,
             RETRY_FUSE_HARD_WINDOW_SECONDS,
             RETRY_FUSE_MAX_ATTEMPTS,
+            NexusAgentRuntime,
         )
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
@@ -348,6 +350,7 @@ class TestNexusAgentRuntimePostCompletionComment:
 
     def test_skips_automated_comment_when_recent_agent_comment_exists(self):
         from nexus.adapters.git.base import Comment
+
         from runtime.nexus_agent_runtime import NexusAgentRuntime
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
@@ -356,7 +359,7 @@ class TestNexusAgentRuntimePostCompletionComment:
             issue_id="44",
             author="Ghabs95",
             body="## 🔨 Implement Change Complete — developer\n\nReady for **@Reviewer**",
-            created_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+            created_at=datetime.now(UTC) - timedelta(minutes=2),
             url="https://example.com/comment/1",
         )
         mock_platform = MagicMock()
@@ -371,6 +374,7 @@ class TestNexusAgentRuntimePostCompletionComment:
 
     def test_does_not_skip_when_ready_for_without_structured_header(self):
         from nexus.adapters.git.base import Comment
+
         from runtime.nexus_agent_runtime import NexusAgentRuntime
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
@@ -379,7 +383,7 @@ class TestNexusAgentRuntimePostCompletionComment:
             issue_id="44",
             author="Ghabs95",
             body="Ready for **@Reviewer**",
-            created_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+            created_at=datetime.now(UTC) - timedelta(minutes=2),
             url="https://example.com/comment/2",
         )
         mock_platform = MagicMock()
@@ -394,6 +398,7 @@ class TestNexusAgentRuntimePostCompletionComment:
 
     def test_env_override_extends_recent_comment_window(self, monkeypatch):
         from nexus.adapters.git.base import Comment
+
         from runtime.nexus_agent_runtime import NexusAgentRuntime
 
         monkeypatch.setenv("NEXUS_RECENT_AGENT_COMMENT_WINDOW_SECONDS", "3600")
@@ -404,7 +409,7 @@ class TestNexusAgentRuntimePostCompletionComment:
             issue_id="44",
             author="Ghabs95",
             body="## 🔨 Implement Change Complete — developer\n\nReady for **@Reviewer**",
-            created_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+            created_at=datetime.now(UTC) - timedelta(minutes=20),
             url="https://example.com/comment/3",
         )
         mock_platform = MagicMock()
@@ -419,6 +424,7 @@ class TestNexusAgentRuntimePostCompletionComment:
 
     def test_invalid_env_uses_default_window(self, monkeypatch):
         from nexus.adapters.git.base import Comment
+
         from runtime.nexus_agent_runtime import NexusAgentRuntime
 
         monkeypatch.setenv("NEXUS_RECENT_AGENT_COMMENT_WINDOW_SECONDS", "invalid")
@@ -429,7 +435,7 @@ class TestNexusAgentRuntimePostCompletionComment:
             issue_id="44",
             author="Ghabs95",
             body="## 🔨 Implement Change Complete — developer\n\nReady for **@Reviewer**",
-            created_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+            created_at=datetime.now(UTC) - timedelta(minutes=20),
             url="https://example.com/comment/4",
         )
         mock_platform = MagicMock()

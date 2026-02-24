@@ -2,7 +2,8 @@
 
 import importlib
 import logging
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +15,9 @@ except Exception:
 
 _registry = None
 _registry_initialized = False
-_plugin_cache: Dict[str, Any] = {}
+_plugin_cache: dict[str, Any] = {}
 
-_PLUGIN_PROFILES: Dict[str, Dict[str, Any]] = {
+_PLUGIN_PROFILES: dict[str, dict[str, Any]] = {
     "state_store_default": {
         "kind": "STORAGE_BACKEND",
         "name": "json-state-store",
@@ -158,8 +159,8 @@ def get_builtin_plugin(
     *,
     kind: str,
     name: str,
-    config: Optional[Dict[str, Any]] = None,
-    cache_key: Optional[str] = None,
+    config: dict[str, Any] | None = None,
+    cache_key: str | None = None,
 ):
     """Create or fetch a cached built-in plugin instance.
 
@@ -196,8 +197,8 @@ def get_builtin_plugin(
 def get_profiled_plugin(
     profile: str,
     *,
-    overrides: Optional[Dict[str, Any]] = None,
-    cache_key: Optional[str] = None,
+    overrides: dict[str, Any] | None = None,
+    cache_key: str | None = None,
 ):
     """Create plugin from a named profile with optional config overrides."""
     spec = _PLUGIN_PROFILES.get(profile)
@@ -224,18 +225,18 @@ def clear_cached_plugin(cache_key: str) -> None:
 def get_workflow_state_plugin(
     *,
     storage_dir: str,
-    issue_to_workflow_id: Optional[Callable[[str], Optional[str]]] = None,
-    issue_to_workflow_map_setter: Optional[Callable[[str, str], None]] = None,
-    workflow_definition_path_resolver: Optional[Callable[[str], Optional[str]]] = None,
-    github_repo: Optional[str] = None,
-    set_pending_approval: Optional[Callable[..., None]] = None,
-    clear_pending_approval: Optional[Callable[[str], None]] = None,
-    audit_log: Optional[Callable[..., None]] = None,
-    notify_approval_required: Optional[Callable[..., None]] = None,
+    issue_to_workflow_id: Callable[[str], str | None] | None = None,
+    issue_to_workflow_map_setter: Callable[[str, str], None] | None = None,
+    workflow_definition_path_resolver: Callable[[str], str | None] | None = None,
+    github_repo: str | None = None,
+    set_pending_approval: Callable[..., None] | None = None,
+    clear_pending_approval: Callable[[str], None] | None = None,
+    audit_log: Callable[..., None] | None = None,
+    notify_approval_required: Callable[..., None] | None = None,
     cache_key: str = "workflow:state-engine",
 ):
     """Create a configured workflow-state adapter plugin instance."""
-    overrides: Dict[str, Any] = {
+    overrides: dict[str, Any] = {
         "storage_dir": storage_dir,
     }
 
@@ -281,15 +282,15 @@ def get_runtime_ops_plugin(
 
 def get_workflow_monitor_policy_plugin(
     *,
-    list_open_issues: Optional[Callable[..., list[Any]]] = None,
-    list_issues: Optional[Callable[..., list[dict[str, Any]]]] = None,
-    get_comments: Optional[Callable[..., list[Any]]] = None,
-    search_linked_prs: Optional[Callable[..., list[Any]]] = None,
-    get_issue: Optional[Callable[..., Any]] = None,
-    cache_key: Optional[str] = None,
+    list_open_issues: Callable[..., list[Any]] | None = None,
+    list_issues: Callable[..., list[dict[str, Any]]] | None = None,
+    get_comments: Callable[..., list[Any]] | None = None,
+    search_linked_prs: Callable[..., list[Any]] | None = None,
+    get_issue: Callable[..., Any] | None = None,
+    cache_key: str | None = None,
 ):
     """Create a configured platform-neutral workflow monitor policy plugin instance."""
-    overrides: Dict[str, Any] = {}
+    overrides: dict[str, Any] = {}
     if list_open_issues is not None:
         overrides["list_open_issues"] = list_open_issues
     if list_issues is not None:
@@ -310,16 +311,16 @@ def get_workflow_monitor_policy_plugin(
 
 def get_workflow_policy_plugin(
     *,
-    resolve_git_dir: Optional[Callable[[str], Optional[str]]] = None,
-    create_pr_from_changes: Optional[Callable[..., Optional[str]]] = None,
-    find_existing_pr: Optional[Callable[..., Optional[str]]] = None,
-    close_issue: Optional[Callable[..., bool]] = None,
-    send_notification: Optional[Callable[[str], None]] = None,
-    build_workflow_complete_message: Optional[Callable[..., str]] = None,
-    cache_key: Optional[str] = "workflow:policy",
+    resolve_git_dir: Callable[[str], str | None] | None = None,
+    create_pr_from_changes: Callable[..., str | None] | None = None,
+    find_existing_pr: Callable[..., str | None] | None = None,
+    close_issue: Callable[..., bool] | None = None,
+    send_notification: Callable[[str], None] | None = None,
+    build_workflow_complete_message: Callable[..., str] | None = None,
+    cache_key: str | None = "workflow:policy",
 ):
     """Create a configured workflow policy plugin instance."""
-    overrides: Dict[str, Any] = {}
+    overrides: dict[str, Any] = {}
     if resolve_git_dir is not None:
         overrides["resolve_git_dir"] = resolve_git_dir
     if create_pr_from_changes is not None:
@@ -342,7 +343,7 @@ def get_workflow_policy_plugin(
 
 def get_github_webhook_policy_plugin(
     *,
-    cache_key: Optional[str] = "github-webhook-policy:default",
+    cache_key: str | None = "github-webhook-policy:default",
 ):
     """Create a configured GitHub webhook policy plugin instance."""
     return get_profiled_plugin(

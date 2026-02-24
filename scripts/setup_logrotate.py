@@ -10,11 +10,10 @@ Usage:
     python3 scripts/setup_logrotate.py --install    # Also install to /etc/logrotate.d/
 """
 
-import os
-import sys
 import argparse
+import os
 import subprocess
-from pathlib import Path
+import sys
 
 
 def get_logs_dir():
@@ -40,7 +39,7 @@ def setup_logrotate(install_to_system=False):
         sys.exit(1)
     
     # Read template
-    with open(template_file, 'r') as f:
+    with open(template_file) as f:
         content = f.read()
     
     # Replace placeholder with actual logs directory
@@ -60,7 +59,7 @@ def setup_logrotate(install_to_system=False):
                 capture_output=True
             )
             os.remove(temp_file)
-            print(f"✅ Installed logrotate config to /etc/logrotate.d/nexus")
+            print("✅ Installed logrotate config to /etc/logrotate.d/nexus")
             print(f"   Logs directory: {logs_dir}")
             
             # Test the config
@@ -70,14 +69,14 @@ def setup_logrotate(install_to_system=False):
                 text=True
             )
             if result.returncode == 0:
-                print(f"✅ Logrotate config validated successfully")
+                print("✅ Logrotate config validated successfully")
             else:
-                print(f"⚠️  Logrotate validation warnings:")
+                print("⚠️  Logrotate validation warnings:")
                 print(result.stdout)
                 if result.stderr:
                     print(result.stderr)
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install logrotate config:")
+            print("❌ Failed to install logrotate config:")
             print(e.stderr.decode() if e.stderr else str(e))
             sys.exit(1)
         except Exception as e:
@@ -88,13 +87,13 @@ def setup_logrotate(install_to_system=False):
         with open(template_file, 'w') as f:
             f.write(actual_config)
         
-        print(f"✅ Generated logrotate config")
+        print("✅ Generated logrotate config")
         print(f"   File: {template_file}")
         print(f"   Logs directory: {logs_dir}")
-        print(f"\nTo install to system:")
-        print(f"   python3 scripts/setup_logrotate.py --install")
-        print(f"\nOr manually:")
-        print(f"   sudo cp logrotate.conf /etc/logrotate.d/nexus")
+        print("\nTo install to system:")
+        print("   python3 scripts/setup_logrotate.py --install")
+        print("\nOr manually:")
+        print("   sudo cp logrotate.conf /etc/logrotate.d/nexus")
 
 
 def main():

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 
 
-def resolve_project_root(base_dir: str, project_key: str, project_cfg: Dict[str, Any]) -> str:
+def resolve_project_root(base_dir: str, project_key: str, project_cfg: dict[str, Any]) -> str:
     normalized_base_dir = str(base_dir or "").strip()
     if not normalized_base_dir:
         return ""
@@ -34,7 +34,7 @@ def resolve_path(project_root: str, raw_path: str) -> str:
     return os.path.join(project_root, candidate)
 
 
-def normalize_paths(value: Any) -> List[str]:
+def normalize_paths(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     if isinstance(value, list):
@@ -42,11 +42,11 @@ def normalize_paths(value: Any) -> List[str]:
     return []
 
 
-def extract_referenced_paths_from_markdown(agents_text: str) -> List[str]:
+def extract_referenced_paths_from_markdown(agents_text: str) -> list[str]:
     if not agents_text:
         return []
 
-    referenced: List[str] = []
+    referenced: list[str] = []
     for match in re.findall(r"`([^`]+)`", agents_text):
         candidate = str(match).strip()
         if not candidate:
@@ -60,9 +60,9 @@ def extract_referenced_paths_from_markdown(agents_text: str) -> List[str]:
     return referenced
 
 
-def collect_context_candidate_files(context_root: str, seed_files: Optional[List[str]] = None) -> List[str]:
-    candidates: List[str] = []
-    seed_markdown_files: List[str] = []
+def collect_context_candidate_files(context_root: str, seed_files: list[str] | None = None) -> list[str]:
+    candidates: list[str] = []
+    seed_markdown_files: list[str] = []
 
     def _append_file(path: str) -> None:
         if os.path.isfile(path) and path not in candidates:
@@ -100,7 +100,7 @@ def collect_context_candidate_files(context_root: str, seed_files: Optional[List
     for seed_path in seed_markdown_files:
         seed_text = ""
         try:
-            with open(seed_path, "r", encoding="utf-8") as handle:
+            with open(seed_path, encoding="utf-8") as handle:
                 seed_text = handle.read()
         except Exception:
             seed_text = ""
@@ -117,7 +117,7 @@ def collect_context_candidate_files(context_root: str, seed_files: Optional[List
 
 def extract_agent_prompt_metadata_from_yaml(path: str, max_chars: int = 3000) -> tuple[str, str]:
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             payload = yaml.safe_load(handle) or {}
     except Exception:
         return "", ""
@@ -142,7 +142,7 @@ def extract_agent_prompt_metadata_from_yaml(path: str, max_chars: int = 3000) ->
 def load_agent_prompt_from_definition(
     base_dir: str,
     project_root: str,
-    project_cfg: Dict[str, Any],
+    project_cfg: dict[str, Any],
     routed_agent_type: str,
 ) -> str:
     if not project_root or not isinstance(project_cfg, dict):
@@ -156,8 +156,8 @@ def load_agent_prompt_from_definition(
     if not os.path.isdir(agents_root):
         return ""
 
-    by_filename_match: Optional[str] = None
-    by_type_match: Optional[str] = None
+    by_filename_match: str | None = None
+    by_type_match: str | None = None
 
     preferred_filename = os.path.join(agents_root, f"{routed_agent_type}.yaml")
     if os.path.isfile(preferred_filename):
@@ -191,7 +191,7 @@ def load_agent_prompt_from_definition(
 
 def load_role_context(
     project_root: str,
-    agent_cfg: Dict[str, Any],
+    agent_cfg: dict[str, Any],
     max_chars: int = 18000,
 ) -> str:
     if not project_root or not isinstance(agent_cfg, dict):
@@ -205,9 +205,9 @@ def load_role_context(
 
     context_files = normalize_paths(agent_cfg.get("context_files"))
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     used_chars = 0
-    resolved_context_roots: List[str] = []
+    resolved_context_roots: list[str] = []
 
     for raw_context_path in context_paths:
         context_root = resolve_path(project_root, raw_context_path)
@@ -217,7 +217,7 @@ def load_role_context(
 
         for file_path in collect_context_candidate_files(context_root, seed_files=context_files):
             try:
-                with open(file_path, "r", encoding="utf-8") as handle:
+                with open(file_path, encoding="utf-8") as handle:
                     content = handle.read().strip()
             except Exception:
                 continue

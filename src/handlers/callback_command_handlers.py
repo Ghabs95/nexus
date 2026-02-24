@@ -2,82 +2,101 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict
+from typing import TYPE_CHECKING, Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes, ConversationHandler
+if TYPE_CHECKING:
+    from interactive_context import InteractiveContext
+
+from nexus.adapters.notifications.base import Button
 
 
 @dataclass
 class CallbackHandlerDeps:
-    logger: Any
+    logger: logging.Logger
     github_repo: str
     prompt_issue_selection: Callable[..., Awaitable[None]]
-    prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
+    prompt_project_selection: Callable[..., Awaitable[None]]
     dispatch_command: Callable[..., Awaitable[None]]
     get_project_label: Callable[[str], str]
-    status_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
-    active_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+    status_handler: Callable[..., Awaitable[None]]
+    active_handler: Callable[..., Awaitable[None]]
     get_direct_issue_plugin: Callable[[str], Any]
     get_workflow_state_plugin: Callable[..., Any]
-    workflow_state_plugin_kwargs: Dict[str, Any]
-    action_handlers: Dict[str, Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]]
+    workflow_state_plugin_kwargs: dict[str, Any]
+    action_handlers: dict[str, Callable[..., Awaitable[None]]]
 
 
-async def project_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
+async def core_callback_router(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    data = ctx.query.data
+    if data.startswith("pickcmd:"):
+        await project_picker_handler(ctx, deps)
+    elif data.startswith("pickissue") or data.startswith("pickissue_manual:") or data.startswith("pickissue_state:"):
+        await issue_picker_handler(ctx, deps)
+    elif data.startswith("pickmonitor:"):
+        await monitor_project_picker_handler(ctx, deps)
+    elif data.startswith("flow:close"):
+        await flow_close_handler(ctx, deps)
+    elif data.startswith("menu:"):
+        await menu_callback_handler(ctx, deps)
+    elif data == "close":
+        await close_flow_handler(ctx, deps)
 
-    if not query.data or not query.data.startswith("pickcmd:"):
+
+async def project_picker_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    query_data = ctx.query.data
+
+    if not query_data or not query_data.startswith("pickcmd:"):
         return
 
-    _, command, project_key = query.data.split(":", 2)
-    context.user_data["pending_command"] = command
-    context.user_data["pending_project"] = project_key
+    _, command, project_key = query_data.split(":", 2)
+    ctx.user_state["pending_command"] = command
+    ctx.user_state["pending_project"] = project_key
 
     if command == "agents":
-        context.user_data.pop("pending_command", None)
-        context.user_data.pop("pending_project", None)
-        await deps.dispatch_command(update, context, command, project_key, "")
+        ctx.user_state.pop("pending_command", None)
+        ctx.user_state.pop("pending_project", None)
+        await deps.dispatch_command(ctx, command, project_key, "")
         return
 
-    pending_issue = context.user_data.get("pending_issue")
+    pending_issue = ctx.user_state.get("pending_issue")
     if pending_issue and command != "respond":
-        context.user_data.pop("pending_issue", None)
-        await deps.dispatch_command(update, context, command, project_key, pending_issue)
+        ctx.user_state.pop("pending_issue", None)
+        await deps.dispatch_command(ctx, command, project_key, pending_issue)
         return
 
     if pending_issue and command == "respond":
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             f"Selected {deps.get_project_label(project_key)}. Now send the response message."
         )
         return
 
-    await deps.prompt_issue_selection(update, context, command, project_key, edit_message=True)
+    await deps.prompt_issue_selection(ctx, command, project_key, edit_message=True)
 
 
-async def issue_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
+async def issue_picker_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    query_data = ctx.query.data
 
-    if not query.data:
+    if not query_data:
         return
 
-    if query.data.startswith("pickissue_manual:"):
-        _, command, project_key = query.data.split(":", 2)
-        context.user_data["pending_command"] = command
-        context.user_data["pending_project"] = project_key
-        await query.edit_message_text(
+    if query_data.startswith("pickissue_manual:"):
+        _, command, project_key = query_data.split(":", 2)
+        ctx.user_state["pending_command"] = command
+        ctx.user_state["pending_project"] = project_key
+        await ctx.edit_message_text(
             f"Selected {deps.get_project_label(project_key)}. Send the issue number."
         )
         return
 
-    if query.data.startswith("pickissue_state:"):
-        _, issue_state, command, project_key = query.data.split(":", 3)
+    if query_data.startswith("pickissue_state:"):
+        _, issue_state, command, project_key = query_data.split(":", 3)
         await deps.prompt_issue_selection(
-            update,
-            context,
+            ctx,
             command,
             project_key,
             edit_message=True,
@@ -85,75 +104,71 @@ async def issue_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    if not query.data.startswith("pickissue:"):
+    if not query_data.startswith("pickissue:"):
         return
 
-    _, command, project_key, issue_num = query.data.split(":", 3)
-    await query.edit_message_reply_markup(reply_markup=None)
-    await deps.dispatch_command(update, context, command, project_key, issue_num)
+    _, command, project_key, issue_num = query_data.split(":", 3)
+    await ctx.edit_message_text(ctx.text, buttons=[])
+    await deps.dispatch_command(ctx, command, project_key, issue_num)
 
 
-async def monitor_project_picker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
+async def monitor_project_picker_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    query_data = ctx.query.data
 
-    if not query.data or not query.data.startswith("pickmonitor:"):
+    if not query_data or not query_data.startswith("pickmonitor:"):
         return
 
-    _, command, project_key = query.data.split(":", 2)
-    context.args = [project_key]
+    _, command, project_key = query_data.split(":", 2)
+    ctx.args = [project_key]
 
     if command == "status":
-        await deps.status_handler(update, context)
+        await deps.status_handler(ctx)
         return
     if command == "active":
-        await deps.active_handler(update, context)
+        await deps.active_handler(ctx)
         return
 
-    await query.edit_message_text("Unsupported monitoring command.")
+    await ctx.edit_message_text("Unsupported monitoring command.")
 
 
-async def close_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_reply_markup(reply_markup=None)
+async def close_flow_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    await ctx.edit_message_text(ctx.text, buttons=[])
 
 
-async def flow_close_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ Cancelled.")
-    return ConversationHandler.END
+async def flow_close_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    await ctx.edit_message_text("❌ Cancelled.")
 
 
-async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
+async def menu_callback_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    query_data = ctx.query.data
 
-    if not query.data:
+    if not query_data:
         return
 
-    menu_key = query.data.split(":", 1)[1]
+    menu_key = query_data.split(":", 1)[1]
 
     if menu_key == "close":
-        await query.edit_message_reply_markup(reply_markup=None)
+        await ctx.edit_message_text(ctx.text, buttons=[])
         return
 
     if menu_key == "root":
         keyboard = [
-            [InlineKeyboardButton("🗣️ Chat", callback_data="menu:chat")],
-            [InlineKeyboardButton("✨ Task Creation", callback_data="menu:tasks")],
-            [InlineKeyboardButton("📊 Monitoring", callback_data="menu:monitor")],
-            [InlineKeyboardButton("🔁 Workflow Control", callback_data="menu:workflow")],
-            [InlineKeyboardButton("🤝 Agents", callback_data="menu:agents")],
-            [InlineKeyboardButton("🔧 Git Platform", callback_data="menu:github")],
-            [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")],
-            [InlineKeyboardButton("❌ Close", callback_data="menu:close")],
+            [Button("🗣️ Chat", callback_data="menu:chat")],
+            [Button("✨ Task Creation", callback_data="menu:tasks")],
+            [Button("📊 Monitoring", callback_data="menu:monitor")],
+            [Button("🔁 Workflow Control", callback_data="menu:workflow")],
+            [Button("🤝 Agents", callback_data="menu:agents")],
+            [Button("🔧 Git Platform", callback_data="menu:github")],
+            [Button("ℹ️ Help", callback_data="menu:help")],
+            [Button("❌ Close", callback_data="menu:close")],
         ]
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             "📍 **Nexus Menu**\nChoose a category:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+            buttons=keyboard
         )
         return
 
@@ -217,26 +232,23 @@ async def menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     }
 
     text = menu_texts.get(menu_key, "Unknown menu option.")
-    await query.edit_message_text(
+    await ctx.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")],
-                [InlineKeyboardButton("❌ Close", callback_data="menu:close")],
-            ]
-        ),
-        parse_mode="Markdown",
+        buttons=[
+            [Button("⬅️ Back", callback_data="menu:root")],
+            [Button("❌ Close", callback_data="menu:close")],
+        ]
     )
 
 
-async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: CallbackHandlerDeps):
-    query = update.callback_query
-    await query.answer()
+async def inline_keyboard_handler(ctx: InteractiveContext, deps: CallbackHandlerDeps):
+    await ctx.answer_callback_query()
+    query_data = ctx.query.data
 
-    if not query.data:
+    if not query_data:
         return
 
-    parts = query.data.split("_", 1)
+    parts = query_data.split("_", 1)
     if len(parts) < 2:
         return
 
@@ -246,60 +258,57 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
     deps.logger.info(f"Inline keyboard action: {action} for issue #{issue_num}")
 
     if action in deps.action_handlers:
-        context.user_data["pending_command"] = action
-        context.user_data["pending_issue"] = issue_num
-        await deps.prompt_project_selection(update, context, action)
+        ctx.user_state["pending_command"] = action
+        ctx.user_state["pending_issue"] = issue_num
+        await deps.prompt_project_selection(ctx, action)
     elif action == "respond":
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             f"✍️ To respond to issue #{issue_num}, use:\n\n"
             f"`/respond {issue_num} <your message>`\n\n"
             f"Example:\n"
-            f"`/respond {issue_num} Approved, proceed with implementation`",
-            parse_mode="Markdown",
+            f"`/respond {issue_num} Approved, proceed with implementation`"
         )
     elif action == "approve":
-        context.args = [issue_num]
-        await query.edit_message_text(f"✅ Approving implementation for issue #{issue_num}...")
+        ctx.args = [issue_num]
+        await ctx.edit_message_text(f"✅ Approving implementation for issue #{issue_num}...")
 
         try:
             plugin = deps.get_direct_issue_plugin(deps.github_repo)
             if not plugin or not plugin.add_comment(
                 issue_num,
-                "✅ Implementation approved by @Ghabs. Please proceed.",
+                "✅ Implementation approved. Please proceed.",
             ):
-                await query.edit_message_text(f"❌ Error approving issue #{issue_num}")
+                await ctx.edit_message_text(f"❌ Error approving issue #{issue_num}")
                 return
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 f"✅ Implementation approved for issue #{issue_num}\n\n"
-                f"Agent will continue automatically.",
-                parse_mode="Markdown",
+                f"Agent will continue automatically."
             )
         except Exception as exc:
-            await query.edit_message_text(f"❌ Error approving: {exc}")
+            await ctx.edit_message_text(f"❌ Error approving: {exc}")
     elif action == "reject":
-        context.args = [issue_num]
-        await query.edit_message_text(f"❌ Rejecting implementation for issue #{issue_num}...")
+        ctx.args = [issue_num]
+        await ctx.edit_message_text(f"❌ Rejecting implementation for issue #{issue_num}...")
 
         try:
             plugin = deps.get_direct_issue_plugin(deps.github_repo)
             if not plugin or not plugin.add_comment(
                 issue_num,
-                "❌ Implementation rejected by @Ghabs. Please revise.",
+                "❌ Implementation rejected. Please revise.",
             ):
-                await query.edit_message_text(f"❌ Error rejecting issue #{issue_num}")
+                await ctx.edit_message_text(f"❌ Error rejecting issue #{issue_num}")
                 return
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 f"❌ Implementation rejected for issue #{issue_num}\n\n"
-                f"Agent has been notified.",
-                parse_mode="Markdown",
+                f"Agent has been notified."
             )
         except Exception as exc:
-            await query.edit_message_text(f"❌ Error rejecting: {exc}")
+            await ctx.edit_message_text(f"❌ Error rejecting: {exc}")
     elif action == "wfapprove":
         parts2 = issue_num.split("_", 1)
         real_issue = parts2[0]
         step_num = parts2[1] if len(parts2) > 1 else "?"
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             f"✅ Approving workflow step {step_num} for issue #{real_issue}..."
         )
         try:
@@ -307,24 +316,23 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
                 **deps.workflow_state_plugin_kwargs,
                 cache_key="workflow:state-engine",
             )
-            approved_by = update.effective_user.username or str(update.effective_user.id)
+            approved_by = ctx.client.name
             if not workflow_plugin or not await workflow_plugin.approve_step(real_issue, approved_by):
-                await query.edit_message_text(
+                await ctx.edit_message_text(
                     f"❌ No workflow found for issue #{real_issue}"
                 )
                 return
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 f"✅ Step {step_num} approved for issue #{real_issue}\n\n"
-                f"Workflow will continue automatically.",
-                parse_mode="Markdown",
+                f"Workflow will continue automatically."
             )
         except Exception as exc:
-            await query.edit_message_text(f"❌ Error approving workflow step: {exc}")
+            await ctx.edit_message_text(f"❌ Error approving workflow step: {exc}")
     elif action == "wfdeny":
         parts2 = issue_num.split("_", 1)
         real_issue = parts2[0]
         step_num = parts2[1] if len(parts2) > 1 else "?"
-        await query.edit_message_text(
+        await ctx.edit_message_text(
             f"❌ Denying workflow step {step_num} for issue #{real_issue}..."
         )
         try:
@@ -332,20 +340,19 @@ async def inline_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_
                 **deps.workflow_state_plugin_kwargs,
                 cache_key="workflow:state-engine",
             )
-            denied_by = update.effective_user.username or str(update.effective_user.id)
+            denied_by = ctx.client.name
             if not workflow_plugin or not await workflow_plugin.deny_step(
                 real_issue,
                 denied_by,
-                reason="Denied via Telegram",
+                reason="Denied via Interactive Client",
             ):
-                await query.edit_message_text(
+                await ctx.edit_message_text(
                     f"❌ No workflow found for issue #{real_issue}"
                 )
                 return
-            await query.edit_message_text(
+            await ctx.edit_message_text(
                 f"❌ Step {step_num} denied for issue #{real_issue}\n\n"
-                f"Workflow has been stopped.",
-                parse_mode="Markdown",
+                f"Workflow has been stopped."
             )
         except Exception as exc:
-            await query.edit_message_text(f"❌ Error denying workflow step: {exc}")
+            await ctx.edit_message_text(f"❌ Error denying workflow step: {exc}")

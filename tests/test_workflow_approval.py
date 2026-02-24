@@ -1,12 +1,9 @@
 """Tests for workflow approval gate feature."""
 import asyncio
-import json
 import sys
 from pathlib import Path
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
-import pytest
 
 # Ensure src is on the path (conftest.py handles this, but be explicit)
 src_path = Path(__file__).parent.parent / "src"
@@ -28,7 +25,6 @@ from nexus.core.models import (
     WorkflowStep,
 )
 from nexus.core.workflow import WorkflowDefinition, WorkflowEngine
-
 
 # ---------------------------------------------------------------------------
 # Helpers

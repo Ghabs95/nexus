@@ -1,6 +1,5 @@
 """Tests for automatic task archival on workflow finalization."""
 
-from pathlib import Path
 
 
 def test_archive_closed_task_by_issue_url(tmp_path, monkeypatch):

@@ -6,7 +6,8 @@ import logging
 import os
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any
 
 from nexus.adapters.git.utils import build_issue_url, resolve_repo
 
@@ -17,20 +18,20 @@ def prepare_continue_context(
     *,
     issue_num: str,
     project_key: str,
-    rest_tokens: List[str],
+    rest_tokens: list[str],
     base_dir: str,
-    project_config: Dict[str, Dict[str, Any]],
+    project_config: dict[str, dict[str, Any]],
     default_repo: str,
-    find_task_file_by_issue: Callable[[str], Optional[str]],
-    get_issue_details: Callable[[str, Optional[str]], Optional[Dict[str, Any]]],
-    resolve_project_config_from_task: Callable[[str], Tuple[Optional[str], Optional[Dict[str, Any]]]],
+    find_task_file_by_issue: Callable[[str], str | None],
+    get_issue_details: Callable[[str, str | None], dict[str, Any] | None],
+    resolve_project_config_from_task: Callable[[str], tuple[str | None, dict[str, Any] | None]],
     get_runtime_ops_plugin: Callable[..., Any],
-    scan_for_completions: Callable[[str], List[Any]],
-    normalize_agent_reference: Callable[[Optional[str]], Optional[str]],
-    get_expected_running_agent_from_workflow: Callable[[str], Optional[str]],
-    get_sop_tier_from_issue: Callable[[str, Optional[str]], Optional[str]],
-    get_sop_tier: Callable[[str], Tuple[str, Any, Any]],
-) -> Dict[str, Any]:
+    scan_for_completions: Callable[[str], list[Any]],
+    normalize_agent_reference: Callable[[str | None], str | None],
+    get_expected_running_agent_from_workflow: Callable[[str], str | None],
+    get_sop_tier_from_issue: Callable[[str, str | None], str | None],
+    get_sop_tier: Callable[[str], tuple[str, Any, Any]],
+) -> dict[str, Any]:
     """Build context for /continue and return either a terminal state or launch payload."""
     def _looks_like_agent_ref(token: str) -> bool:
         value = str(token or "").strip()
@@ -39,7 +40,7 @@ def prepare_continue_context(
         return bool(re.fullmatch(r"@?[A-Za-z0-9][A-Za-z0-9_-]*", value))
 
     forced_agent = None
-    filtered_rest: List[str] = []
+    filtered_rest: list[str] = []
     for token in (rest_tokens or []):
         if token.lower().startswith("from:"):
             forced_agent = token[5:].strip()
@@ -93,7 +94,7 @@ def prepare_continue_context(
     if details.get("state", "").lower() == "closed":
         return {"status": "error", "message": f"⚠️ Issue #{issue_num} is closed."}
 
-    with open(task_file, "r", encoding="utf-8") as handle:
+    with open(task_file, encoding="utf-8") as handle:
         content = handle.read()
 
     type_match = re.search(r"\*\*Type:\*\*\s*(.+)", content)
@@ -214,7 +215,7 @@ def prepare_continue_context(
     }
 
 
-def kill_issue_agent(*, issue_num: str, get_runtime_ops_plugin: Callable[..., Any]) -> Dict[str, Any]:
+def kill_issue_agent(*, issue_num: str, get_runtime_ops_plugin: Callable[..., Any]) -> dict[str, Any]:
     """Kill a running issue agent and report outcome."""
     runtime_ops = get_runtime_ops_plugin(cache_key="runtime-ops:telegram")
     pid = runtime_ops.find_agent_pid_for_issue(issue_num) if runtime_ops else None

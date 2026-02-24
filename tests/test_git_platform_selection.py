@@ -2,8 +2,9 @@
 
 
 def test_get_git_platform_returns_github_by_default(monkeypatch):
-    import orchestration.nexus_core_helpers as nexus_core_helpers
     from nexus.adapters.git.github import GitHubPlatform
+
+    import orchestration.nexus_core_helpers as nexus_core_helpers
 
     monkeypatch.setattr(nexus_core_helpers, "get_project_platform", lambda _project: "github")
     monkeypatch.setattr(nexus_core_helpers, "get_github_repo", lambda _project: "org/repo")
@@ -14,8 +15,9 @@ def test_get_git_platform_returns_github_by_default(monkeypatch):
 
 
 def test_get_git_platform_returns_gitlab_for_gitlab_project(monkeypatch):
-    import orchestration.nexus_core_helpers as nexus_core_helpers
     from nexus.adapters.git.gitlab import GitLabPlatform
+
+    import orchestration.nexus_core_helpers as nexus_core_helpers
 
     monkeypatch.setattr(nexus_core_helpers, "get_project_platform", lambda _project: "gitlab")
     monkeypatch.setattr(nexus_core_helpers, "get_github_repo", lambda _project: "wallible/backend")
@@ -29,6 +31,7 @@ def test_get_git_platform_returns_gitlab_for_gitlab_project(monkeypatch):
 
 def test_get_git_platform_raises_when_gitlab_token_missing(monkeypatch):
     import pytest
+
     import orchestration.nexus_core_helpers as nexus_core_helpers
 
     monkeypatch.setattr(nexus_core_helpers, "get_project_platform", lambda _project: "gitlab")
@@ -40,8 +43,9 @@ def test_get_git_platform_raises_when_gitlab_token_missing(monkeypatch):
 
 
 def test_get_git_platform_uses_custom_token_var(monkeypatch):
-    import orchestration.nexus_core_helpers as nexus_core_helpers
     from nexus.adapters.git.github import GitHubPlatform
+
+    import orchestration.nexus_core_helpers as nexus_core_helpers
 
     monkeypatch.setattr(nexus_core_helpers, "_get_project_config", lambda: {"wallible": {"git_token_var_name": "WALLIBLE_GITHUB_TOKEN"}})
     monkeypatch.setattr(nexus_core_helpers, "get_project_platform", lambda _project: "github")

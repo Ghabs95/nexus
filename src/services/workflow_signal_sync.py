@@ -7,7 +7,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 _STEP_COMPLETE_COMMENT_RE = re.compile(
     r"^\s*##\s+.+?\bcomplete\b\s+—\s+([a-zA-Z0-9_-]+)\s*$",
@@ -26,9 +26,9 @@ def normalize_agent_reference(agent_ref: str) -> str:
     return value.strip("`").strip()
 
 
-def extract_structured_completion_signals(comments: List[dict]) -> List[Dict[str, str]]:
+def extract_structured_completion_signals(comments: list[dict]) -> list[dict[str, str]]:
     """Extract (completed_agent -> next_agent) transitions from structured comments."""
-    signals: List[Dict[str, str]] = []
+    signals: list[dict[str, str]] = []
     for comment in comments or []:
         body = str(comment.get("body", "") or "")
         if "_Automated comment from Nexus._" in body:
@@ -60,7 +60,7 @@ def read_latest_local_completion(
     base_dir: str,
     nexus_dir_name: str,
     issue_num: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Return latest local completion summary metadata for an issue."""
     pattern = os.path.join(
         base_dir,
@@ -77,7 +77,7 @@ def read_latest_local_completion(
 
     latest = max(matches, key=os.path.getmtime)
     try:
-        with open(latest, "r", encoding="utf-8") as handle:
+        with open(latest, encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
         return None
@@ -96,9 +96,9 @@ def write_local_completion_from_signal(
     nexus_dir_name: str,
     project_key: str,
     issue_num: str,
-    signal: Dict[str, str],
+    signal: dict[str, str],
     *,
-    key_findings: Optional[List[str]] = None,
+    key_findings: list[str] | None = None,
 ) -> str:
     """Persist completion summary from a reconciled signal."""
     completions_dir = os.path.join(
@@ -111,7 +111,7 @@ def write_local_completion_from_signal(
     os.makedirs(completions_dir, exist_ok=True)
 
     completion_path = os.path.join(completions_dir, f"completion_summary_{issue_num}.json")
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "status": "complete",
         "agent_type": signal["completed_agent"],
         "summary": (
