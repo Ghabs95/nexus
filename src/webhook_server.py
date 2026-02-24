@@ -17,7 +17,8 @@ import logging
 import os
 import re
 import sys
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+from flask_socketio import SocketIO
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -53,10 +54,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), "static"))
+socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
 
 # Track processed events to avoid duplicates
 processed_events = set()
+
+# Register SocketIO emitter with StateManager for real-time transition broadcasting
+try:
+    from state_manager import set_socketio_emitter
+    set_socketio_emitter(lambda event, data: socketio.emit(event, data, namespace="/visualizer"))
+    logger.info("✅ SocketIO emitter registered with StateManager")
+except Exception as _e:
+    logger.warning(f"⚠️ Could not register SocketIO emitter: {_e}")
+
 
 def _get_webhook_policy():
     """Get framework webhook policy plugin."""
@@ -574,9 +585,16 @@ def index():
         "version": "1.0.0",
         "endpoints": {
             "/webhook": "POST - GitHub webhook events",
-            "/health": "GET - Health check"
+            "/health": "GET - Health check",
+            "/visualizer": "GET - Real-time workflow visualizer dashboard"
         }
     }), 200
+
+
+@app.route('/visualizer', methods=['GET'])
+def visualizer():
+    """Serve the real-time workflow visualizer dashboard."""
+    return send_from_directory(app.static_folder, "visualizer.html")
 
 
 def main():
@@ -584,16 +602,17 @@ def main():
     port = WEBHOOK_PORT
     logger.info(f"🚀 Starting webhook server on port {port}")
     logger.info(f"📍 Webhook URL: http://localhost:{port}/webhook")
+    logger.info(f"📊 Visualizer: http://localhost:{port}/visualizer")
     
     if not WEBHOOK_SECRET:
         logger.warning("⚠️ WEBHOOK_SECRET not configured - signature verification disabled!")
     
-    # Run Flask app
-    app.run(
+    # Run with eventlet for WebSocket support
+    socketio.run(
+        app,
         host='0.0.0.0',
         port=port,
         debug=False,
-        threaded=True
     )
 
 

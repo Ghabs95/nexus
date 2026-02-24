@@ -98,7 +98,13 @@ Step through an interactive menu:
    Add your values:
    ```
    TELEGRAM_TOKEN=your_telegram_bot_token
-   ALLOWED_USER=your_user_id
+   TELEGRAM_ALLOWED_USER_IDS=your_user_id
+   PROJECT_CONFIG_PATH=ghabs/nexus/config/project_config.yaml
+   BASE_DIR=/home/ubuntu/git
+
+   # Workflow state storage
+   NEXUS_STORAGE_TYPE=postgres
+   NEXUS_STORAGE_DSN=postgresql://nexus:your_password@127.0.0.1:5432/nexus
 
    # Voice transcription provider (default: gemini)
    # Options: gemini | copilot | whisper
@@ -107,6 +113,11 @@ Step through an interactive menu:
    # Local Whisper settings (used when TRANSCRIPTION_PRIMARY=whisper)
    # Common local models: tiny, base, small, medium, large
    WHISPER_MODEL=base
+   ```
+
+   If you enable PostgreSQL storage, install DB driver dependencies:
+   ```bash
+   pip install sqlalchemy psycopg2-binary
    ```
 
    In config/project_config.yaml, make sure the nexus project points to the

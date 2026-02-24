@@ -1,7 +1,7 @@
 """State management for Nexus - handles persistent storage."""
 import logging
 import time
-from typing import Dict, Optional, List
+from typing import Any, Callable, Dict, Optional, List
 from config import (
     LAUNCHED_AGENTS_FILE, TRACKED_ISSUES_FILE,
     AGENT_RECENT_WINDOW, ensure_data_dir, ensure_logs_dir
@@ -9,6 +9,16 @@ from config import (
 from orchestration.plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
+
+# Optional SocketIO emitter injected at startup by webhook_server.py.
+# Signature: (event_name: str, data: dict) -> None
+_socketio_emitter: Optional[Callable[[str, Any], None]] = None
+
+
+def set_socketio_emitter(emitter: Callable[[str, Any], None]) -> None:
+    """Register a SocketIO emit function for real-time transition broadcasting."""
+    global _socketio_emitter
+    _socketio_emitter = emitter
 
 
 def _get_state_store_plugin():
@@ -21,6 +31,15 @@ def _get_state_store_plugin():
 
 class StateManager:
     """Manages all persistent state for the Nexus system."""
+
+    @staticmethod
+    def emit_transition(event_type: str, data: dict) -> None:
+        """Broadcast a state transition via SocketIO (no-op if emitter not registered)."""
+        if _socketio_emitter is not None:
+            try:
+                _socketio_emitter(event_type, data)
+            except Exception as exc:
+                logger.warning(f"SocketIO emit failed for {event_type}: {exc}")
 
     @staticmethod
     def _load_json_state(path: str, default, ensure_logs: bool = False):
@@ -102,6 +121,12 @@ class StateManager:
         }
         StateManager.save_launched_agents(data)
         logger.info(f"Registered launched agent: {agent_name} (PID: {pid}) for issue #{issue_num}")
+        StateManager.emit_transition("agent_registered", {
+            "issue": issue_num,
+            "agent": agent_name,
+            "pid": pid,
+            "timestamp": data[key]["timestamp"],
+        })
 
     @staticmethod
     def was_recently_launched(issue_num: str, agent_name: str) -> bool:
@@ -170,6 +195,11 @@ class StateManager:
         data[str(issue_num)] = workflow_id
         StateManager.save_workflow_mapping(data)
         logger.info(f"Mapped issue #{issue_num} -> workflow {workflow_id}")
+        StateManager.emit_transition("workflow_mapped", {
+            "issue": issue_num,
+            "workflow_id": workflow_id,
+            "timestamp": time.time(),
+        })
 
     @staticmethod
     def get_workflow_id_for_issue(issue_num: str) -> Optional[str]:
