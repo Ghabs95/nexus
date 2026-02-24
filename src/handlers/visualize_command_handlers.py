@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from dataclasses import dataclass
 from io import BytesIO
@@ -22,12 +21,10 @@ from services.mermaid_render_service import build_mermaid_diagram, render_mermai
 class VisualizeHandlerDeps:
     logger: Any
     allowed_user_ids: List[int]
-    project_config: Dict[str, Dict[str, Any]]
     prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
     ensure_project_issue: Callable[
         [Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[Tuple[Optional[str], Optional[str], List[str]]]
     ]
-    project_repo: Callable[[str], str]
 
 
 async def visualize_handler(

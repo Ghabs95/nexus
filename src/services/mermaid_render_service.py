@@ -57,6 +57,8 @@ def build_mermaid_diagram(steps: List[Dict[str, Any]], issue_num: str) -> str:
         }.get(raw_status, "❓")
 
         label_parts = [f"{step_num}/{total}"]
+        if raw_name and raw_name != "unknown":
+            label_parts.append(raw_name)
         if agent_name:
             label_parts.append(agent_name)
         label_parts.append(f"{status_icon} {raw_status}")
@@ -106,6 +108,10 @@ async def render_mermaid_to_png(diagram_text: str) -> Optional[bytes]:
             await asyncio.wait_for(proc.communicate(), timeout=_MMDC_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                logger.warning("mmdc process did not exit promptly after kill()")
             logger.warning("mmdc timed out rendering Mermaid diagram")
             return None
 
