@@ -102,9 +102,9 @@ Step through an interactive menu:
    PROJECT_CONFIG_PATH=ghabs/nexus/config/project_config.yaml
    BASE_DIR=/home/ubuntu/git
 
-   # Workflow state storage
-   NEXUS_STORAGE_TYPE=postgres
-   NEXUS_STORAGE_DSN=postgresql://nexus:your_password@127.0.0.1:5432/nexus
+   # Workflow state storage backend (options: file | postgres | redis)
+   NEXUS_CORE_STORAGE=postgres
+   NEXUS_CORE_STORAGE_DSN=postgresql://nexus:your_password@127.0.0.1:5432/nexus
 
    # Voice transcription provider (default: gemini)
    # Options: gemini | copilot | whisper
@@ -115,10 +115,7 @@ Step through an interactive menu:
    WHISPER_MODEL=base
    ```
 
-   If you enable PostgreSQL storage, install DB driver dependencies:
-   ```bash
-   pip install sqlalchemy psycopg2-binary
-   ```
+   If you enable PostgreSQL storage, DB driver dependencies are installed via `requirements.txt`.
 
    In config/project_config.yaml, make sure the nexus project points to the
    nexus-core workspace so agent PRs land in the correct repo.
