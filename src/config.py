@@ -1,15 +1,14 @@
 """Centralized configuration for Nexus bot and processor."""
-import os
-import sys
 import logging
+import os
 import subprocess
+import sys
 import urllib.parse
-from typing import Any, List
+from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-
-from chat_agents_schema import get_project_chat_agents
+from nexus.core.chat_agents_schema import get_project_chat_agents
 
 # Load secrets from local file if exists
 SECRET_FILE = ".env"
@@ -31,7 +30,7 @@ def _get_int_env(name: str, default: int) -> int:
         return default
     return value if value > 0 else default
 
-def _parse_int_list(name: str) -> List[int]:
+def _parse_int_list(name: str) -> list[int]:
     raw = os.getenv(name, "")
     return [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
 
@@ -89,7 +88,7 @@ def _load_project_config(path: str) -> dict:
         FileNotFoundError: If file doesn't exist
         ValueError: If YAML is invalid or not a mapping
     """
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise ValueError("PROJECT_CONFIG must be a YAML mapping")
@@ -318,7 +317,7 @@ def get_chat_agents(project: str = "nexus") -> list[dict[str, Any]]:
 
     preferences = get_ai_tool_preferences(project)
     if isinstance(preferences, dict) and preferences:
-        for agent_type in preferences.keys():
+        for agent_type in preferences:
             normalized = str(agent_type).strip().lower()
             if normalized:
                 entries.append({"agent_type": normalized})
@@ -558,7 +557,7 @@ def get_default_project() -> str:
     raise ValueError("No project with repository configuration found in PROJECT_CONFIG")
 
 
-def get_github_repos(project: str) -> List[str]:
+def get_github_repos(project: str) -> list[str]:
     """Get all GitHub repositories configured for a project.
 
     Uses provider-neutral ``git_repo`` / ``git_repos``.
@@ -567,14 +566,14 @@ def get_github_repos(project: str) -> List[str]:
     if project not in config:
         raise KeyError(
             f"Project '{project}' not found in PROJECT_CONFIG. "
-            f"Available projects: {[k for k in config.keys() if isinstance(config.get(k), dict)]}"
+            f"Available projects: {[k for k in config if isinstance(config.get(k), dict)]}"
         )
 
     project_cfg = config[project]
     if not isinstance(project_cfg, dict):
         raise ValueError(f"Project '{project}' configuration must be a mapping")
 
-    repos: List[str] = []
+    repos: list[str] = []
     single_repo = project_cfg.get("git_repo")
     if isinstance(single_repo, str) and single_repo.strip():
         repos.append(single_repo.strip())
@@ -599,7 +598,7 @@ def get_github_repos(project: str) -> List[str]:
     return repos
 
 
-def _discover_workspace_repos(project_cfg: dict) -> List[str]:
+def _discover_workspace_repos(project_cfg: dict) -> list[str]:
     """Discover repository slugs from local git remotes in workspace.
 
     Scans workspace root and first-level subdirectories that are git repos.
@@ -620,7 +619,7 @@ def _discover_workspace_repos(project_cfg: dict) -> List[str]:
     except Exception:
         pass
 
-    repos: List[str] = []
+    repos: list[str] = []
     for candidate in candidates:
         if not os.path.isdir(os.path.join(candidate, ".git")):
             continue
@@ -855,7 +854,7 @@ def validate_configuration():
                         errors.append(
                             f"PROJECT_CONFIG['{project}']['git_repos'] must be a list"
                         )
-    except Exception as e:
+    except Exception:
         # If PROJECT_CONFIG can't be loaded, that's okay during import (tests handle this)
         pass
     

@@ -8,14 +8,14 @@ Bridges ProcessOrchestrator (nexus-core) with the concrete nexus host:
   - Workflow finalisation (close issue + PR)
 """
 
+import glob
 import logging
 import os
 import re
 import time
-import glob
+from collections.abc import Callable
+from datetime import UTC, datetime
 from urllib.parse import urlparse
-from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple
 
 from nexus.core.process_orchestrator import AgentRuntime
 
@@ -48,7 +48,7 @@ def get_recent_agent_comment_window_seconds() -> int:
         return DEFAULT_RECENT_AGENT_COMMENT_WINDOW_SECONDS
 
 
-def get_retry_fuse_status(issue_number: str, now_ts: Optional[float] = None) -> Dict[str, object]:
+def get_retry_fuse_status(issue_number: str, now_ts: float | None = None) -> dict[str, object]:
     """Return retry-fuse status snapshot for an issue.
 
     The status is read from launched-agents state and computed without mutating
@@ -128,8 +128,8 @@ class NexusAgentRuntime(AgentRuntime):
     def __init__(
         self,
         finalize_fn: Callable,
-        resolve_project: Optional[Callable] = None,
-        resolve_repo: Optional[Callable] = None,
+        resolve_project: Callable | None = None,
+        resolve_repo: Callable | None = None,
     ) -> None:
         self._finalize_fn = finalize_fn
         self._resolve_project = resolve_project
@@ -145,8 +145,8 @@ class NexusAgentRuntime(AgentRuntime):
         agent_type: str,
         *,
         trigger_source: str = "orchestrator",
-        exclude_tools: Optional[List[str]] = None,
-    ) -> Tuple[Optional[int], Optional[str]]:
+        exclude_tools: list[str] | None = None,
+    ) -> tuple[int | None, str | None]:
         state = self.get_workflow_state(str(issue_number))
         if state in {"COMPLETED", "FAILED", "CANCELLED"}:
             logger.info(
@@ -165,12 +165,12 @@ class NexusAgentRuntime(AgentRuntime):
             trigger_source=trigger_source,
             exclude_tools=exclude_tools,
         )
-    def load_launched_agents(self, recent_only: bool = True) -> Dict[str, dict]:
+    def load_launched_agents(self, recent_only: bool = True) -> dict[str, dict]:
         from state_manager import StateManager
 
         return StateManager.load_launched_agents(recent_only=recent_only)
 
-    def save_launched_agents(self, data: Dict[str, dict]) -> None:
+    def save_launched_agents(self, data: dict[str, dict]) -> None:
         from state_manager import StateManager
 
         StateManager.save_launched_agents(data)
@@ -257,9 +257,11 @@ class NexusAgentRuntime(AgentRuntime):
 
                 if not alerted:
                     try:
-                        from orchestration.plugin_runtime import get_workflow_state_plugin
-                        from config import NEXUS_CORE_STORAGE_DIR
                         from audit_store import AuditStore
+                        from config import NEXUS_CORE_STORAGE_DIR
+                        from orchestration.plugin_runtime import (
+                            get_workflow_state_plugin,
+                        )
 
                         workflow_plugin = get_workflow_state_plugin(
                             storage_dir=NEXUS_CORE_STORAGE_DIR,
@@ -366,7 +368,7 @@ class NexusAgentRuntime(AgentRuntime):
             )
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         window_seconds = get_recent_agent_comment_window_seconds()
         for comment in reversed(comments or []):
             body = str(getattr(comment, "body", "") or "")
@@ -382,7 +384,7 @@ class NexusAgentRuntime(AgentRuntime):
                 return True
 
             if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at = created_at.replace(tzinfo=UTC)
 
             age_seconds = (now - created_at).total_seconds()
             if age_seconds <= window_seconds:
@@ -435,10 +437,11 @@ class NexusAgentRuntime(AgentRuntime):
     # Optional hooks (override base-class no-ops)
     # ------------------------------------------------------------------
 
-    def get_workflow_state(self, issue_number: str) -> Optional[str]:
+    def get_workflow_state(self, issue_number: str) -> str | None:
         """Read workflow state directly from nexus-core FileStorage on disk."""
         import json
         import os
+
         from config import NEXUS_CORE_STORAGE_DIR
         from state_manager import StateManager
 
@@ -449,7 +452,7 @@ class NexusAgentRuntime(AgentRuntime):
             NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json"
         )
         try:
-            with open(wf_file, "r") as f:
+            with open(wf_file) as f:
                 state_str = json.load(f).get("state", "")
         except (FileNotFoundError, json.JSONDecodeError):
             return None
@@ -463,6 +466,7 @@ class NexusAgentRuntime(AgentRuntime):
         """Allow dead-agent retry only when workflow still has a matching RUNNING step."""
         import json
         import os
+
         from config import NEXUS_CORE_STORAGE_DIR
         from state_manager import StateManager
 
@@ -472,7 +476,7 @@ class NexusAgentRuntime(AgentRuntime):
 
         wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
         try:
-            with open(wf_file, "r") as f:
+            with open(wf_file) as f:
                 payload = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return False
@@ -506,7 +510,7 @@ class NexusAgentRuntime(AgentRuntime):
 
         return False
 
-    def _is_remote_issue_open(self, payload: dict, issue_number: str) -> Optional[bool]:
+    def _is_remote_issue_open(self, payload: dict, issue_number: str) -> bool | None:
         """Best-effort check whether the source issue still exists and is open.
 
         Returns:
@@ -554,10 +558,11 @@ class NexusAgentRuntime(AgentRuntime):
                 return False
             return None
 
-    def get_expected_running_agent(self, issue_number: str) -> Optional[str]:
+    def get_expected_running_agent(self, issue_number: str) -> str | None:
         """Return the current RUNNING step agent type from workflow storage."""
         import json
         import os
+
         from config import NEXUS_CORE_STORAGE_DIR
         from state_manager import StateManager
 
@@ -567,7 +572,7 @@ class NexusAgentRuntime(AgentRuntime):
 
         wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
         try:
-            with open(wf_file, "r") as f:
+            with open(wf_file) as f:
                 payload = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
@@ -595,10 +600,11 @@ class NexusAgentRuntime(AgentRuntime):
     def get_agent_timeout_seconds(
         self,
         issue_number: str,
-        agent_type: Optional[str] = None,
-    ) -> Optional[int]:
+        agent_type: str | None = None,
+    ) -> int | None:
         """Return workflow-defined timeout for issue/agent when available."""
         import json
+
         from config import NEXUS_CORE_STORAGE_DIR
         from state_manager import StateManager
 
@@ -608,7 +614,7 @@ class NexusAgentRuntime(AgentRuntime):
 
         wf_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
         try:
-            with open(wf_file, "r") as f:
+            with open(wf_file) as f:
                 payload = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
@@ -625,7 +631,7 @@ class NexusAgentRuntime(AgentRuntime):
                 return ""
             return str(agent.get("name", "")).strip().lower()
 
-        def _timeout_from_step(step: dict) -> Optional[int]:
+        def _timeout_from_step(step: dict) -> int | None:
             step_timeout = step.get("timeout")
             if isinstance(step_timeout, (int, float)) and int(step_timeout) > 0:
                 return int(step_timeout)
@@ -679,8 +685,8 @@ class NexusAgentRuntime(AgentRuntime):
         self,
         issue_number: str,
         log_file: str,
-        timeout_seconds: Optional[int] = None,
-    ) -> Tuple[bool, Optional[int]]:
+        timeout_seconds: int | None = None,
+    ) -> tuple[bool, int | None]:
         from runtime.agent_monitor import AgentMonitor
 
         resolved_timeout = timeout_seconds or self.get_agent_timeout_seconds(issue_number)
@@ -710,7 +716,7 @@ class NexusAgentRuntime(AgentRuntime):
                 f"notify_timeout failed for #{issue_number} / {agent_type}: {exc}"
             )
 
-    def get_latest_issue_log(self, issue_number: str) -> Optional[str]:
+    def get_latest_issue_log(self, issue_number: str) -> str | None:
         """Return latest task session log path for an issue, if present."""
         try:
             from config import BASE_DIR, get_nexus_dir_name

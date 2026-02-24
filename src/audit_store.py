@@ -7,7 +7,6 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import List, Optional
 
 from config import NEXUS_CORE_STORAGE_DIR
 
@@ -26,7 +25,7 @@ class AuditStore:
         return workflow_id or "_nexus_system"
 
     @staticmethod
-    def audit_log(issue_num: int, event: str, details: Optional[str] = None) -> None:
+    def audit_log(issue_num: int, event: str, details: str | None = None) -> None:
         """Log an audit event in nexus-core JSONL format."""
         try:
             timestamp = datetime.now().isoformat()
@@ -54,7 +53,7 @@ class AuditStore:
             logger.error(f"Failed to write audit log: {e}")
 
     @staticmethod
-    def get_audit_history(issue_num: int, limit: int = 50) -> List[dict]:
+    def get_audit_history(issue_num: int, limit: int = 50) -> list[dict]:
         """Get recent audit events for an issue from JSONL audit files."""
         from state_manager import StateManager
 
@@ -67,8 +66,8 @@ class AuditStore:
             if not os.path.exists(audit_file):
                 return []
 
-            entries: List[dict] = []
-            with open(audit_file, "r", encoding="utf-8") as f:
+            entries: list[dict] = []
+            with open(audit_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -84,7 +83,7 @@ class AuditStore:
             return []
 
     @staticmethod
-    def read_all_audit_events(since_hours: Optional[int] = None) -> List[dict]:
+    def read_all_audit_events(since_hours: int | None = None) -> list[dict]:
         """Read all audit events across workflow audit JSONL files."""
         audit_dir = os.path.join(NEXUS_CORE_STORAGE_DIR, "audit")
         if not os.path.isdir(audit_dir):
@@ -92,14 +91,14 @@ class AuditStore:
 
         cutoff = datetime.now() - timedelta(hours=since_hours) if since_hours is not None else None
 
-        events: List[dict] = []
+        events: list[dict] = []
         for fname in os.listdir(audit_dir):
             if not fname.endswith(".jsonl"):
                 continue
 
             fpath = os.path.join(audit_dir, fname)
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
+                with open(fpath, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:

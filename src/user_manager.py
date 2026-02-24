@@ -5,10 +5,10 @@ Allows users to track different issues across multiple projects (nxs, etc.).
 """
 import json
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+
 from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ USER_DATA_FILE = Path(DATA_DIR) / "user_tracking.json"
 class UserProject:
     """Represents a user's tracking for a specific project."""
     project_name: str  # nxs, etc.
-    tracked_issues: List[str]  # List of issue numbers as strings
+    tracked_issues: list[str]  # List of issue numbers as strings
     last_activity: str  # ISO format timestamp
     
 
@@ -29,9 +29,9 @@ class UserProject:
 class User:
     """Represents a Nexus user."""
     telegram_id: int
-    username: Optional[str]
-    first_name: Optional[str]
-    projects: Dict[str, UserProject]  # project_name -> UserProject
+    username: str | None
+    first_name: str | None
+    projects: dict[str, UserProject]  # project_name -> UserProject
     created_at: str  # ISO format timestamp
     last_seen: str  # ISO format timestamp
     
@@ -47,14 +47,14 @@ class UserManager:
             data_file: Path to user data JSON file
         """
         self.data_file = data_file
-        self.users: Dict[int, User] = {}
+        self.users: dict[int, User] = {}
         self.load_users()
     
     def load_users(self) -> None:
         """Load user data from file."""
         try:
             if self.data_file.exists():
-                with open(self.data_file, 'r') as f:
+                with open(self.data_file) as f:
                     data = json.load(f)
                     
                 for user_id_str, user_data in data.items():
@@ -120,8 +120,8 @@ class UserManager:
     def get_or_create_user(
         self,
         telegram_id: int,
-        username: Optional[str] = None,
-        first_name: Optional[str] = None
+        username: str | None = None,
+        first_name: str | None = None
     ) -> User:
         """
         Get existing user or create new one.
@@ -165,8 +165,8 @@ class UserManager:
         telegram_id: int,
         project: str,
         issue_number: str,
-        username: Optional[str] = None,
-        first_name: Optional[str] = None
+        username: str | None = None,
+        first_name: str | None = None
     ) -> None:
         """
         Track an issue for a user in a specific project.
@@ -234,8 +234,8 @@ class UserManager:
     def get_user_tracked_issues(
         self,
         telegram_id: int,
-        project: Optional[str] = None
-    ) -> Dict[str, List[str]]:
+        project: str | None = None
+    ) -> dict[str, list[str]]:
         """
         Get all issues tracked by a user.
         
@@ -269,7 +269,7 @@ class UserManager:
         self,
         project: str,
         issue_number: str
-    ) -> List[int]:
+    ) -> list[int]:
         """
         Get all users tracking a specific issue.
         
@@ -289,7 +289,7 @@ class UserManager:
         
         return trackers
     
-    def get_user_stats(self, telegram_id: int) -> Dict:
+    def get_user_stats(self, telegram_id: int) -> dict:
         """
         Get statistics for a user.
         
@@ -321,7 +321,7 @@ class UserManager:
             'last_seen': user.last_seen
         }
     
-    def get_all_users_stats(self) -> Dict:
+    def get_all_users_stats(self) -> dict:
         """
         Get statistics for all users.
         
@@ -348,7 +348,7 @@ class UserManager:
 
 
 # Global singleton
-_user_manager: Optional[UserManager] = None
+_user_manager: UserManager | None = None
 
 
 def get_user_manager() -> UserManager:

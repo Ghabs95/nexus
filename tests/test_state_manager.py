@@ -1,8 +1,9 @@
 """Tests for state_manager module."""
-import pytest
-import time
-from unittest.mock import patch, MagicMock
 import sys
+import time
+from unittest.mock import MagicMock, patch
+
+
 sys.path.insert(0, '/home/ubuntu/git/ghabs/nexus/src')
 from state_manager import StateManager
 

@@ -6,76 +6,94 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
-from telegram import Update
-from telegram.ext import ContextTypes
+from nexus.adapters.notifications.base import Button
+
+from interactive_context import InteractiveContext
 from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
-class MonitoringHandlerDeps:
+class MonitoringHandlersDeps:  # Renamed to MonitoringHandlersDeps
     logger: Any
-    allowed_user_ids: List[int]
+    allowed_user_ids: list[int]
     base_dir: str
-    project_config: Dict[str, Dict[str, Any]]
-    types_map: Dict[str, str]
-    prompt_monitor_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
-    prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
+    project_config: dict[str, dict[str, Any]]
+    types_map: dict[str, str]
+    # Removed prompt_monitor_project_selection and prompt_project_selection
+    ensure_project: Callable[[InteractiveContext, str], Awaitable[str | None]]
     ensure_project_issue: Callable[
-        [Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[Tuple[Optional[str], Optional[str], List[str]]]
+        [InteractiveContext, str], Awaitable[tuple[str | None, str | None, list[str]]]
     ]
-    normalize_project_key: Callable[[str], Optional[str]]
-    iter_project_keys: Callable[[], List[str]]
+    normalize_project_key: Callable[[str], str | None]
+    iter_project_keys: Callable[[], list[str]]
     get_project_label: Callable[[str], str]
-    get_project_root: Callable[[str], Optional[str]]
-    get_project_logs_dir: Callable[[str], Optional[str]]
+    get_project_root: Callable[[str], str | None]
+    get_project_logs_dir: Callable[[str], str | None]
     project_repo: Callable[[str], str]
-    get_issue_details: Callable[[str, Optional[str]], Optional[Dict[str, Any]]]
+    get_issue_details: Callable[[str, str | None], dict[str, Any] | None]
     get_inbox_dir: Callable[[str, str], str]
     get_tasks_active_dir: Callable[[str, str], str]
     get_tasks_closed_dir: Callable[[str, str], str]
-    extract_issue_number_from_file: Callable[[str], Optional[str]]
-    build_issue_url: Callable[[str, str, Optional[Dict[str, Any]]], str]
-    find_task_file_by_issue: Callable[[str], Optional[str]]
-    find_issue_log_files: Callable[..., List[str]]
-    read_latest_log_tail: Callable[..., List[str]]
-    search_logs_for_issue: Callable[[str], List[str]]
-    read_latest_log_full: Callable[[Optional[str]], List[str]]
-    read_log_matches: Callable[..., List[str]]
-    active_tail_sessions: Dict[Tuple[int, int], str]
-    active_tail_tasks: Dict[Tuple[int, int], asyncio.Task]
-    get_retry_fuse_status: Callable[[str], Dict[str, Any]]
-    normalize_agent_reference: Callable[[Optional[str]], Optional[str]]
-    get_expected_running_agent_from_workflow: Callable[[str], Optional[str]]
+    extract_issue_number_from_file: Callable[[str], str | None]
+    build_issue_url: Callable[[str, str, dict[str, Any] | None], str]
+    find_task_file_by_issue: Callable[[str], str | None]
+    find_issue_log_files: Callable[..., list[str]]
+    read_latest_log_tail: Callable[..., list[str]]
+    search_logs_for_issue: Callable[[str], list[str]]
+    read_latest_log_full: Callable[[str | None], list[str]]
+    read_log_matches: Callable[..., list[str]]
+    active_tail_sessions: dict[tuple[int, int], str]
+    active_tail_tasks: dict[tuple[int, int], asyncio.Task]
+    get_retry_fuse_status: Callable[[str], dict[str, Any]]
+    normalize_agent_reference: Callable[[str | None], str | None]
+    get_expected_running_agent_from_workflow: Callable[[str], str | None]
     get_direct_issue_plugin: Callable[[str], Any]
-    extract_structured_completion_signals: Callable[[List[dict]], List[Dict[str, str]]]
-    read_latest_local_completion: Callable[[str], Optional[Dict[str, Any]]]
-    build_workflow_snapshot: Callable[..., Dict[str, Any]]
+    extract_structured_completion_signals: Callable[[list[dict]], list[dict[str, str]]]
+    read_latest_local_completion: Callable[[str], dict[str, Any] | None]
+    build_workflow_snapshot: Callable[..., dict[str, Any]]
+    # Added for monitoring_callback_handler
+    default_repo: str | None
+    project_issue_url: Callable[[str, str, dict[str, Any] | None], str]
+    projects: dict[str, Any]
+    tasks_dir: Callable[[str, str], str]
+    resolve_project_config_from_task: Callable[[str], dict[str, Any] | None]
+    run_cli_agent: Callable[[str, str, str, str | None], Awaitable[tuple[bool, str]]]
+    user_manager: Any
+    save_tracked_issues: Callable[[], None]
+    tracked_issues_ref: list[str]
+    track_short_projects: bool
+    default_issue_url: Callable[[str, dict[str, Any] | None], str]
+    state_manager: Any
 
 
-async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
-    deps.logger.info(f"Status triggered by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def status_handler(ctx: InteractiveContext, deps: MonitoringHandlersDeps) -> None:
+    deps.logger.info(f"Status triggered by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
     project_filter = None
-    issue_num: Optional[str] = None
-    if context.args:
-        raw = context.args[0].strip().lower()
+    issue_num: str | None = None
+    if ctx.args:
+        raw = ctx.args[0].strip().lower()
         if raw != "all":
             project_filter = deps.normalize_project_key(raw)
             if project_filter not in deps.iter_project_keys():
-                await update.effective_message.reply_text(f"❌ Unknown project '{raw}'.")
+                await ctx.reply_text(f"❌ Unknown project '{raw}'.")
                 return
-        if len(context.args) > 1:
-            candidate = str(context.args[1]).strip()
+        if len(ctx.args) > 1:
+            candidate = str(ctx.args[1]).strip()
             if candidate.isdigit():
                 issue_num = candidate
     else:
-        await deps.prompt_monitor_project_selection(update, context, "status")
+        # Replaced prompt_monitor_project_selection
+        buttons = [[Button(label=deps.get_project_label(pk), callback_data=f"status:{pk}")] for pk in deps.iter_project_keys()]
+        buttons.append([Button(label="All Projects", callback_data="status:all")])
+        await ctx.reply_text("Please select a project to view its status:", buttons=buttons)
         return
 
     selected_projects = [project_filter] if project_filter else deps.iter_project_keys()
@@ -176,31 +194,36 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
                 f"- running: {snapshot['running_step']} ({snapshot['running_step_name']}) / {snapshot['running_agent']}"
             )
 
-    await update.effective_message.reply_text(
+    await ctx.reply_text(
         status_text,
         parse_mode=None if with_issue_snapshot else "Markdown",
         disable_web_page_preview=True,
     )
 
 
-async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
-    deps.logger.info(f"Active triggered by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def active_handler(ctx: InteractiveContext, deps: MonitoringHandlersDeps) -> None:
+    deps.logger.info(f"Active triggered by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    cleanup_mode = any(arg.lower() in {"cleanup", "--cleanup"} for arg in (context.args or []))
-    project_tokens = [arg for arg in (context.args or []) if arg.lower() not in {"cleanup", "--cleanup"}]
+    cleanup_mode = any(arg.lower() in {"cleanup", "--cleanup"} for arg in (ctx.args or []))
+    project_tokens = [arg for arg in (ctx.args or []) if arg.lower() not in {"cleanup", "--cleanup"}]
     project_filter = None
     if project_tokens:
         raw = project_tokens[0].strip().lower()
         if raw != "all":
             project_filter = deps.normalize_project_key(raw)
             if project_filter not in deps.iter_project_keys():
-                await update.effective_message.reply_text(f"❌ Unknown project '{raw}'.")
+                await ctx.reply_text(f"❌ Unknown project '{raw}'.")
                 return
     elif not cleanup_mode:
-        await deps.prompt_monitor_project_selection(update, context, "active")
+        # Replaced prompt_monitor_project_selection
+        buttons = [[Button(label=deps.get_project_label(pk), callback_data=f"active:{pk}")] for pk in deps.iter_project_keys()]
+        buttons.append([Button(label="All Projects", callback_data="active:all")])
+        if cleanup_mode:
+            buttons.append([Button(label="All Projects (Cleanup)", callback_data="active:all:cleanup")])
+        await ctx.reply_text("Please select a project to view its active tasks:", buttons=buttons)
         return
 
     selected_projects = [project_filter] if project_filter else deps.iter_project_keys()
@@ -212,7 +235,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
     total_skipped_closed = 0
     total_archived = 0
 
-    issue_state_cache: Dict[str, str] = {}
+    issue_state_cache: dict[str, str] = {}
 
     for project_key in selected_projects:
         display_name = deps.get_project_label(project_key)
@@ -225,7 +248,7 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
             if files:
                 repo = deps.project_repo(project_key)
                 project_issue_cfg = deps.project_config.get(project_key)
-                open_files: List[Tuple[str, Optional[str]]] = []
+                open_files: list[tuple[str, str | None]] = []
                 stale_count = 0
 
                 for filename in files:
@@ -312,28 +335,30 @@ async def active_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
     if cleanup_mode:
         active_text += f"\n📦 Archived {total_archived} closed task file(s) to `tasks/closed`."
 
-    await update.effective_message.reply_text(
+    await ctx.reply_text(
         active_text,
         parse_mode="Markdown",
         disable_web_page_preview=True,
     )
 
 
-async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
-    deps.logger.info(f"Logs requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def logs_handler(ctx: InteractiveContext, deps: MonitoringHandlersDeps) -> None:
+    deps.logger.info(f"Logs requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "logs")
+    if not ctx.args:
+        # Replaced prompt_project_selection
+        buttons = [[Button(label=deps.get_project_label(pk), callback_data=f"logs:{pk}")] for pk in deps.iter_project_keys()]
+        await ctx.reply_text("Please select a project to view logs:", buttons=buttons)
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "logs")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "logs")
     if not project_key:
         return
 
-    msg = await update.effective_message.reply_text(f"📋 Fetching logs for issue #{issue_num}...")
+    msg = await ctx.reply_text(f"📋 Fetching logs for issue #{issue_num}...")
 
     repo = deps.project_repo(project_key)
     details = deps.get_issue_details(issue_num, repo=repo)
@@ -360,7 +385,7 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
         latest = non_empty[0] if non_empty else issue_logs[-1]
         deps.logger.info(f"Reading log file: {latest}")
         try:
-            with open(latest, "r", encoding="utf-8") as handle:
+            with open(latest, encoding="utf-8") as handle:
                 lines = handle.readlines()[-50:]
             deps.logger.info(f"Read {len(lines)} lines from log file")
             timeline += f"\n**{os.path.basename(latest)}** (last 50 lines):\n"
@@ -390,8 +415,7 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
 
     max_len = 3500
     if len(timeline) <= max_len:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
+        await ctx.edit_message_text(
             message_id=msg.message_id,
             text=timeline,
         )
@@ -399,34 +423,34 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
         chunks = [timeline[i : i + max_len] for i in range(0, len(timeline), max_len)]
         for idx, chunk in enumerate(chunks):
             if idx == 0:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
+                await ctx.edit_message_text(
                     message_id=msg.message_id,
                     text=chunk,
                 )
             else:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
+                await ctx.reply_text(text=chunk)
 
 
 async def logsfull_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    deps: MonitoringHandlerDeps,
+    ctx: InteractiveContext,
+    deps: MonitoringHandlersDeps,
 ) -> None:
-    deps.logger.info(f"Logsfull requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Logsfull requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "logsfull")
+    if not ctx.args:
+        # Replaced prompt_project_selection
+        buttons = [[Button(label=deps.get_project_label(pk), callback_data=f"logsfull:{pk}")] for pk in deps.iter_project_keys()]
+        await ctx.reply_text("Please select a project to view full logs:", buttons=buttons)
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "logsfull")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "logsfull")
     if not project_key:
         return
 
-    msg = await update.effective_message.reply_text(f"📋 Fetching full logs for issue #{issue_num}...")
+    msg = await ctx.reply_text(f"📋 Fetching full logs for issue #{issue_num}...")
     repo = deps.project_repo(project_key)
     issue_cfg = deps.project_config.get(project_key)
     issue_url = deps.build_issue_url(repo, issue_num, issue_cfg if isinstance(issue_cfg, dict) else None)
@@ -469,34 +493,34 @@ async def logsfull_handler(
 
     max_len = 3500
     if len(timeline) <= max_len:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
+        await ctx.edit_message_text(
             message_id=msg.message_id,
             text=timeline,
         )
         return
 
     chunks = [timeline[i : i + max_len] for i in range(0, len(timeline), max_len)]
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
+    await ctx.edit_message_text(
         message_id=msg.message_id,
         text=chunks[0],
     )
     for part in chunks[1:]:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=part)
+        await ctx.reply_text(text=part)
 
 
-async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
-    deps.logger.info(f"Tail requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def tail_handler(ctx: InteractiveContext, deps: MonitoringHandlersDeps) -> None:
+    deps.logger.info(f"Tail requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "tail")
+    if not ctx.args:
+        # Replaced prompt_project_selection
+        buttons = [[Button(label=deps.get_project_label(pk), callback_data=f"tail:{pk}")] for pk in deps.iter_project_keys()]
+        await ctx.reply_text("Please select a project to tail logs:", buttons=buttons)
         return
 
-    project_key, issue_num, rest = await deps.ensure_project_issue(update, context, "tail")
+    project_key, issue_num, rest = await deps.ensure_project_issue(ctx, "tail")
     if not project_key:
         return
 
@@ -507,13 +531,13 @@ async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
         try:
             max_lines = max(5, min(200, int(rest[0])))
         except ValueError:
-            await update.effective_message.reply_text("⚠️ Line count must be a number.")
+            await ctx.reply_text("⚠️ Line count must be a number.")
             return
     if len(rest) > 1:
         try:
             follow_seconds = max(5, min(300, int(rest[1])))
         except ValueError:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 "⚠️ Follow duration must be a number of seconds."
             )
             return
@@ -529,7 +553,7 @@ async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
     if not task_file:
         task_file = deps.find_task_file_by_issue(issue_num)
 
-    def _read_tail_lines() -> List[str]:
+    def _read_tail_lines() -> list[str]:
         lines_local = deps.read_latest_log_tail(task_file, max_lines=max_lines)
         if lines_local:
             return lines_local
@@ -545,15 +569,15 @@ async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
                 log_files.sort(key=os.path.getmtime, reverse=True)
                 latest = log_files[0]
                 try:
-                    with open(latest, "r", encoding="utf-8") as handle:
+                    with open(latest, encoding="utf-8") as handle:
                         tail_lines = handle.readlines()[-max_lines:]
                     return [f"[{os.path.basename(latest)}] {line.rstrip()}" for line in tail_lines]
                 except Exception as exc:
                     deps.logger.error(f"Error reading log file: {exc}", exc_info=True)
         return []
 
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    chat_id = ctx.chat_id
+    user_id = int(ctx.user_id)
     session_key = (chat_id, user_id)
 
     existing_task = deps.active_tail_tasks.get(session_key)
@@ -563,7 +587,7 @@ async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
     session_token = f"{issue_num}:{time.time()}"
     deps.active_tail_sessions[session_key] = session_token
 
-    msg = await update.effective_message.reply_text(
+    msg = await ctx.reply_text(
         f"📋 Following log tail for #{issue_num} ({max_lines} lines, {follow_seconds}s)...\n"
         "Use /tailstop to stop."
     )
@@ -592,8 +616,7 @@ async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
 
                 if text != previous_text:
                     try:
-                        await context.bot.edit_message_text(
-                            chat_id=update.effective_chat.id,
+                        await ctx.edit_message_text(
                             message_id=msg.message_id,
                             text=text,
                         )
@@ -613,48 +636,49 @@ async def tail_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
             if existing is asyncio.current_task():
                 deps.active_tail_tasks.pop(session_key, None)
 
-    deps.active_tail_tasks[session_key] = context.application.create_task(_run_tail_follow())
+    deps.active_tail_tasks[session_key] = asyncio.create_task(_run_tail_follow())
 
 
 async def tailstop_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    deps: MonitoringHandlerDeps,
+    ctx: InteractiveContext,
+    deps: MonitoringHandlersDeps,
 ) -> None:
-    deps.logger.info(f"Tailstop requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Tailstop requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    session_key = (update.effective_chat.id, update.effective_user.id)
+    session_key = (ctx.chat_id, int(ctx.user_id))
     active_task = deps.active_tail_tasks.get(session_key)
     if session_key in deps.active_tail_sessions or (active_task and not active_task.done()):
         deps.active_tail_sessions.pop(session_key, None)
         if active_task and not active_task.done():
             active_task.cancel()
         deps.active_tail_tasks.pop(session_key, None)
-        await update.effective_message.reply_text("⏹️ Stopped live tail session.")
+        await ctx.reply_text("⏹️ Stopped live tail session.")
     else:
-        await update.effective_message.reply_text("ℹ️ No active live tail session to stop.")
+        await ctx.reply_text("ℹ️ No active live tail session to stop.")
 
 
-async def fuse_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: MonitoringHandlerDeps) -> None:
-    deps.logger.info(f"Fuse status requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def fuse_handler(ctx: InteractiveContext, deps: MonitoringHandlersDeps) -> None:
+    deps.logger.info(f"Fuse status requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "fuse")
+    if not ctx.args:
+        # Replaced prompt_project_selection
+        buttons = [[Button(label=deps.get_project_label(pk), callback_data=f"fuse:{pk}")] for pk in deps.iter_project_keys()]
+        await ctx.reply_text("Please select a project to view fuse status:", buttons=buttons)
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "fuse")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "fuse")
     if not project_key:
         return
 
     status = deps.get_retry_fuse_status(issue_num)
     if not status.get("exists"):
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"🧯 Retry fuse: no state recorded for issue #{issue_num}."
         )
         return
@@ -696,4 +720,4 @@ async def fuse_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps:
         f"Window remaining: {window_remaining_text}\n"
         f"Fuse trips in last {hard_window_minutes}m: {trip_count}/{trip_threshold}"
     )
-    await update.effective_message.reply_text(text, parse_mode="Markdown")
+    await ctx.reply_text(text)

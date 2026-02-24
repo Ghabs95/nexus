@@ -1,12 +1,10 @@
 """Rate limiting and throttling for Telegram commands and GitHub API calls."""
+import json
 import logging
+import os
 import time
-from typing import Dict, Optional, Tuple
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-import json
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +75,7 @@ class RateLimiter:
         "github_issue_create": RateLimit(10, 3600, "10 issue creates/hour"),
     }
     
-    def __init__(self, state_file: Optional[str] = None):
+    def __init__(self, state_file: str | None = None):
         """
         Initialize rate limiter.
         
@@ -85,7 +83,7 @@ class RateLimiter:
             state_file: Optional path to persist rate limit state
         """
         self.state_file = state_file
-        self.user_quotas: Dict[int, Dict[str, UserQuota]] = defaultdict(
+        self.user_quotas: dict[int, dict[str, UserQuota]] = defaultdict(
             lambda: defaultdict(lambda: UserQuota(user_id=0))
         )
         self.global_quota = UserQuota(user_id=0)  # For global limits
@@ -98,8 +96,8 @@ class RateLimiter:
         self,
         user_id: int,
         action: str,
-        limit: Optional[RateLimit] = None
-    ) -> Tuple[bool, Optional[str]]:
+        limit: RateLimit | None = None
+    ) -> tuple[bool, str | None]:
         """
         Check if a request is allowed under rate limits.
         
@@ -163,8 +161,8 @@ class RateLimiter:
         self,
         user_id: int,
         action: str,
-        limit: Optional[RateLimit] = None
-    ) -> Tuple[bool, Optional[str]]:
+        limit: RateLimit | None = None
+    ) -> tuple[bool, str | None]:
         """
         Convenience method to check limit and record if allowed.
         
@@ -191,7 +189,7 @@ class RateLimiter:
         recent_count = quota.count_recent(limit.window_seconds)
         return max(0, limit.max_requests - recent_count)
     
-    def reset_user(self, user_id: int, action: Optional[str] = None):
+    def reset_user(self, user_id: int, action: str | None = None):
         """
         Reset rate limits for a user.
         
@@ -226,7 +224,7 @@ class RateLimiter:
         # Clean up global quota
         self.global_quota.cleanup_old(3600)  # Keep 1 hour of data
     
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Get rate limiter statistics."""
         return {
             "active_users": len(self.user_quotas),
@@ -268,7 +266,7 @@ class RateLimiter:
             return
         
         try:
-            with open(self.state_file, 'r') as f:
+            with open(self.state_file) as f:
                 state = json.load(f)
             
             # Restore user quotas
@@ -294,7 +292,7 @@ class RateLimiter:
 rate_limiter = None
 
 
-def get_rate_limiter(state_file: Optional[str] = None) -> RateLimiter:
+def get_rate_limiter(state_file: str | None = None) -> RateLimiter:
     """Get or create global rate limiter instance."""
     global rate_limiter
     if rate_limiter is None:

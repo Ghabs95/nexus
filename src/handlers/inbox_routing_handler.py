@@ -1,9 +1,11 @@
-import os
 import logging
-from typing import Dict, Any, Optional
+import os
+from typing import Any
+
+from nexus.core.utils.task_name import generate_task_name, normalize_task_name
+
 from config import BASE_DIR, PROJECT_CONFIG, get_inbox_dir
 from handlers.common_routing import extract_json_dict
-from nexus.core.utils.task_name import generate_task_name, normalize_task_name
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ TYPES = {
     "improvement-simple": "Improvement (Simple)"
 }
 
-def _parse_classification_result(result: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_classification_result(result: dict[str, Any]) -> dict[str, Any]:
     """Normalize orchestrator classification output into a plain dict payload."""
     if not isinstance(result, dict):
         return {}
@@ -58,8 +60,8 @@ async def process_inbox_task(
     text: str,
     orchestrator,
     message_id_or_unique_id: str,
-    project_hint: Optional[str] = None,
-) -> Dict[str, Any]:
+    project_hint: str | None = None,
+) -> dict[str, Any]:
     """
     Core logic for processing a task from natural language text.
     Classifies the task, creates the markdown file in the inbox, and returns the result.
@@ -72,7 +74,7 @@ async def process_inbox_task(
     - pending_resolution: dict (Optional, if project needs manual selection)
     """
     normalized_project_hint = str(project_hint or "").strip().lower()
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
 
     if normalized_project_hint in PROJECTS:
         logger.info(
@@ -197,7 +199,7 @@ async def process_inbox_task(
         "content": content
     }
 
-async def save_resolved_task(pending_project: dict, selected_project: str, message_id_or_unique_id: str) -> Dict[str, Any]:
+async def save_resolved_task(pending_project: dict, selected_project: str, message_id_or_unique_id: str) -> dict[str, Any]:
     """Save a task that previously lacked a clear project after the user specifies one."""
     project = selected_project
     task_type = str(pending_project.get("task_type", "feature"))

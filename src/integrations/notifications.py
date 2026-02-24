@@ -4,8 +4,8 @@ Provides rich Telegram notifications with interactive buttons for quick actions.
 """
 import logging
 import re
-from typing import Dict, List, Optional
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, get_github_repo
+
+from config import TELEGRAM_CHAT_ID, TELEGRAM_TOKEN, get_github_repo
 from orchestration.plugin_runtime import get_profiled_plugin
 
 logger = logging.getLogger(__name__)
@@ -38,9 +38,9 @@ class InlineKeyboard:
     
     def __init__(self):
         """Initialize keyboard builder."""
-        self.rows: List[List[Dict]] = []
+        self.rows: list[list[dict]] = []
     
-    def add_button(self, text: str, callback_data: Optional[str] = None, url: Optional[str] = None):
+    def add_button(self, text: str, callback_data: str | None = None, url: str | None = None):
         """
         Add a button to the current row.
         
@@ -71,7 +71,7 @@ class InlineKeyboard:
         self.rows.append([])
         return self
     
-    def build(self) -> Dict:
+    def build(self) -> dict:
         """
         Build the keyboard structure.
         
@@ -84,7 +84,7 @@ class InlineKeyboard:
 def send_notification(
     message: str,
     parse_mode: str = "Markdown",
-    keyboard: Optional[InlineKeyboard] = None
+    keyboard: InlineKeyboard | None = None
 ) -> bool:
     """
     Send a notification to Telegram with optional inline keyboard.
@@ -197,10 +197,10 @@ def notify_workflow_started(issue_number: str, project: str, tier: str, task_typ
 
 def notify_agent_completed(
     issue_number: str,
-    completed_agent: Optional[str] = None,
+    completed_agent: str | None = None,
     next_agent: str = "",
     project: str = "nexus",
-    agent_name: Optional[str] = None,
+    agent_name: str | None = None,
 ) -> bool:
     """
     Send notification that an agent completed and next one started.
@@ -377,7 +377,7 @@ def notify_approval_required(
     step_num: int,
     step_name: str,
     agent: str,
-    approvers: List[str],
+    approvers: list[str],
     project: str = "nexus",
 ) -> bool:
     """

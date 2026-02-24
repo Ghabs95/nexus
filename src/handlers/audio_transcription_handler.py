@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 from telegram.ext import ContextTypes
 
@@ -13,16 +14,16 @@ from telegram.ext import ContextTypes
 @dataclass
 class AudioTranscriptionDeps:
     logger: Any
-    transcribe_audio_cli: Callable[[str], Optional[str]]
+    transcribe_audio_cli: Callable[[str], str | None]
 
 
 async def transcribe_telegram_voice(
     voice_file_id: str,
     context: ContextTypes.DEFAULT_TYPE,
     deps: AudioTranscriptionDeps,
-) -> Optional[str]:
+) -> str | None:
     """Download Telegram voice file and return transcribed text."""
-    temp_path: Optional[str] = None
+    temp_path: str | None = None
 
     try:
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:

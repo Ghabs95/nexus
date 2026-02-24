@@ -1,17 +1,18 @@
 """Tests for notifications module."""
-import pytest
-from unittest.mock import patch, MagicMock
 import sys
+from unittest.mock import MagicMock, patch
+
+
 sys.path.insert(0, '/home/ubuntu/git/ghabs/nexus/src')
 from integrations.notifications import (
     InlineKeyboard,
-    send_notification,
-    notify_agent_needs_input,
-    notify_workflow_started,
     notify_agent_completed,
+    notify_agent_needs_input,
     notify_agent_timeout,
+    notify_implementation_requested,
     notify_workflow_completed,
-    notify_implementation_requested
+    notify_workflow_started,
+    send_notification,
 )
 
 

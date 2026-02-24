@@ -4,11 +4,12 @@ This module provides reusable error handling patterns for external service calls
 like GitHub CLI, file I/O, and API requests.
 """
 
-import time
-import subprocess
 import logging
-from typing import Callable, Any, Optional, List, Type
+import subprocess
+import time
+from collections.abc import Callable
 from functools import wraps
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ def retry_with_backoff(
 
 
 def run_command_with_retry(
-    cmd: List[str],
+    cmd: list[str],
     max_attempts: int = 3,
     timeout: int = 30,
     check: bool = True,
@@ -134,7 +135,7 @@ def run_command_with_retry(
     
     try:
         return _run()
-    except subprocess.TimeoutExpired as e:
+    except subprocess.TimeoutExpired:
         logger.error(f"Command timed out after {timeout}s: {' '.join(cmd)}")
         raise
     except FileNotFoundError as e:
@@ -157,7 +158,7 @@ def safe_file_write(filepath: str, content: str, encoding: str = 'utf-8') -> boo
         with open(filepath, 'w', encoding=encoding) as f:
             f.write(content)
         return True
-    except (IOError, OSError) as e:
+    except OSError as e:
         logger.error(f"Failed to write to {filepath}: {e}")
         return False
     except Exception as e:
@@ -177,12 +178,12 @@ def safe_file_read(filepath: str, encoding: str = 'utf-8', default: str = '') ->
         File contents or default value
     """
     try:
-        with open(filepath, 'r', encoding=encoding) as f:
+        with open(filepath, encoding=encoding) as f:
             return f.read()
     except FileNotFoundError:
         logger.debug(f"File not found: {filepath}, returning default")
         return default
-    except (IOError, OSError) as e:
+    except OSError as e:
         logger.error(f"Failed to read {filepath}: {e}")
         return default
     except Exception as e:
@@ -190,7 +191,7 @@ def safe_file_read(filepath: str, encoding: str = 'utf-8', default: str = '') ->
         return default
 
 
-def validate_required_env_vars(required_vars: List[str]) -> None:
+def validate_required_env_vars(required_vars: list[str]) -> None:
     """Validate that required environment variables are set.
     
     Args:
@@ -239,10 +240,10 @@ def format_error_for_user(error: Exception, context: str = "") -> str:
         return f"⚙️ Configuration error: {error_msg}. Please contact administrator."
     
     elif "rate limit" in error_msg.lower():
-        return f"⏳ GitHub rate limit reached. Please wait a few minutes and try again."
+        return "⏳ GitHub rate limit reached. Please wait a few minutes and try again."
     
     elif "not found" in error_msg.lower() and "issue" in error_msg.lower():
-        return f"🔍 Issue not found. Please check the issue number and try again."
+        return "🔍 Issue not found. Please check the issue number and try again."
     
     else:
         # Generic error with some details but not too technical

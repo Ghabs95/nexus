@@ -6,23 +6,27 @@ import json
 import logging
 import os
 from collections import deque
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 from config import INBOX_PROCESSOR_LOG_FILE, NEXUS_CORE_STORAGE_DIR
-from orchestration.plugin_runtime import get_runtime_ops_plugin, get_workflow_state_plugin
+from orchestration.plugin_runtime import (
+    get_runtime_ops_plugin,
+    get_workflow_state_plugin,
+)
 from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
 
-def _latest_processor_signal_for_issue(issue_num: str, max_lines: int = 3000) -> Dict[str, str]:
+def _latest_processor_signal_for_issue(issue_num: str, max_lines: int = 3000) -> dict[str, str]:
     """Return latest inbox-processor signal line for an issue."""
     if not os.path.exists(INBOX_PROCESSOR_LOG_FILE):
         return {}
 
     tail_lines: deque[str] = deque(maxlen=max_lines)
     try:
-        with open(INBOX_PROCESSOR_LOG_FILE, "r", encoding="utf-8", errors="ignore") as handle:
+        with open(INBOX_PROCESSOR_LOG_FILE, encoding="utf-8", errors="ignore") as handle:
             for line in handle:
                 tail_lines.append(line.rstrip("\n"))
     except Exception:
@@ -76,10 +80,10 @@ async def reconcile_issue_from_signals(
     project_key: str,
     repo: str,
     get_issue_plugin: Callable[[str], Any],
-    extract_structured_completion_signals: Callable[[List[dict]], List[Dict[str, str]]],
-    workflow_state_plugin_kwargs: Dict[str, Any],
-    write_local_completion_from_signal: Callable[[str, str, Dict[str, str]], str],
-) -> Dict[str, Any]:
+    extract_structured_completion_signals: Callable[[list[dict]], list[dict[str, str]]],
+    workflow_state_plugin_kwargs: dict[str, Any],
+    write_local_completion_from_signal: Callable[[str, str, dict[str, str]], str],
+) -> dict[str, Any]:
     """Reconcile workflow + local completion using structured GitHub comments."""
     plugin = get_issue_plugin(repo)
     if not plugin:
@@ -106,7 +110,7 @@ async def reconcile_issue_from_signals(
     if was_paused:
         await workflow_plugin.resume_workflow(issue_num)
 
-    applied: List[Dict[str, str]] = []
+    applied: list[dict[str, str]] = []
     for signal in signals:
         outputs = {
             "status": "complete",
@@ -135,7 +139,7 @@ async def reconcile_issue_from_signals(
     if was_paused:
         await workflow_plugin.pause_workflow(issue_num, reason="Reconciled via Telegram")
 
-    completion_path: Optional[str] = None
+    completion_path: str | None = None
     if applied:
         selected_signal = applied[-1]
         completion_path = write_local_completion_from_signal(project_key, issue_num, selected_signal)
@@ -167,10 +171,10 @@ def build_workflow_snapshot(
     repo: str,
     get_issue_plugin: Callable[[str], Any],
     expected_running_agent: str,
-    find_task_file_by_issue: Callable[[str], Optional[str]],
-    read_latest_local_completion: Callable[[str], Optional[Dict[str, Any]]],
-    extract_structured_completion_signals: Callable[[List[dict]], List[Dict[str, str]]],
-) -> Dict[str, Any]:
+    find_task_file_by_issue: Callable[[str], str | None],
+    read_latest_local_completion: Callable[[str], dict[str, Any] | None],
+    extract_structured_completion_signals: Callable[[list[dict]], list[dict[str, str]]],
+) -> dict[str, Any]:
     """Build workflow/process/local/comment snapshot used by /wfstate."""
     workflow_id = StateManager.get_workflow_id_for_issue(issue_num)
     workflow_file = (
@@ -192,14 +196,14 @@ def build_workflow_snapshot(
 
     if workflow_file and os.path.exists(workflow_file):
         try:
-            with open(workflow_file, "r", encoding="utf-8") as handle:
+            with open(workflow_file, encoding="utf-8") as handle:
                 payload = json.load(handle)
             workflow_state = str(payload.get("state", "unknown"))
             steps = payload.get("steps", [])
             raw_current_step = int(payload.get("current_step", 0) or 0)
             total_steps = len(steps)
 
-            indexed_idx: Optional[int] = None
+            indexed_idx: int | None = None
             if total_steps > 0:
                 for idx, step in enumerate(steps):
                     if not isinstance(step, dict):
@@ -263,7 +267,7 @@ def build_workflow_snapshot(
     comment_next = (latest_signal or {}).get("next_agent", "")
     comment_from = (latest_signal or {}).get("completed_agent", "")
 
-    drift_flags: List[str] = []
+    drift_flags: list[str] = []
     effective_expected_running = (
         (running_agent or "").strip().lower()
         or str(expected_running_agent or "").strip().lower()

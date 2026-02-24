@@ -9,14 +9,13 @@ Sends Telegram alerts for critical issues:
 import logging
 import os
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
+
 from audit_store import AuditStore
 from state_manager import StateManager
-from config import LOGS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ class AlertingSystem:
         
         # Alert cooldown (prevent spam)
         self.alert_cooldown_minutes = int(os.getenv('ALERT_COOLDOWN_MINUTES', '30'))
-        self.last_alerts: Dict[str, datetime] = {}
+        self.last_alerts: dict[str, datetime] = {}
     
     def start(self):
         """Start the alerting scheduler."""
@@ -172,7 +171,7 @@ class AlertingSystem:
             logger.error(f"Error counting recent errors: {e}")
             return 0
     
-    def _find_stuck_workflows(self) -> List[Dict]:
+    def _find_stuck_workflows(self) -> list[dict]:
         """
         Find workflows that haven't made progress recently.
         
@@ -303,10 +302,10 @@ class AlertingSystem:
 
 
 # Global singleton
-_alerting_system: Optional[AlertingSystem] = None
+_alerting_system: AlertingSystem | None = None
 
 
-def get_alerting_system() -> Optional[AlertingSystem]:
+def get_alerting_system() -> AlertingSystem | None:
     """Get the global AlertingSystem instance."""
     return _alerting_system
 

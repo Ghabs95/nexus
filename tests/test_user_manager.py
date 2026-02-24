@@ -1,9 +1,7 @@
 """Tests for user_manager module."""
-import json
-import pytest
-from pathlib import Path
-from datetime import datetime
-from user_manager import UserManager, User, UserProject
+
+
+from user_manager import UserManager
 
 
 class TestUserManager:

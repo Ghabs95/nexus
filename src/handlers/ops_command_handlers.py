@@ -4,33 +4,33 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
-from telegram import Update
-from telegram.ext import ContextTypes
+from nexus.core.chat_agents_schema import get_project_chat_agent_types
 
-from chat_agents_schema import get_project_chat_agent_types
 from handlers.agent_definition_utils import extract_agent_identity
 from handlers.agent_resolution_handler import resolve_agents_for_project
+from interactive_context import InteractiveContext
 from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
 class OpsHandlerDeps:
     logger: Any
-    allowed_user_ids: List[int]
+    allowed_user_ids: list[int]
     base_dir: str
     nexus_dir_name: str
-    project_config: Dict[str, Dict[str, Any]]
-    prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
+    project_config: dict[str, dict[str, Any]]
+    prompt_project_selection: Callable[[InteractiveContext, str], Awaitable[None]]
     ensure_project_issue: Callable[
-        [Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[Tuple[Optional[str], Optional[str], List[str]]]
+        [InteractiveContext, str], Awaitable[tuple[str | None, str | None, list[str]]]
     ]
     get_project_label: Callable[[str], str]
     get_stats_report: Callable[[int], str]
     format_error_for_user: Callable[[Exception, str], str]
-    get_audit_history: Callable[[str, int], List[Dict[str, Any]]]
+    get_audit_history: Callable[[str, int], list[dict[str, Any]]]
     get_github_repo: Callable[[str], str]
     get_direct_issue_plugin: Callable[[str], Any]
     orchestrator: Any
@@ -49,8 +49,8 @@ def _resolve_agent_type(
     source_filename: str,
     agents_dir: str,
     nexus_dir_name: str,
-    available_agent_types: Optional[List[str]] = None,
-) -> Optional[str]:
+    available_agent_types: list[str] | None = None,
+) -> str | None:
     candidate_paths = [
         os.path.join(agents_dir, nexus_dir_name, "agents", source_filename),
         os.path.join(agents_dir, source_filename),
@@ -70,7 +70,7 @@ def _resolve_agent_type(
 
     normalized = _normalize_agent_key(agent_name)
 
-    normalized_types: List[str] = []
+    normalized_types: list[str] = []
     if isinstance(available_agent_types, list):
         for item in available_agent_types:
             candidate = str(item or "").strip().lower()
@@ -103,32 +103,30 @@ def _build_direct_chat_persona(base_persona: str, project: str, agent_name: str,
     return f"{safe_base}{context_block}"
 
 
-async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
-    deps.logger.info(f"Audit trail requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def audit_handler(ctx: InteractiveContext, deps: OpsHandlerDeps) -> None:
+    deps.logger.info(f"Audit trail requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "audit")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "audit")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "audit")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "audit")
     if not project_key:
         return
 
-    msg = await update.effective_message.reply_text(
-        f"📊 Fetching audit trail for issue #{issue_num}...",
-        parse_mode="Markdown",
+    msg_id = await ctx.reply_text(
+        f"📊 Fetching audit trail for issue #{issue_num}..."
     )
 
     try:
         audit_history = deps.get_audit_history(issue_num, limit=100)
 
         if not audit_history:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"📊 **Audit Trail for Issue #{issue_num}**\n\nNo audit events recorded yet.",
             )
             return
@@ -169,105 +167,92 @@ async def audit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps
 
         max_len = 3500
         if len(timeline) <= max_len:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=timeline,
             )
         else:
             chunks = [timeline[i : i + max_len] for i in range(0, len(timeline), max_len)]
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=chunks[0],
             )
             for chunk in chunks[1:]:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk)
+                await ctx.reply_text(text=chunk)
     except Exception as exc:
         deps.logger.error(f"Error in audit_handler: {exc}", exc_info=True)
         error_msg = deps.format_error_for_user(exc, "while fetching audit trail")
-        await update.effective_message.reply_text(error_msg)
+        await ctx.reply_text(error_msg)
 
 
-async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
-    deps.logger.info(f"Stats requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def stats_handler(ctx: InteractiveContext, deps: OpsHandlerDeps) -> None:
+    deps.logger.info(f"Stats requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    msg = await update.effective_message.reply_text(
-        "📊 Generating analytics report...",
-        parse_mode="Markdown",
+    msg_id = await ctx.reply_text(
+        "📊 Generating analytics report..."
     )
 
     try:
         lookback_days = 30
-        if context.args and len(context.args) > 0:
+        if ctx.args and len(ctx.args) > 0:
             try:
-                lookback_days = int(context.args[0])
+                lookback_days = int(ctx.args[0])
                 if lookback_days < 1 or lookback_days > 365:
-                    await update.effective_message.reply_text(
+                    await ctx.reply_text(
                         "⚠️ Lookback days must be between 1 and 365. Using default 30 days."
                     )
                     lookback_days = 30
             except ValueError:
-                await update.effective_message.reply_text("⚠️ Invalid lookback days. Using default 30 days.")
+                await ctx.reply_text("⚠️ Invalid lookback days. Using default 30 days.")
                 lookback_days = 30
 
         report = deps.get_stats_report(lookback_days=lookback_days)
 
         max_len = 3500
         if len(report) <= max_len:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=report,
-                parse_mode="Markdown",
             )
         else:
             chunks = [report[i : i + max_len] for i in range(0, len(report), max_len)]
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=chunks[0],
-                parse_mode="Markdown",
             )
             for chunk in chunks[1:]:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=chunk,
-                    parse_mode="Markdown",
-                )
+                await ctx.reply_text(text=chunk)
 
     except FileNotFoundError:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text="📊 No audit log found. System has not logged any workflow events yet.",
         )
     except Exception as exc:
         deps.logger.error(f"Error in stats_handler: {exc}", exc_info=True)
         error_msg = deps.format_error_for_user(exc, "while generating analytics report")
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=error_msg,
         )
 
 
-async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
-    deps.logger.info(f"Agents requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def agents_handler(ctx: InteractiveContext, deps: OpsHandlerDeps) -> None:
+    deps.logger.info(f"Agents requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "agents")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "agents")
         return
 
-    project = context.args[0].lower()
+    project = ctx.args[0].lower()
     if project not in deps.project_config:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"❌ Unknown project '{project}'\n\n"
             f"Available: " + ", ".join(deps.project_config.keys())
         )
@@ -275,56 +260,56 @@ async def agents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 
     agents_dir = os.path.join(deps.base_dir, deps.project_config[project]["agents_dir"])
     if not os.path.exists(agents_dir):
-        await update.effective_message.reply_text(f"⚠️ Agents directory not found for '{project}'")
+        await ctx.reply_text(f"⚠️ Agents directory not found for '{project}'")
         return
 
     try:
         agents_map = resolve_agents_for_project(agents_dir, deps.nexus_dir_name)
 
         if not agents_map:
-            await update.effective_message.reply_text(f"No agents configured for '{project}'")
+            await ctx.reply_text(f"No agents configured for '{project}'")
             return
 
         agents_list = "\n".join([f"• @{agent}" for agent in sorted(agents_map.keys())])
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"🤖 **Agents for {project}:**\n\n{agents_list}\n\n"
             "Use `/direct <project> <@agent> <message>` to send a direct request.\n"
             "Use /chat for project-scoped conversations and strategy threads."
         )
     except Exception as exc:
         deps.logger.error(f"Error listing agents: {exc}")
-        await update.effective_message.reply_text(f"❌ Error: {exc}")
+        await ctx.reply_text(f"❌ Error: {exc}")
 
 
-async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, deps: OpsHandlerDeps) -> None:
-    deps.logger.info(f"Direct request by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+async def direct_handler(ctx: InteractiveContext, deps: OpsHandlerDeps) -> None:
+    deps.logger.info(f"Direct request by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if len(context.args) < 3:
-        await update.effective_message.reply_text(
+    if len(ctx.args) < 3:
+        await ctx.reply_text(
             "⚠️ Usage: /direct <project> <@agent> <message>\n\n"
             "Example: /direct case_italia @BackendLead Add caching to API endpoints\n"
             "Optional: add `--new-chat` for strategic agents to start a fresh chat thread"
         )
         return
 
-    project = context.args[0].lower()
-    agent = context.args[1].lstrip("@")
-    message_tokens = [token for token in context.args[2:] if token != "--new-chat"]
-    create_new_chat = "--new-chat" in context.args[2:]
+    project = ctx.args[0].lower()
+    agent = ctx.args[1].lstrip("@")
+    message_tokens = [token for token in ctx.args[2:] if token != "--new-chat"]
+    create_new_chat = "--new-chat" in ctx.args[2:]
     message = " ".join(message_tokens).strip()
 
     if not message:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             "⚠️ Please include a message after the agent.\n\n"
             "Example: /direct wallible @Vision --new-chat Which strategy should we prioritize next quarter?"
         )
         return
 
     if project not in deps.project_config:
-        await update.effective_message.reply_text(f"❌ Unknown project '{project}'")
+        await ctx.reply_text(f"❌ Unknown project '{project}'")
         return
 
     agents_dir = os.path.join(deps.base_dir, deps.project_config[project]["agents_dir"])
@@ -332,7 +317,7 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
 
     if agent not in agents_map:
         available = ", ".join([f"@{a}" for a in sorted(agents_map.keys())])
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"❌ Unknown agent '@{agent}' for {project}\n\n"
             f"Available: {available}"
         )
@@ -350,9 +335,9 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
     )
 
     if agent_type and agent_type in project_chat_agent_types:
-        msg = await update.effective_message.reply_text(f"🤖 Asking @{agent} directly...")
+        msg_id = await ctx.reply_text(f"🤖 Asking @{agent} directly...")
         try:
-            user_id = update.effective_user.id
+            user_id = int(ctx.user_id)
             if create_new_chat:
                 chat_title = f"Direct @{agent} ({project})"
                 deps.create_chat(
@@ -378,27 +363,24 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
             reply_text = chat_result.get("text", "I couldn't generate a response right now.")
             deps.append_message(user_id, "assistant", reply_text)
 
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=(
                     f"🤖 *{agent} ({agent_type})*: \n\n{reply_text}\n\n"
                     f"🧵 Chat thread: {'new' if create_new_chat else 'current'}\n"
                     "💬 Use /chat to manage conversation threads and context."
                 ),
-                parse_mode="Markdown",
             )
             return
         except Exception as exc:
             deps.logger.error(f"Error in direct chat request: {exc}")
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"❌ Error in direct chat reply: {exc}",
             )
             return
 
-    msg = await update.effective_message.reply_text(f"🚀 Creating direct request for @{agent}...")
+    msg_id = await ctx.reply_text(f"🚀 Creating direct request for @{agent}...")
 
     try:
         title = f"Direct Request: {message[:50]}"
@@ -415,9 +397,8 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         repo = deps.get_github_repo(project)
         plugin = deps.get_direct_issue_plugin(repo)
         if not plugin:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text="❌ Failed to initialize GitHub issue plugin",
             )
             return
@@ -428,18 +409,16 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
             labels=["workflow:fast-track"],
         )
         if not issue_url:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text="❌ Failed to create issue\n\nIf this is a discussion, use /chat instead.",
             )
             return
 
         match = re.search(r"/issues/(\d+)$", issue_url)
         if not match:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text="❌ Failed to get issue number",
             )
             return
@@ -448,9 +427,8 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         comment_body = f"🎯 Direct request from @Ghabs\n\nReady for `@{agent}`"
         plugin.add_comment(issue_num, comment_body)
 
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=(
                 f"✅ Direct request created for @{agent} (Issue #{issue_num})\n\n"
                 f"Message: {message}\n\n"
@@ -461,8 +439,7 @@ async def direct_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, dep
         )
     except Exception as exc:
         deps.logger.error(f"Error in direct request: {exc}")
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Error: {exc}",
         )

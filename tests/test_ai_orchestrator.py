@@ -2,7 +2,8 @@
 
 import subprocess
 
-from orchestration.ai_orchestrator import AIOrchestrator, AIProvider, RateLimitedError
+from nexus.plugins.builtin.ai_runtime_plugin import AIProvider, RateLimitedError
+from orchestration.ai_orchestrator import AIOrchestrator
 
 
 class _FakeCompletedProcess:

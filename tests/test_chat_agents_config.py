@@ -1,4 +1,4 @@
-from chat_agents_schema import (
+from nexus.core.chat_agents_schema import (
     get_default_project_chat_agent_type,
     get_project_chat_agent_config,
     get_project_chat_agent_types,

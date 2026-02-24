@@ -2,30 +2,38 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
+if TYPE_CHECKING:
+    from interactive_context import InteractiveContext
 
-from chat_agents_schema import get_default_project_chat_agent_type
-from handlers.common_routing import parse_intent_result, route_task_with_context, run_conversation_turn
+from nexus.adapters.notifications.base import Button
+from nexus.core.chat_agents_schema import get_default_project_chat_agent_type
+
+from handlers.common_routing import (
+    parse_intent_result,
+    route_task_with_context,
+    run_conversation_turn,
+)
 from handlers.feature_ideation_handlers import FEATURE_STATE_KEY
 
 
 @dataclass
 class HandsFreeRoutingDeps:
-    logger: Any
+    logger: logging.Logger
     orchestrator: Any
     ai_persona: str
-    projects: Dict[str, str]
-    extract_json_dict: Callable[[str], Dict[str, Any] | None]
+    projects: dict[str, str]
+    extract_json_dict: Callable[[str], dict[str, Any] | None]
     get_chat_history: Callable[[int], str]
     append_message: Callable[[int, str, str], None]
-    get_chat: Callable[[int], Dict[str, Any]]
-    process_inbox_task: Callable[[str, Any, str, Optional[str]], Awaitable[Dict[str, Any]]]
-    normalize_project_key: Callable[[str], Optional[str]]
-    save_resolved_task: Callable[[dict, str, str], Awaitable[Dict[str, Any]]]
+    get_chat: Callable[[int], dict[str, Any]]
+    process_inbox_task: Callable[[str, Any, str, str | None], Awaitable[dict[str, Any]]]
+    normalize_project_key: Callable[[str], str | None]
+    save_resolved_task: Callable[[dict, str, str], Awaitable[dict[str, Any]]]
     task_confirmation_mode: str
 
 
@@ -51,7 +59,7 @@ def _configured_primary_agent_type(project_key: str) -> str:
     return get_default_project_chat_agent_type(project_cfg)
 
 
-def _resolve_primary_agent_type(metadata: Dict[str, Any]) -> str:
+def _resolve_primary_agent_type(metadata: dict[str, Any]) -> str:
     primary = str(metadata.get("primary_agent_type") or "").strip().lower()
     if primary:
         return primary
@@ -64,7 +72,7 @@ def _resolve_primary_agent_type(metadata: Dict[str, Any]) -> str:
     return _configured_primary_agent_type(project_key)
 
 
-def _normalize_allowed_agent_types(metadata: Dict[str, Any]) -> list[str]:
+def _normalize_allowed_agent_types(metadata: dict[str, Any]) -> list[str]:
     allowed = metadata.get("allowed_agent_types")
     if not isinstance(allowed, list):
         return []
@@ -125,7 +133,7 @@ def _detect_conversation_intent(text: str) -> str:
     return "general"
 
 
-def _select_conversation_agent_type(metadata: Dict[str, Any], text: str) -> tuple[str, str, str]:
+def _select_conversation_agent_type(metadata: dict[str, Any], text: str) -> tuple[str, str, str]:
     allowed_agent_types = _normalize_allowed_agent_types(metadata)
     primary_agent_type = _resolve_primary_agent_type(metadata)
     chat_mode = str(metadata.get("chat_mode", "strategy")).lower().strip() or "strategy"
@@ -196,8 +204,8 @@ def _build_chat_persona(
     return f"{base_persona}{context_block}"
 
 
-def _has_active_feature_ideation(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    feature_state = context.user_data.get(FEATURE_STATE_KEY)
+def _has_active_feature_ideation(ctx: InteractiveContext) -> bool:
+    feature_state = ctx.user_state.get(FEATURE_STATE_KEY)
     if not isinstance(feature_state, dict):
         return False
     items = feature_state.get("items")
@@ -225,34 +233,42 @@ def _looks_like_explicit_task_request(text: str) -> bool:
 
 
 async def resolve_pending_project_selection(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: HandsFreeRoutingDeps,
 ) -> bool:
-    pending_project = context.user_data.get("pending_task_project_resolution")
+    pending_project = ctx.user_state.get("pending_task_project_resolution")
     if not pending_project:
         return False
 
-    selected = deps.normalize_project_key((update.message.text or "").strip())
+    selected = deps.normalize_project_key((ctx.text or "").strip())
     if not selected or selected not in deps.projects:
         options = ", ".join(sorted(deps.projects.keys()))
-        await update.message.reply_text(f"Please reply with a valid project key: {options}")
+        await ctx.reply_text(f"Please reply with a valid project key: {options}")
         return True
 
-    context.user_data.pop("pending_task_project_resolution", None)
-    result = await deps.save_resolved_task(pending_project, selected, str(update.message.message_id))
-    await update.message.reply_text(result["message"], parse_mode="Markdown")
+    ctx.user_state.pop("pending_task_project_resolution", None)
+    
+    # We don't have update.message.message_id easily without raw_event casting, but we can pass an empty string or dummy if necessary
+    trigger_message_id = getattr(ctx.raw_event, "message_id", "") if hasattr(ctx.raw_event, "message_id") else ""
+    if hasattr(ctx.raw_event, "message") and hasattr(ctx.raw_event.message, "message_id"):
+        trigger_message_id = str(ctx.raw_event.message.message_id)
+
+    result = await deps.save_resolved_task(pending_project, selected, str(trigger_message_id))
+    await ctx.reply_text(result["message"])
     return True
 
 
 async def route_hands_free_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    status_msg: Any,
-    text: str,
+    ctx: InteractiveContext,
     deps: HandsFreeRoutingDeps,
 ) -> None:
-    force_conversation = _has_active_feature_ideation(context) and not _looks_like_explicit_task_request(text)
+    text = ctx.text
+    
+    # First check if we're resolving a project selection
+    if await resolve_pending_project_selection(ctx, deps):
+        return
+
+    force_conversation = _has_active_feature_ideation(ctx) and not _looks_like_explicit_task_request(text)
     if force_conversation:
         deps.logger.info(
             "Active feature ideation detected; routing follow-up as conversation: %s",
@@ -264,9 +280,12 @@ async def route_hands_free_text(
         intent_result = parse_intent_result(deps.orchestrator, text, deps.extract_json_dict)
 
     intent = intent_result.get("intent", "task")
+    is_voice = str(getattr(ctx.raw_event, "voice", False)) == "True" or getattr(getattr(ctx.raw_event, "message", None), "voice", None) is not None
+
+    status_msg_id = await ctx.reply_text("🤖 *Nexus:* Thinking...")
 
     if intent == "conversation":
-        user_id = update.effective_user.id
+        user_id = int(ctx.user_id) if str(ctx.user_id).isdigit() else 0
         chat_data = deps.get_chat(user_id) or {}
         metadata = chat_data.get("metadata") if isinstance(chat_data, dict) else {}
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -285,13 +304,6 @@ async def route_hands_free_text(
             routing_reason,
         )
 
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=status_msg.message_id,
-            text="🤖 *Nexus:* Thinking...",
-            parse_mode="Markdown",
-        )
-
         reply_text = run_conversation_turn(
             user_id=user_id,
             text=text,
@@ -301,11 +313,9 @@ async def route_hands_free_text(
             persona=persona,
         )
 
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=status_msg.message_id,
+        await ctx.edit_message_text(
+            message_id=status_msg_id,
             text=f"🤖 *Nexus ({routed_agent_type})*: \n\n{reply_text}",
-            parse_mode="Markdown",
         )
         return
 
@@ -319,7 +329,8 @@ async def route_hands_free_text(
     except (TypeError, ValueError):
         confidence_value = None
 
-    chat_data = deps.get_chat(update.effective_user.id) or {}
+    user_numeric_id = int(ctx.user_id) if str(ctx.user_id).isdigit() else 0
+    chat_data = deps.get_chat(user_numeric_id) or {}
     metadata = chat_data.get("metadata") if isinstance(chat_data, dict) else {}
     metadata = metadata if isinstance(metadata, dict) else {}
     has_project_context = bool(metadata.get("project_key"))
@@ -329,58 +340,57 @@ async def route_hands_free_text(
         should_confirm = True
     elif confirmation_mode == "smart":
         should_confirm = bool(
-            update.message.voice
+            is_voice
             or not has_project_context
             or (confidence_value is not None and confidence_value < 0.8)
         )
 
+    trigger_message_id = getattr(ctx.raw_event, "message_id", "") if hasattr(ctx.raw_event, "message_id") else ""
+    if hasattr(ctx.raw_event, "message") and hasattr(ctx.raw_event.message, "message_id"):
+        trigger_message_id = str(ctx.raw_event.message.message_id)
+
     if should_confirm:
-        context.user_data["pending_task_confirmation"] = {
+        ctx.user_state["pending_task_confirmation"] = {
             "text": text,
-            "message_id": str(update.message.message_id),
+            "message_id": str(trigger_message_id),
         }
-        reason = "voice input" if update.message.voice else "auto-routing safety check"
+        reason = "voice input" if is_voice else "auto-routing safety check"
         if not has_project_context:
             reason = "missing project context"
         elif confidence_value is not None and confidence_value < 0.8:
             reason = f"low intent confidence ({confidence_value:.2f})"
 
         preview = text if len(text) <= 300 else f"{text[:300]}..."
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("✅ Confirm", callback_data="taskconfirm:confirm")],
-                [InlineKeyboardButton("✏️ Edit", callback_data="taskconfirm:edit")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="taskconfirm:cancel")],
-            ]
-        )
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=status_msg.message_id,
+        buttons = [
+            [Button("✅ Confirm", callback_data="taskconfirm:confirm")],
+            [Button("✏️ Edit", callback_data="taskconfirm:edit")],
+            [Button("❌ Cancel", callback_data="taskconfirm:cancel")],
+        ]
+        await ctx.edit_message_text(
+            message_id=status_msg_id,
             text=(
                 "🛡️ *Confirm task creation*\n\n"
                 f"Reason: {reason}\n"
                 "I’m about to create a task from this request:\n\n"
                 f"_{preview}_"
             ),
-            reply_markup=keyboard,
-            parse_mode="Markdown",
+            buttons=buttons,
         )
         return
 
     result = await route_task_with_context(
-        user_id=update.effective_user.id,
+        user_id=user_numeric_id,
         text=text,
         orchestrator=deps.orchestrator,
-        message_id=str(update.message.message_id),
+        message_id=str(trigger_message_id),
         get_chat=deps.get_chat,
         process_inbox_task=deps.process_inbox_task,
     )
 
     if not result["success"] and "pending_resolution" in result:
-        context.user_data["pending_task_project_resolution"] = result["pending_resolution"]
+        ctx.user_state["pending_task_project_resolution"] = result["pending_resolution"]
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=status_msg.message_id,
+    await ctx.edit_message_text(
+        message_id=status_msg_id,
         text=result["message"],
     )

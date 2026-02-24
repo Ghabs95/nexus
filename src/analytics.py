@@ -7,13 +7,11 @@ Provides insights into:
 - Workflow duration analysis
 """
 
-import os
-import re
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
-from collections import defaultdict, Counter
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +20,14 @@ logger = logging.getLogger(__name__)
 class WorkflowMetrics:
     """Metrics for a single workflow execution."""
     issue_num: int
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
-    duration_seconds: Optional[float] = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    duration_seconds: float | None = None
     agents_launched: int = 0
     timeouts: int = 0
     retries: int = 0
     failures: int = 0
-    workflow_tier: Optional[str] = None
+    workflow_tier: str | None = None
     completed: bool = False
 
 
@@ -42,7 +40,7 @@ class AgentMetrics:
     retries: int = 0
     failures: int = 0
     successes: int = 0
-    avg_duration_seconds: Optional[float] = None
+    avg_duration_seconds: float | None = None
 
 
 @dataclass
@@ -55,8 +53,8 @@ class SystemMetrics:
     total_timeouts: int = 0
     total_retries: int = 0
     completion_rate: float = 0.0
-    avg_workflow_duration_hours: Optional[float] = None
-    issues_per_tier: Dict[str, int] = None
+    avg_workflow_duration_hours: float | None = None
+    issues_per_tier: dict[str, int] = None
     
     def __post_init__(self):
         if self.issues_per_tier is None:
@@ -68,13 +66,13 @@ class AuditLogParser:
     
     def __init__(self):
         """Initialize parser."""
-        self.workflow_metrics: Dict[int, WorkflowMetrics] = {}
-        self.agent_metrics: Dict[str, AgentMetrics] = defaultdict(
+        self.workflow_metrics: dict[int, WorkflowMetrics] = {}
+        self.agent_metrics: dict[str, AgentMetrics] = defaultdict(
             lambda: AgentMetrics(agent_name="")
         )
 
     @staticmethod
-    def _extract_issue_num(evt: dict) -> Optional[int]:
+    def _extract_issue_num(evt: dict) -> int | None:
         """Extract issue number from a JSONL audit event."""
         data = evt.get("data", {})
         if isinstance(data, dict) and "issue_number" in data:
@@ -205,7 +203,7 @@ class AuditLogParser:
         
         return metrics
     
-    def get_agent_leaderboard(self, top_n: int = 10) -> List[AgentMetrics]:
+    def get_agent_leaderboard(self, top_n: int = 10) -> list[AgentMetrics]:
         """Get top performing agents ranked by success rate.
         
         Args:
@@ -286,11 +284,11 @@ class AuditLogParser:
                 if agent.failures > 0:
                     report += f"   └ Failures: {agent.failures}\n"
                 else:
-                    report += f"   └ Failures: 0\n"
+                    report += "   └ Failures: 0\n"
             report += "\n"
         
         report += "=" * 40 + "\n"
-        report += f"_Data from last 30 days_"
+        report += "_Data from last 30 days_"
         
         return report
 

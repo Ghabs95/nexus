@@ -1,10 +1,10 @@
 """Pytest configuration and shared fixtures."""
 
-import pytest
-import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
+import pytest
 
 # Add src directory to Python path for imports
 src_path = Path(__file__).parent.parent / "src"

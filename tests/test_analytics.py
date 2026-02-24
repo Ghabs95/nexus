@@ -3,9 +3,10 @@
 Tests JSONL audit-event parsing and metrics calculation.
 """
 
-import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch
+
+import pytest
 
 from analytics import AuditLogParser, get_stats_report
 

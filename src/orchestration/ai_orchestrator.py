@@ -1,36 +1,33 @@
 """Compatibility wrapper for AI orchestrator backed by nexus-core plugin."""
 
-from typing import Any, Dict, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
-from orchestration.plugin_runtime import clear_cached_plugin, get_profiled_plugin
 from nexus.plugins.builtin.ai_runtime_plugin import (
     AIOrchestrator,
-    AIProvider,
-    RateLimitedError,
-    ToolUnavailableError,
 )
 
-_orchestrator: Optional[AIOrchestrator] = None
+from orchestration.plugin_runtime import clear_cached_plugin, get_profiled_plugin
+
+_orchestrator: AIOrchestrator | None = None
 
 
-def _resolve_tasks_logs_dir(workspace: str, project: Optional[str] = None) -> str:
+def _resolve_tasks_logs_dir(workspace: str, project: str | None = None) -> str:
     """Resolve tasks logs directory via config."""
     from config import get_tasks_logs_dir
 
     return get_tasks_logs_dir(workspace, project)
 
 
-def get_orchestrator(config: Optional[Any] = None) -> AIOrchestrator:
+def get_orchestrator(config: Any | None = None) -> AIOrchestrator:
     """Get or create global orchestrator instance."""
     global _orchestrator
     if _orchestrator is None:
         if config is None:
-            overrides: Dict[str, Any] = {}
+            overrides: dict[str, Any] = {}
         elif isinstance(config, dict):
             overrides = dict(config)
-        elif isinstance(config, Mapping):
-            overrides = dict(config.items())
-        elif hasattr(config, "items"):
+        elif isinstance(config, Mapping) or hasattr(config, "items"):
             overrides = dict(config.items())
         elif hasattr(config, "get"):
             keys = (

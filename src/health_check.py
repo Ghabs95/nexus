@@ -7,17 +7,17 @@ import logging
 import os
 import subprocess
 import sys
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from flask import Flask, jsonify, request
-from rate_limiter import get_rate_limiter
+from flask import Flask, jsonify
+
 from audit_store import AuditStore
 from config import DATA_DIR, LOGS_DIR
+from rate_limiter import get_rate_limiter
 
 # Configure logging
 logging.basicConfig(
@@ -235,21 +235,21 @@ def metrics():
     
     # Format as simple key-value pairs
     metrics_lines = [
-        f"# HELP nexus_service_up Service is running (1 = up, 0 = down)",
-        f"# TYPE nexus_service_up gauge",
+        "# HELP nexus_service_up Service is running (1 = up, 0 = down)",
+        "# TYPE nexus_service_up gauge",
         f"nexus_service_up{{service=\"bot\"}} {1 if bot_status.get('running') else 0}",
         f"nexus_service_up{{service=\"processor\"}} {1 if processor_status.get('running') else 0}",
         "",
-        f"# HELP nexus_audit_events_total Total audit events in last hour",
-        f"# TYPE nexus_audit_events_total counter",
+        "# HELP nexus_audit_events_total Total audit events in last hour",
+        "# TYPE nexus_audit_events_total counter",
         f"nexus_audit_events_total {recent_activity.get('total_events', 0)}",
         "",
-        f"# HELP nexus_rate_limiter_active_users Active users with rate limits",
-        f"# TYPE nexus_rate_limiter_active_users gauge",
+        "# HELP nexus_rate_limiter_active_users Active users with rate limits",
+        "# TYPE nexus_rate_limiter_active_users gauge",
         f"nexus_rate_limiter_active_users {rate_stats.get('active_users', 0)}",
         "",
-        f"# HELP nexus_rate_limiter_tracked_actions Tracked rate limit actions",
-        f"# TYPE nexus_rate_limiter_tracked_actions gauge",
+        "# HELP nexus_rate_limiter_tracked_actions Tracked rate limit actions",
+        "# TYPE nexus_rate_limiter_tracked_actions gauge",
         f"nexus_rate_limiter_tracked_actions {rate_stats.get('total_tracked_actions', 0)}",
     ]
     

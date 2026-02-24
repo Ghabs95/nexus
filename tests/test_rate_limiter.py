@@ -1,8 +1,9 @@
 """Unit tests for rate_limiter module."""
 
-import pytest
 import time
-from rate_limiter import RateLimiter, RateLimit, UserQuota
+
+
+from rate_limiter import RateLimit, RateLimiter, UserQuota
 
 
 class TestUserQuota:

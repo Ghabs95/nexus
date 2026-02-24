@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # Status → background fill colour (GitHub dark-mode palette)
-_STATUS_COLOURS: Dict[str, str] = {
+_STATUS_COLOURS: dict[str, str] = {
     "complete": "#3fb950",
     "completed": "#3fb950",
     "running": "#d29922",
@@ -25,11 +26,11 @@ _STATUS_COLOURS: Dict[str, str] = {
 _MMDC_TIMEOUT = 15  # seconds
 
 
-def build_mermaid_diagram(steps: List[Dict[str, Any]], issue_num: str) -> str:
+def build_mermaid_diagram(steps: list[dict[str, Any]], issue_num: str) -> str:
     """Convert workflow steps list to a Mermaid flowchart string."""
     total = len(steps)
-    lines: List[str] = ["flowchart TD", f'  I["Issue #{issue_num}"]']
-    style_lines: List[str] = []
+    lines: list[str] = ["flowchart TD", f'  I["Issue #{issue_num}"]']
+    style_lines: list[str] = []
 
     prev_node = "I"
     for idx, step in enumerate(steps):
@@ -58,6 +59,8 @@ def build_mermaid_diagram(steps: List[Dict[str, Any]], issue_num: str) -> str:
         }.get(raw_status, "❓")
 
         label_parts = [f"{step_num}/{total}"]
+        if raw_name and raw_name != "unknown":
+            label_parts.append(raw_name)
         if agent_name:
             label_parts.append(agent_name)
         label_parts.append(f"{status_icon} {raw_status}")
@@ -76,14 +79,14 @@ def build_mermaid_diagram(steps: List[Dict[str, Any]], issue_num: str) -> str:
     return "\n".join(lines)
 
 
-async def render_mermaid_to_png(diagram_text: str) -> Optional[bytes]:
+async def render_mermaid_to_png(diagram_text: str) -> bytes | None:
     """Render a Mermaid diagram string to PNG bytes using mmdc CLI.
 
     Returns None if mmdc is unavailable or rendering fails; callers should
     fall back to sending the raw diagram as a code block.
     """
-    tmp_in: Optional[str] = None
-    tmp_out: Optional[str] = None
+    tmp_in: str | None = None
+    tmp_out: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".mmd", delete=False, encoding="utf-8"
@@ -105,8 +108,12 @@ async def render_mermaid_to_png(diagram_text: str) -> Optional[bytes]:
         )
         try:
             await asyncio.wait_for(proc.communicate(), timeout=_MMDC_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1)
+            except TimeoutError:
+                logger.warning("mmdc process did not exit promptly after kill()")
             logger.warning("mmdc timed out rendering Mermaid diagram")
             return None
 
@@ -130,7 +137,5 @@ async def render_mermaid_to_png(diagram_text: str) -> Optional[bytes]:
     finally:
         for tmp in (tmp_in, tmp_out):
             if tmp and os.path.exists(tmp):
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(tmp)
-                except OSError:
-                    pass

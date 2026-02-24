@@ -2,74 +2,72 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
-
-from telegram import Update
-from telegram.ext import ContextTypes
+from typing import Any
 
 from config import NEXUS_CORE_STORAGE_DIR
-from state_manager import StateManager
+from interactive_context import InteractiveContext
 from runtime.agent_launcher import clear_launch_guard
+from state_manager import StateManager
 from utils.log_utils import log_unauthorized_access
 
 
 @dataclass
 class WorkflowHandlerDeps:
     logger: Any
-    allowed_user_ids: List[int]
+    allowed_user_ids: list[int]
     base_dir: str
     default_repo: str
-    project_config: Dict[str, Dict[str, Any]]
-    workflow_state_plugin_kwargs: Dict[str, Any]
-    prompt_project_selection: Callable[[Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[None]]
+    project_config: dict[str, dict[str, Any]]
+    workflow_state_plugin_kwargs: dict[str, Any]
+    prompt_project_selection: Callable[[InteractiveContext, str], Awaitable[None]]
     ensure_project_issue: Callable[
-        [Update, ContextTypes.DEFAULT_TYPE, str], Awaitable[Tuple[Optional[str], Optional[str], List[str]]]
+        [InteractiveContext, str], Awaitable[tuple[str | None, str | None, list[str]]]
     ]
-    find_task_file_by_issue: Callable[[str], Optional[str]]
+    find_task_file_by_issue: Callable[[str], str | None]
     project_repo: Callable[[str], str]
-    get_issue_details: Callable[[str, Optional[str]], Optional[Dict[str, Any]]]
-    resolve_project_config_from_task: Callable[[str], Tuple[Optional[str], Optional[Dict[str, Any]]]]
-    invoke_copilot_agent: Callable[..., Tuple[Optional[int], Optional[str]]]
-    get_sop_tier_from_issue: Callable[[str, Optional[str]], Optional[str]]
-    get_sop_tier: Callable[[str], Tuple[str, Any, Any]]
-    get_last_tier_for_issue: Callable[[str], Optional[str]]
-    prepare_continue_context: Callable[..., Dict[str, Any]]
-    kill_issue_agent: Callable[..., Dict[str, Any]]
+    get_issue_details: Callable[[str, str | None], dict[str, Any] | None]
+    resolve_project_config_from_task: Callable[[str], tuple[str | None, dict[str, Any] | None]]
+    invoke_copilot_agent: Callable[..., tuple[int | None, str | None]]
+    get_sop_tier_from_issue: Callable[[str, str | None], str | None]
+    get_sop_tier: Callable[[str], tuple[str, Any, Any]]
+    get_last_tier_for_issue: Callable[[str], str | None]
+    prepare_continue_context: Callable[..., dict[str, Any]]
+    kill_issue_agent: Callable[..., dict[str, Any]]
     get_runtime_ops_plugin: Callable[..., Any]
     get_workflow_state_plugin: Callable[..., Any]
-    scan_for_completions: Callable[[str], List[Any]]
-    normalize_agent_reference: Callable[[Optional[str]], Optional[str]]
-    get_expected_running_agent_from_workflow: Callable[[str], Optional[str]]
-    reconcile_issue_from_signals: Callable[..., Awaitable[Dict[str, Any]]]
+    scan_for_completions: Callable[[str], list[Any]]
+    normalize_agent_reference: Callable[[str | None], str | None]
+    get_expected_running_agent_from_workflow: Callable[[str], str | None]
+    reconcile_issue_from_signals: Callable[..., Awaitable[dict[str, Any]]]
     get_direct_issue_plugin: Callable[[str], Any]
-    extract_structured_completion_signals: Callable[[List[dict]], List[Dict[str, str]]]
-    write_local_completion_from_signal: Callable[[str, str, Dict[str, str]], str]
-    build_workflow_snapshot: Callable[..., Dict[str, Any]]
-    read_latest_local_completion: Callable[[str], Optional[Dict[str, Any]]]
-    workflow_pause_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
-    workflow_resume_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
-    workflow_stop_handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+    extract_structured_completion_signals: Callable[[list[dict]], list[dict[str, str]]]
+    write_local_completion_from_signal: Callable[[str, str, dict[str, str]], str]
+    build_workflow_snapshot: Callable[..., dict[str, Any]]
+    read_latest_local_completion: Callable[[str], dict[str, Any] | None]
+    workflow_pause_handler: Callable[[InteractiveContext], Awaitable[None]]
+    workflow_resume_handler: Callable[[InteractiveContext], Awaitable[None]]
+    workflow_stop_handler: Callable[[InteractiveContext], Awaitable[None]]
 
 
 async def reprocess_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    deps.logger.info(f"Reprocess requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Reprocess requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "reprocess")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "reprocess")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "reprocess")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "reprocess")
     if not project_key:
         return
 
@@ -80,23 +78,23 @@ async def reprocess_handler(
         repo = deps.project_repo(project_key)
         details = deps.get_issue_details(issue_num, repo=repo)
         if not details:
-            await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
+            await ctx.reply_text(f"❌ Could not load issue #{issue_num}.")
             return
         body = details.get("body", "")
         match = re.search(r"Task File:\s*`([^`]+)`", body)
         task_file = match.group(1) if match else None
 
     if not task_file:
-        await update.effective_message.reply_text(f"❌ Task file not found for issue #{issue_num}.")
+        await ctx.reply_text(f"❌ Task file not found for issue #{issue_num}.")
         return
     if not os.path.exists(task_file):
-        await update.effective_message.reply_text(f"❌ Task file missing: {task_file}")
+        await ctx.reply_text(f"❌ Task file missing: {task_file}")
         return
 
     project_name, config = deps.resolve_project_config_from_task(task_file)
     if not config or not config.get("agents_dir"):
         name = project_name or "unknown"
-        await update.effective_message.reply_text(f"❌ No agents config for project '{name}'.")
+        await ctx.reply_text(f"❌ No agents config for project '{name}'.")
         return
 
     from nexus.adapters.git.utils import build_issue_url, resolve_repo
@@ -105,26 +103,26 @@ async def reprocess_handler(
     if not details:
         details = deps.get_issue_details(issue_num, repo=repo)
         if not details:
-            await update.effective_message.reply_text(f"❌ Could not load issue #{issue_num}.")
+            await ctx.reply_text(f"❌ Could not load issue #{issue_num}.")
             return
 
     if details.get("state") == "closed":
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"⚠️ Issue #{issue_num} is closed. Reprocess only applies to open issues."
         )
         return
 
-    with open(task_file, "r", encoding="utf-8") as handle:
+    with open(task_file, encoding="utf-8") as handle:
         content = handle.read()
 
     type_match = re.search(r"\*\*Type:\*\*\s*(.+)", content)
-    task_type = type_match.group(1).strip().lower() if type_match else "feature"
+    type_match.group(1).strip().lower() if type_match else "feature"
 
     tracker_tier = deps.get_last_tier_for_issue(issue_num)
     label_tier = deps.get_sop_tier_from_issue(issue_num, project_name or project_key)
     tier_name = label_tier or tracker_tier
     if not tier_name:
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"⚠️ Cannot determine workflow tier for issue #{issue_num}.\n"
             f"Add a `workflow:` label (e.g. `workflow:full`) to the issue and retry."
         )
@@ -132,7 +130,7 @@ async def reprocess_handler(
 
     issue_url = build_issue_url(repo, issue_num, config)
 
-    msg = await update.effective_message.reply_text(f"🔁 Reprocessing issue #{issue_num}...")
+    msg_id = await ctx.reply_text(f"🔁 Reprocessing issue #{issue_num}...")
 
     agents_abs = os.path.join(deps.base_dir, config["agents_dir"])
     workspace_abs = os.path.join(deps.base_dir, config["workspace"])
@@ -149,37 +147,34 @@ async def reprocess_handler(
     )
 
     if pid:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=(
                 f"✅ Reprocess started for issue #{issue_num}. Agent PID: {pid} (Tool: {tool_used})\n\n"
                 f"🔗 {issue_url}"
             ),
         )
     else:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Failed to launch reprocess for issue #{issue_num}.",
         )
 
 
 async def continue_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    deps.logger.info(f"Continue requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Continue requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "continue")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "continue")
         return
 
-    project_key, issue_num, rest = await deps.ensure_project_issue(update, context, "continue")
+    project_key, issue_num, rest = await deps.ensure_project_issue(ctx, "continue")
     if not project_key:
         return
 
@@ -202,11 +197,11 @@ async def continue_handler(
     )
 
     if continue_ctx["status"] in {"error", "already_running", "mismatch", "workflow_done_closed"}:
-        await update.effective_message.reply_text(continue_ctx["message"], parse_mode="Markdown")
+        await ctx.reply_text(continue_ctx["message"])
         return
 
     if continue_ctx["status"] == "workflow_done_open":
-        msg = await update.effective_message.reply_text(
+        msg_id = await ctx.reply_text(
             f"✅ Workflow complete for issue #{issue_num} (last agent: `{continue_ctx['resumed_from']}`)\n"
             f"Issue is still open — running finalization now..."
         )
@@ -219,9 +214,8 @@ async def continue_handler(
                 continue_ctx["resumed_from"],
                 continue_ctx["project_name"],
             )
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=(
                     f"✅ Workflow complete for issue #{issue_num}\n"
                     f"Last agent: `{continue_ctx['resumed_from']}`\n"
@@ -230,15 +224,14 @@ async def continue_handler(
             )
         except Exception as exc:
             deps.logger.error(f"Finalization failed for issue #{issue_num}: {exc}", exc_info=True)
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=msg.message_id,
+            await ctx.edit_message_text(
+                message_id=msg_id,
                 text=f"⚠️ Finalization error for issue #{issue_num}: {exc}",
             )
         return
 
     if continue_ctx["status"] != "ready":
-        await update.effective_message.reply_text(
+        await ctx.reply_text(
             f"⚠️ Unexpected continue state: {continue_ctx['status']}"
         )
         return
@@ -264,13 +257,13 @@ async def continue_handler(
                     exc_info=True,
                 )
         if not reset_ok:
-            await update.effective_message.reply_text(
+            await ctx.reply_text(
                 f"❌ Could not reset workflow to `{continue_ctx['agent_type']}` for issue #{issue_num}."
             )
             return
 
     resume_info = f" (after {continue_ctx['resumed_from']})" if continue_ctx["resumed_from"] else ""
-    msg = await update.effective_message.reply_text(
+    msg_id = await ctx.reply_text(
         f"⏩ Continuing issue #{issue_num} with `{continue_ctx['agent_type']}`{resume_info}..."
     )
 
@@ -288,9 +281,8 @@ async def continue_handler(
     )
 
     if pid:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=(
                 f"✅ Agent continued for issue #{issue_num}. PID: {pid} (Tool: {tool_used})\n\n"
                 f"Prompt: {continue_ctx['continuation_prompt']}\n\n"
@@ -301,37 +293,34 @@ async def continue_handler(
             ),
         )
     else:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"❌ Failed to continue agent for issue #{issue_num}.",
         )
 
-
 async def kill_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    deps.logger.info(f"Kill requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Kill requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "kill")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "kill")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "kill")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "kill")
     if not project_key:
         return
 
     kill_result = deps.kill_issue_agent(issue_num=issue_num, get_runtime_ops_plugin=deps.get_runtime_ops_plugin)
     if kill_result["status"] == "not_running":
-        await update.effective_message.reply_text(kill_result["message"])
+        await ctx.reply_text(kill_result["message"])
         return
 
-    msg = await update.effective_message.reply_text(
+    msg_id = await ctx.reply_text(
         f"🔪 Killing agent for issue #{issue_num} (PID: {kill_result.get('pid', 'n/a')})..."
     )
 
@@ -342,34 +331,31 @@ async def kill_handler(
     else:
         text = f"❌ Error: {kill_result.get('message', 'Unknown kill error')}"
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=msg.message_id,
+    await ctx.edit_message_text(
+        message_id=msg_id,
         text=text,
     )
 
-
 async def reconcile_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    deps.logger.info(f"Reconcile requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Reconcile requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "reconcile")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "reconcile")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "reconcile")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "reconcile")
     if not project_key:
         return
 
     repo = deps.project_repo(project_key)
 
-    msg = await update.effective_message.reply_text(
+    msg_id = await ctx.reply_text(
         f"🔄 Reconciling issue #{issue_num} from structured GitHub comments..."
     )
 
@@ -384,16 +370,14 @@ async def reconcile_handler(
     )
 
     if not result.get("ok"):
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=msg.message_id,
+        await ctx.edit_message_text(
+            message_id=msg_id,
             text=f"⚠️ {result.get('error', 'Reconcile failed.')}",
         )
         return
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=msg.message_id,
+    await ctx.edit_message_text(
+        message_id=msg_id,
         text=(
             f"✅ Reconcile completed for issue #{issue_num}\n\n"
             f"Signals scanned: {result['signals_scanned']}\n"
@@ -402,45 +386,52 @@ async def reconcile_handler(
             f"Current workflow: `{result['workflow_state']}` | "
             f"Step {result['workflow_step']} | Agent `{result['workflow_agent']}`"
         ),
-        parse_mode="Markdown",
     )
 
 
 async def wfstate_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    deps.logger.info(f"Wfstate requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Wfstate requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "wfstate")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "wfstate")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "wfstate")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "wfstate")
     if not project_key:
         return
 
     repo = deps.project_repo(project_key)
 
-    msg = await update.effective_message.reply_text(f"📊 Inspecting workflow state for issue #{issue_num}...")
-
-    expected_running = deps.normalize_agent_reference(
-        deps.get_expected_running_agent_from_workflow(issue_num) or ""
+    msg_id = await ctx.reply_text(
+        f"📊 Fetching workflow state for issue #{issue_num}..."
     )
-    snapshot = deps.build_workflow_snapshot(
+
+    state = await deps.get_workflow_state(
         issue_num=issue_num,
+        project_key=project_key,
         repo=repo,
         get_issue_plugin=deps.get_direct_issue_plugin,
-        expected_running_agent=expected_running,
-        find_task_file_by_issue=deps.find_task_file_by_issue,
-        read_latest_local_completion=deps.read_latest_local_completion,
         extract_structured_completion_signals=deps.extract_structured_completion_signals,
+        workflow_state_plugin_kwargs=deps.workflow_state_plugin_kwargs,
+        write_local_completion_from_signal=deps.write_local_completion_from_signal,
+        build_workflow_snapshot=deps.build_workflow_snapshot,
+        read_latest_local_completion=deps.read_latest_local_completion,
     )
 
+    if not state.get("ok"):
+        await ctx.edit_message_text(
+            message_id=msg_id,
+            text=f"⚠️ {state.get('error', 'Failed to fetch workflow state.')}",
+        )
+        return
+
+    snapshot = state["snapshot"]
     processor_signal = snapshot.get("processor_signal") or {}
     processor_type = processor_signal.get("type", "n/a")
     processor_severity = processor_signal.get("severity", "n/a")
@@ -453,133 +444,131 @@ async def wfstate_handler(
     elif processor_type in {"signal_drift", "retry_fuse", "pause_failed"}:
         recovery_hint = "workflow drift. Run /wfstate, then /reconcile and /continue"
 
-    lines = [
-        f"📊 Workflow Snapshot — Issue #{issue_num}",
-        "",
-        f"Repo: {snapshot['repo']}",
-        f"Workflow ID: {snapshot['workflow_id'] or 'n/a'}",
-        f"Workflow State: {snapshot['workflow_state']}",
-        f"Current Step: {snapshot['current_step']} ({snapshot['current_step_name']})",
-        f"Current Agent: {snapshot['current_agent']}",
-        f"Expected RUNNING Agent: {snapshot['expected_running_agent'] or expected_running or 'n/a'}",
-        "",
-        f"Process: {'running' if snapshot['running'] else 'stopped'}",
-        f"PID: {snapshot['pid'] or 'n/a'}",
-        f"Task File: {snapshot['task_file'] or 'n/a'}",
-        f"Workflow File: {snapshot['workflow_file'] or 'n/a'}",
-        "",
-        "Local Completion:",
-        f"- from: {snapshot['local_from'] or 'n/a'}",
-        f"- next: {snapshot['local_next'] or 'n/a'}",
-        f"- status: {(snapshot['local'] or {}).get('status', 'n/a') if snapshot['local'] else 'n/a'}",
-        f"- updated: {(snapshot['local'] or {}).get('mtime', 'n/a') if snapshot['local'] else 'n/a'}",
-        f"- file: {(snapshot['local'] or {}).get('path', 'n/a') if snapshot['local'] else 'n/a'}",
-        "",
-        "Latest Structured Comment:",
-        f"- from: {snapshot['comment_from'] or 'n/a'}",
-        f"- next: {snapshot['comment_next'] or 'n/a'}",
-        f"- comment_id: {(snapshot['latest_signal'] or {}).get('comment_id', 'n/a') if snapshot['latest_signal'] else 'n/a'}",
-        f"- created: {(snapshot['latest_signal'] or {}).get('created', 'n/a') if snapshot['latest_signal'] else 'n/a'}",
-        "",
-        "Latest Processor Signal:",
-        f"- type: {processor_type}",
-        f"- severity: {processor_severity}",
-        f"- at: {processor_at}",
-        f"- detail: {processor_line}",
-        "",
-        f"Recovery Hint: {recovery_hint}",
-        "",
-        f"Drift Flags: {', '.join(snapshot['drift_flags']) if snapshot['drift_flags'] else 'none'}",
-    ]
+    text = f"📊 Workflow Snapshot — Issue #{issue_num}\n\n"
+    summary = {
+        "Repo": snapshot.get("repo", "N/A"),
+        "Workflow ID": snapshot.get("workflow_id", "N/A"),
+        "Workflow State": snapshot.get("workflow_state", "N/A"),
+        "Current Step": f"{snapshot.get('current_step', 'N/A')} ({snapshot.get('current_step_name', 'N/A')})",
+        "Current Agent": snapshot.get("current_agent", "N/A"),
+        "Expected RUNNING Agent": snapshot.get("expected_running_agent", "N/A"),
+        "Process": "running" if snapshot.get("running") else "stopped",
+        "PID": snapshot.get("pid", "N/A"),
+        "Task File": snapshot.get("task_file", "N/A"),
+        "Workflow File": snapshot.get("workflow_file", "N/A"),
+        "Local Completion (from)": snapshot.get("local_from", "N/A"),
+        "Local Completion (next)": snapshot.get("local_next", "N/A"),
+        "Local Completion (status)": (snapshot.get("local", {})).get("status", "N/A"),
+        "Local Completion (updated)": (snapshot.get("local", {})).get("mtime", "N/A"),
+        "Local Completion (file)": (snapshot.get("local", {})).get("path", "N/A"),
+        "Latest Structured Comment (from)": snapshot.get("comment_from", "N/A"),
+        "Latest Structured Comment (next)": snapshot.get("comment_next", "N/A"),
+        "Latest Structured Comment (comment_id)": (snapshot.get("latest_signal", {})).get("comment_id", "N/A"),
+        "Latest Structured Comment (created)": (snapshot.get("latest_signal", {})).get("created", "N/A"),
+        "Latest Processor Signal (type)": processor_type,
+        "Latest Processor Signal (severity)": processor_severity,
+        "Latest Processor Signal (at)": processor_at,
+        "Latest Processor Signal (detail)": processor_line,
+        "Recovery Hint": recovery_hint,
+        "Drift Flags": ', '.join(snapshot['drift_flags']) if snapshot.get('drift_flags') else 'none',
+    }
+        
+    for k, v in summary.items():
+        text += f"- **{k}**: {v}\n"
 
     if snapshot.get("workflow_pointer_mismatch"):
-        lines.extend(
-            [
-                "",
-                "⚠️ Workflow Pointer Mismatch:",
-                f"- indexed step: {snapshot['indexed_step']} ({snapshot['indexed_step_name']}) / {snapshot['indexed_agent']}",
-                f"- running step: {snapshot['running_step']} ({snapshot['running_step_name']}) / {snapshot['running_agent']}",
-            ]
-        )
+        text += "\n⚠️ **Workflow Pointer Mismatch**:\n"
+        text += f"- **indexed step**: {snapshot.get('indexed_step', 'N/A')} ({snapshot.get('indexed_step_name', 'N/A')}) / {snapshot.get('indexed_agent', 'N/A')}\n"
+        text += f"- **running step**: {snapshot.get('running_step', 'N/A')} ({snapshot.get('running_step_name', 'N/A')}) / {snapshot.get('running_agent', 'N/A')}\n"
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=msg.message_id,
-        text="\n".join(lines),
+    await ctx.edit_message_text(
+        message_id=msg_id,
+        text=text,
     )
 
 
 async def pause_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "pause")
+    deps.logger.info(f"Pause requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "pause")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "pause")
+        return
+
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "pause")
     if not project_key:
         return
 
-    context.args = [project_key, issue_num]
-    await deps.workflow_pause_handler(update, context)
+    ctx.args = [project_key, issue_num]
+    await deps.workflow_pause_handler(ctx)
 
 
 async def resume_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "resume")
+    deps.logger.info(f"Resume requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "resume")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "resume")
+        return
+
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "resume")
     if not project_key:
         return
 
-    context.args = [project_key, issue_num]
-    await deps.workflow_resume_handler(update, context)
+    ctx.args = [project_key, issue_num]
+    await deps.workflow_resume_handler(ctx)
 
 
 async def stop_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "stop")
+    deps.logger.info(f"Stop requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "stop")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "stop")
+        return
+
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "stop")
     if not project_key:
         return
 
-    context.args = [project_key, issue_num]
-    await deps.workflow_stop_handler(update, context)
+    ctx.args = [project_key, issue_num]
+    await deps.workflow_stop_handler(ctx)
 
 
 async def forget_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    ctx: InteractiveContext,
     deps: WorkflowHandlerDeps,
 ) -> None:
-    deps.logger.info(f"Forget requested by user: {update.effective_user.id}")
-    if deps.allowed_user_ids and update.effective_user.id not in deps.allowed_user_ids:
-        log_unauthorized_access(getattr(deps, "logger", None), update.effective_user.id)
+    deps.logger.info(f"Forget requested by user: {ctx.user_id}")
+    if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
+        log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))
         return
 
-    if not context.args:
-        await deps.prompt_project_selection(update, context, "forget")
+    if not ctx.args:
+        await deps.prompt_project_selection(ctx, "forget")
         return
 
-    project_key, issue_num, _ = await deps.ensure_project_issue(update, context, "forget")
+    project_key, issue_num, _ = await deps.ensure_project_issue(ctx, "forget")
     if not project_key:
         return
 
     if project_key not in deps.project_config:
-        await update.effective_message.reply_text("❌ Invalid project.")
+        await ctx.reply_text("❌ Invalid project.")
         return
 
     workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
@@ -618,10 +607,10 @@ async def forget_handler(
 
     try:
         completion_path = os.path.join(os.path.dirname(NEXUS_CORE_STORAGE_DIR), "completion_comments.json")
-        with open(completion_path, "r", encoding="utf-8") as handle:
+        with open(completion_path, encoding="utf-8") as handle:
             completion_data = json.load(handle) or {}
         if isinstance(completion_data, dict):
-            to_delete = [key for key in completion_data.keys() if key.startswith(f"{issue_num}:")]
+            to_delete = [key for key in completion_data if key.startswith(f"{issue_num}:")]
             for key in to_delete:
                 completion_data.pop(key, None)
             if to_delete:

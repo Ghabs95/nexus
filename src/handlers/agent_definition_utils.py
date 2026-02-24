@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import yaml
 
 
-def load_agent_yaml(path: str) -> Optional[Dict[str, Any]]:
+def load_agent_yaml(path: str) -> dict[str, Any] | None:
     """Load a YAML file and return a mapping payload, or None on parse/read failures."""
     try:
-        with open(path, "r", encoding="utf-8") as file_handle:
+        with open(path, encoding="utf-8") as file_handle:
             data = yaml.safe_load(file_handle)
     except Exception:
         return None
@@ -21,7 +21,7 @@ def load_agent_yaml(path: str) -> Optional[Dict[str, Any]]:
     return data
 
 
-def extract_agent_identity(path: str) -> Tuple[str, str]:
+def extract_agent_identity(path: str) -> tuple[str, str]:
     """Return (agent_name, agent_type) parsed from an agent YAML definition.
 
     Returns empty strings when fields are unavailable. Name fallback uses filename stem.

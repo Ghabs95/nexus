@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict
 
 from handlers.agent_definition_utils import extract_agent_identity, load_agent_yaml
-
 
 logger = logging.getLogger(__name__)
 
 
-def resolve_agents_for_project(project_dir: str, nexus_dir_name: str) -> Dict[str, str]:
+def resolve_agents_for_project(project_dir: str, nexus_dir_name: str) -> dict[str, str]:
     """Parse agents from either .agent.md files or Agent YAML definitions.
 
     Supports both:
@@ -21,7 +19,7 @@ def resolve_agents_for_project(project_dir: str, nexus_dir_name: str) -> Dict[st
 
     Returns a dictionary: {agent_display_name: source_filename}
     """
-    agents_map: Dict[str, str] = {}
+    agents_map: dict[str, str] = {}
 
     normalized_project_dir = os.path.abspath(project_dir)
     candidate_dirs = [
@@ -46,7 +44,7 @@ def resolve_agents_for_project(project_dir: str, nexus_dir_name: str) -> Dict[st
 
                 if filename.endswith(".agent.md"):
                     try:
-                        with open(filepath, "r", encoding="utf-8") as file_handle:
+                        with open(filepath, encoding="utf-8") as file_handle:
                             lines = file_handle.readlines()
                         in_frontmatter = False
                         for line in lines:
