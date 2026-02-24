@@ -12,6 +12,9 @@ Event handlers:
 - pull_request_review.submitted: Notify about PR reviews
 """
 
+import eventlet
+eventlet.monkey_patch()
+
 import json
 import logging
 import os
@@ -55,7 +58,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), "static"))
-socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
+_cors_origins = os.getenv("VISUALIZER_ALLOWED_ORIGINS", "")
+_allowed_origins = [o.strip() for o in _cors_origins.split(",") if o.strip()] or []
+socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins=_allowed_origins)
 
 # Track processed events to avoid duplicates
 processed_events = set()
@@ -63,10 +68,14 @@ processed_events = set()
 # Register SocketIO emitter with StateManager for real-time transition broadcasting
 try:
     from state_manager import set_socketio_emitter
-    set_socketio_emitter(lambda event, data: socketio.emit(event, data, namespace="/visualizer"))
-    logger.info("✅ SocketIO emitter registered with StateManager")
-except Exception as _e:
-    logger.warning(f"⚠️ Could not register SocketIO emitter: {_e}")
+except (ImportError, ModuleNotFoundError) as _e:
+    logger.warning(f"⚠️ StateManager not available, skipping SocketIO emitter registration: {_e}")
+else:
+    try:
+        set_socketio_emitter(lambda event, data: socketio.emit(event, data, namespace="/visualizer"))
+        logger.info("✅ SocketIO emitter registered with StateManager")
+    except Exception:
+        logger.exception("⚠️ Unexpected error while registering SocketIO emitter with StateManager")
 
 
 def _get_webhook_policy():

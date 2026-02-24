@@ -118,7 +118,21 @@ function logEvent(type, data) {
   const item = document.createElement('div');
   item.className = `event-item ${type}`;
   const time = new Date().toLocaleTimeString();
-  item.innerHTML = `<div class="event-time">${time} — <strong>${type}</strong></div><div class="event-body">${JSON.stringify(data)}</div>`;
+
+  const header = document.createElement('div');
+  header.className = 'event-time';
+  const timeText = document.createTextNode(`${time} — `);
+  const strong = document.createElement('strong');
+  strong.textContent = type;
+  header.appendChild(timeText);
+  header.appendChild(strong);
+
+  const body = document.createElement('div');
+  body.className = 'event-body';
+  body.textContent = JSON.stringify(data);
+
+  item.appendChild(header);
+  item.appendChild(body);
   log.prepend(item);
   // Cap log to 100 items
   while (log.children.length > 100) log.removeChild(log.lastChild);

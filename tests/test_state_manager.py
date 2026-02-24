@@ -4,7 +4,8 @@ import time
 from unittest.mock import patch, MagicMock
 import sys
 sys.path.insert(0, '/home/ubuntu/git/ghabs/nexus/src')
-from state_manager import StateManager
+from state_manager import StateManager, set_socketio_emitter
+import state_manager as sm_module
 
 
 class TestTrackedIssues:
@@ -118,3 +119,60 @@ class TestLaunchedAgents:
         with patch.object(StateManager, 'load_launched_agents', return_value={}):
             result = StateManager.was_recently_launched("999", "NonExistentAgent")
             assert result is False
+
+
+class TestEmitTransition:
+    """Tests for SocketIO transition broadcasting."""
+
+    def setup_method(self):
+        """Reset the module-level emitter before each test."""
+        set_socketio_emitter(None)
+
+    def teardown_method(self):
+        """Reset the module-level emitter after each test."""
+        set_socketio_emitter(None)
+
+    def test_emit_noop_when_no_emitter(self):
+        """emit_transition is a no-op when no emitter is registered."""
+        # Should not raise
+        StateManager.emit_transition("agent_registered", {"issue": "1", "agent": "TestAgent"})
+
+    def test_emit_calls_registered_emitter(self):
+        """emit_transition forwards events to the registered emitter."""
+        mock_emitter = MagicMock()
+        set_socketio_emitter(mock_emitter)
+        StateManager.emit_transition("agent_registered", {"issue": "42", "agent": "Bot"})
+        mock_emitter.assert_called_once_with("agent_registered", {"issue": "42", "agent": "Bot"})
+
+    def test_emit_swallows_emitter_exceptions(self):
+        """emit_transition swallows exceptions raised by the emitter."""
+        failing_emitter = MagicMock(side_effect=RuntimeError("socket error"))
+        set_socketio_emitter(failing_emitter)
+        # Should not raise
+        StateManager.emit_transition("workflow_mapped", {"issue": "1", "workflow_id": "wf-1"})
+
+    def test_register_launched_agent_emits(self):
+        """register_launched_agent calls emit_transition with agent_registered."""
+        mock_emitter = MagicMock()
+        set_socketio_emitter(mock_emitter)
+        with patch.object(StateManager, 'load_launched_agents', return_value={}):
+            with patch.object(StateManager, 'save_launched_agents'):
+                StateManager.register_launched_agent("10", "TestAgent", 9999)
+        assert mock_emitter.call_count == 1
+        event_name, event_data = mock_emitter.call_args[0]
+        assert event_name == "agent_registered"
+        assert event_data["issue"] == "10"
+        assert event_data["agent"] == "TestAgent"
+
+    def test_map_issue_to_workflow_emits(self):
+        """map_issue_to_workflow calls emit_transition with workflow_mapped."""
+        mock_emitter = MagicMock()
+        set_socketio_emitter(mock_emitter)
+        with patch.object(StateManager, 'load_workflow_mapping', return_value={}):
+            with patch.object(StateManager, 'save_workflow_mapping'):
+                StateManager.map_issue_to_workflow("20", "wf-abc")
+        assert mock_emitter.call_count == 1
+        event_name, event_data = mock_emitter.call_args[0]
+        assert event_name == "workflow_mapped"
+        assert event_data["issue"] == "20"
+        assert event_data["workflow_id"] == "wf-abc"
