@@ -68,6 +68,10 @@ from handlers.workflow_command_handlers import (
     stop_handler as workflow_stop_picker_handler,
     wfstate_handler as workflow_wfstate_handler,
 )
+from handlers.visualize_command_handlers import (
+    VisualizeHandlerDeps,
+    visualize_handler as workflow_visualize_handler,
+)
 from handlers.monitoring_command_handlers import (
     MonitoringHandlerDeps,
     active_handler as monitoring_active_handler,
@@ -204,6 +208,17 @@ def _workflow_handler_deps() -> WorkflowHandlerDeps:
         workflow_pause_handler=workflow_pause_handler,
         workflow_resume_handler=workflow_resume_handler,
         workflow_stop_handler=workflow_stop_handler,
+    )
+
+
+def _visualize_handler_deps() -> VisualizeHandlerDeps:
+    return VisualizeHandlerDeps(
+        logger=logger,
+        allowed_user_ids=TELEGRAM_ALLOWED_USER_IDS,
+        project_config=PROJECT_CONFIG,
+        prompt_project_selection=_prompt_project_selection,
+        ensure_project_issue=_ensure_project_issue,
+        project_repo=_project_repo,
     )
 
 
@@ -1113,6 +1128,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔁 **Recovery & Control:**\n"
         "/reprocess <project> <issue#> - Re-run agent processing\n"
         "/wfstate <project> <issue#> - Show workflow state and drift snapshot\n"
+        "/visualize <project> <issue#> - Show Mermaid workflow diagram for an issue\n"
         "/reconcile <project> <issue#> - Reconcile workflow/comment/local state\n"
         "/continue <project> <issue#> - Check stuck agent status\n"
         "/forget <project> <issue#> - Permanently clear local state for an issue\n"
@@ -1846,6 +1862,11 @@ async def wfstate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await workflow_wfstate_handler(update, context, _workflow_handler_deps())
 
 
+async def visualize_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Render a Mermaid workflow diagram for an issue."""
+    await workflow_visualize_handler(update, context, _visualize_handler_deps())
+
+
 async def pause_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause auto-chaining with project picker support."""
     await workflow_pause_picker_handler(update, context, _workflow_handler_deps())
@@ -1964,6 +1985,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("fuse", fuse_handler))
     app.add_handler(CommandHandler("audit", audit_handler))
     app.add_handler(CommandHandler("wfstate", wfstate_handler))
+    app.add_handler(CommandHandler("visualize", visualize_handler))
     app.add_handler(CommandHandler("stats", stats_handler))
     app.add_handler(CommandHandler("comments", comments_handler))
     app.add_handler(CommandHandler("reprocess", reprocess_handler))
