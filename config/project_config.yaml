@@ -170,7 +170,10 @@ nexus:
     - Ghabs95/nexus-core
     - Ghabs95/nexus
   chat_agents:
-    designer: {}
+    designer:
+      context_path: ghabs/nexus-core/examples/telegram-bot/docs
+      context_files:
+        - AGENTS.md
     triage: {}
     compliance: {}
     writer: {}
