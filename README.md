@@ -21,6 +21,7 @@ GitHub inboxes. Perfect for quickly capturing ideas and tasks on the go.
 - **🧪 Test Coverage**: Comprehensive unit tests (115 tests) for critical system components
 - **📝 Log Management**: Centralized logging with automatic 7-day rotation
 - **⌨️ Interactive Notifications**: Inline keyboard buttons for quick actions (approve, pause, view logs)
+- **📊 Workflow Visualization**: Real-time Mermaid.js diagram generation via `/visualize` command
 - **🔀 PR Review Integration**: Auto-detects linked PRs when workflows complete, one-click approve/review
 
 ## Two Operating Modes
@@ -319,6 +320,18 @@ Real-time system analytics accessible via `/stats [days]` command:
 
 **Implementation**: [src/analytics.py](src/analytics.py) - `AuditLogParser`, `get_stats_report()`
 
+### 📊 Interactive Workflow Visualization
+
+Real-time visualization of active task workflows directly in Telegram:
+
+- **Command**: `/visualize <project> <issue#>`
+- **Output**: Generates a professional Mermaid.js `flowchart TD` diagram rendered as a PNG image.
+- **Dark Mode**: Supports GitHub-style dark-mode palette for nodes and status icons.
+- **Fallback**: If server-side rendering is unavailable, the bot sends the raw Mermaid.js text in a code block.
+- **Status Icons**: Maps workflow state to visual indicators (✅ Complete, ▶️ Running, ⏳ Pending, ❌ Failed).
+
+**Implementation**: [src/services/mermaid_render_service.py](src/services/mermaid_render_service.py) - `build_mermaid_diagram()`, `render_mermaid_to_png()`
+
 ### 🛡️ Error Handling & Resilience
 
 Comprehensive error handling for reliability:
@@ -467,6 +480,7 @@ Add dark mode support to mobile app
 - `/status` - View pending tasks in inbox
 - `/active` - View currently active tasks
 - `/stats [days]` - View system analytics and performance metrics (default: 30 days)
+- `/visualize <issue#>` - Generate a real-time Mermaid.js workflow diagram
 - `/logs <issue#>` - View task execution logs
 - `/logsfull <issue#>` - Full log lines (no truncation)
 - `/audit <issue#>` - View workflow audit trail (state changes, agent launches, timeouts)

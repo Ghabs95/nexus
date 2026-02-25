@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Interactive Workflow Visualizer** — Implemented a real-time Mermaid.js diagram generator for visualizing active task workflows. Users can now run `/visualize <project> <issue#>` in Telegram to receive a PNG diagram (or text fallback) showing the status of each step in the 9-step enterprise SOP.
 - **Business Agent for Feature Suggestions** — Introduced a new agent type (`business`) that leverages AI to generate actionable feature suggestions for a given project. This agent processes project context and existing features to provide prioritized suggestions with rationale.
 - **Voice Transcription Support** — Added `WhisperTranscriptionProvider` for voice-to-text transcription, supporting various audio formats including OGG. Integrated the transcription adapter into the `AdapterRegistry` for seamless use.
 

@@ -44,6 +44,7 @@ def build_mermaid_diagram(steps: list[dict[str, Any]], issue_num: str) -> str:
             agent_name = str(agent.get("name") or agent.get("display_name") or "").strip()
         else:
             agent_name = str(agent).strip()
+        agent_name = agent_name.replace('"', "'")
         raw_status = str(step.get("status", "pending")).strip().lower()
 
         status_icon = {
