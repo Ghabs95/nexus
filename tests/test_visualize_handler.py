@@ -120,7 +120,7 @@ async def test_handler_sends_mermaid_text_with_steps(tmp_path, monkeypatch):
     ctx = _make_ctx(args=["myproject", "42"])
     deps = _make_deps()
 
-    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", lambda _: "wf-1")
+    monkeypatch.setattr(vch.HostStateManager, "get_workflow_id_for_issue", lambda _: "wf-1")
     workflows_dir = tmp_path / "workflows"
     workflows_dir.mkdir()
     workflow_file = workflows_dir / "wf-1.json"
@@ -142,7 +142,7 @@ async def test_handler_reports_no_steps_when_workflow_missing(monkeypatch):
     ctx = _make_ctx(args=["myproject", "42"])
     deps = _make_deps()
 
-    monkeypatch.setattr(vch.StateManager, "get_workflow_id_for_issue", lambda _: None)
+    monkeypatch.setattr(vch.HostStateManager, "get_workflow_id_for_issue", lambda _: None)
 
     await visualize_handler(ctx, deps)
 

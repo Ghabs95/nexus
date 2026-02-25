@@ -2,7 +2,7 @@
 
 Bridges ProcessOrchestrator (nexus-core) with the concrete nexus host:
   - Copilot / Gemini CLI invocations (via agent_launcher.launch_next_agent)
-  - StateManager-backed process tracking
+  - HostStateManager-backed process tracking
   - AgentMonitor stuck/dead detection hooks
   - Telegram alerting
   - Workflow finalisation (close issue + PR)
@@ -58,9 +58,9 @@ def get_retry_fuse_status(issue_number: str, now_ts: float | None = None) -> dic
     issue_key = str(issue_number)
 
     try:
-        from state_manager import StateManager
+        from state_manager import HostStateManager
 
-        launched = StateManager.load_launched_agents(recent_only=False)
+        launched = HostStateManager.load_launched_agents(recent_only=False)
     except Exception:
         launched = {}
 
@@ -166,14 +166,14 @@ class NexusAgentRuntime(AgentRuntime):
             exclude_tools=exclude_tools,
         )
     def load_launched_agents(self, recent_only: bool = True) -> dict[str, dict]:
-        from state_manager import StateManager
+        from state_manager import HostStateManager
 
-        return StateManager.load_launched_agents(recent_only=recent_only)
+        return HostStateManager.load_launched_agents(recent_only=recent_only)
 
     def save_launched_agents(self, data: dict[str, dict]) -> None:
-        from state_manager import StateManager
+        from state_manager import HostStateManager
 
-        StateManager.save_launched_agents(data)
+        HostStateManager.save_launched_agents(data)
 
     def clear_launch_guard(self, issue_number: str) -> None:
         from runtime.agent_launcher import clear_launch_guard
@@ -185,9 +185,9 @@ class NexusAgentRuntime(AgentRuntime):
         issue_key = str(issue_number)
 
         try:
-            from state_manager import StateManager
+            from state_manager import HostStateManager
 
-            launched = StateManager.load_launched_agents(recent_only=False)
+            launched = HostStateManager.load_launched_agents(recent_only=False)
             entry = launched.get(issue_key, {}) if isinstance(launched, dict) else {}
             if not isinstance(entry, dict):
                 entry = {}
@@ -253,7 +253,7 @@ class NexusAgentRuntime(AgentRuntime):
                 entry["retry_fuse"] = fuse
                 entry["retry_fuse_trip_times"] = trip_times
                 launched[issue_key] = entry
-                StateManager.save_launched_agents(launched)
+                HostStateManager.save_launched_agents(launched)
 
                 if not alerted:
                     try:
@@ -263,10 +263,12 @@ class NexusAgentRuntime(AgentRuntime):
                             get_workflow_state_plugin,
                         )
 
+                        from integrations.workflow_state_factory import get_workflow_state
+
                         workflow_plugin = get_workflow_state_plugin(
                             storage_dir=NEXUS_CORE_STORAGE_DIR,
-                            issue_to_workflow_id=StateManager.get_workflow_id_for_issue,
-                            clear_pending_approval=StateManager.clear_pending_approval,
+                            issue_to_workflow_id=lambda n: get_workflow_state().get_workflow_id(n),
+                            clear_pending_approval=lambda n: get_workflow_state().clear_pending_approval(n),
                             audit_log=AuditStore.audit_log,
                             cache_key="workflow:state-engine:retry-fuse",
                         )
@@ -321,7 +323,7 @@ class NexusAgentRuntime(AgentRuntime):
                     entry["retry_fuse"] = fuse
                     entry["retry_fuse_trip_times"] = trip_times
                     launched[issue_key] = entry
-                    StateManager.save_launched_agents(launched)
+                    HostStateManager.save_launched_agents(launched)
 
                 logger.error(
                     "Retry fuse tripped for issue #%s agent %s (%d attempts in window, %d trips in hard window)",
@@ -334,7 +336,7 @@ class NexusAgentRuntime(AgentRuntime):
 
             entry["retry_fuse"] = fuse
             launched[issue_key] = entry
-            StateManager.save_launched_agents(launched)
+            HostStateManager.save_launched_agents(launched)
         except Exception as exc:
             logger.debug(
                 "Retry fuse bookkeeping failed for issue #%s (%s); falling back to monitor retry logic",
@@ -342,14 +344,14 @@ class NexusAgentRuntime(AgentRuntime):
                 exc,
             )
 
-        from runtime.agent_monitor import AgentMonitor
-
-        return bool(AgentMonitor.should_retry(issue_number, agent_type))
+        # Fuse didn't trip — allow the retry.
+        # (The actual retry-budget decision lives in the fuse logic above.)
+        return True
 
     def send_alert(self, message: str) -> bool:
-        from integrations.notifications import send_telegram_alert
+        from integrations.notifications import emit_alert
 
-        return bool(send_telegram_alert(message))
+        return bool(emit_alert(message, severity="warning", source="agent_runtime"))
 
     def _has_recent_agent_completion_comment(
         self,
@@ -443,9 +445,9 @@ class NexusAgentRuntime(AgentRuntime):
         import os
 
         from config import NEXUS_CORE_STORAGE_DIR
-        from state_manager import StateManager
+        from integrations.workflow_state_factory import get_workflow_state
 
-        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
+        workflow_id = get_workflow_state().get_workflow_id(str(issue_number))
         if not workflow_id:
             return None
         wf_file = os.path.join(
@@ -468,9 +470,9 @@ class NexusAgentRuntime(AgentRuntime):
         import os
 
         from config import NEXUS_CORE_STORAGE_DIR
-        from state_manager import StateManager
+        from integrations.workflow_state_factory import get_workflow_state
 
-        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
+        workflow_id = get_workflow_state().get_workflow_id(str(issue_number))
         if not workflow_id:
             return False
 
@@ -564,9 +566,9 @@ class NexusAgentRuntime(AgentRuntime):
         import os
 
         from config import NEXUS_CORE_STORAGE_DIR
-        from state_manager import StateManager
+        from integrations.workflow_state_factory import get_workflow_state
 
-        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
+        workflow_id = get_workflow_state().get_workflow_id(str(issue_number))
         if not workflow_id:
             return None
 
@@ -606,9 +608,9 @@ class NexusAgentRuntime(AgentRuntime):
         import json
 
         from config import NEXUS_CORE_STORAGE_DIR
-        from state_manager import StateManager
+        from integrations.workflow_state_factory import get_workflow_state
 
-        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_number))
+        workflow_id = get_workflow_state().get_workflow_id(str(issue_number))
         if not workflow_id:
             return None
 

@@ -1,0 +1,12 @@
+{
+    "extraPaths": [
+        "src",
+        "../nexus-core"
+    ],
+    "venvPath": "../nexus-core",
+    "venv": "venv",
+    "pythonVersion": "3.14",
+    "typeCheckingMode": "basic",
+    "reportMissingImports": "warning",
+    "reportMissingModuleSource": "none"
+}

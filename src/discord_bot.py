@@ -67,7 +67,7 @@ from services.memory_service import (
     rename_chat,
     switch_chat,
 )
-from state_manager import StateManager
+from state_manager import HostStateManager
 from user_manager import get_user_manager
 
 # --- SETUP BOT ---
@@ -571,7 +571,7 @@ async def track_command(interaction: discord.Interaction, issue: str, project: s
         )
         return
 
-    tracked = StateManager.load_tracked_issues() or {}
+    tracked = HostStateManager.load_tracked_issues() or {}
     tracked[str(issue_num)] = {
         "project": "global",
         "status": "active",
@@ -580,7 +580,7 @@ async def track_command(interaction: discord.Interaction, issue: str, project: s
         "last_seen_state": None,
         "last_seen_labels": [],
     }
-    StateManager.save_tracked_issues(tracked)
+    HostStateManager.save_tracked_issues(tracked)
     await interaction.response.send_message(f"👁️ Now globally tracking issue #{issue_num}.")
 
 
@@ -590,7 +590,7 @@ async def tracked_command(interaction: discord.Interaction):
         await interaction.response.send_message("🔒 Unauthorized.", ephemeral=True)
         return
 
-    tracked = StateManager.load_tracked_issues() or {}
+    tracked = HostStateManager.load_tracked_issues() or {}
     lines = ["📌 **Global Tracked Issues**", ""]
     active_count = 0
     for issue_num, payload in sorted(

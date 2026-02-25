@@ -39,7 +39,7 @@ def test_resolve_repo_strict_raises_on_mismatch(monkeypatch):
     )
     monkeypatch.setattr(inbox_processor, "_resolve_repo_for_issue", lambda issue, default_project=None: "Ghabs95/nexus")
 
-    with patch("inbox_processor.send_telegram_alert") as mock_alert:
+    with patch("inbox_processor.emit_alert") as mock_alert:
         with pytest.raises(ValueError):
             inbox_processor._resolve_repo_strict("nexus", "43")
 
@@ -74,7 +74,7 @@ def test_reroute_webhook_task_moves_file(tmp_path, monkeypatch):
     assert str(Path(moved_path)).endswith("/.nexus/inbox/project-b/issue_43.md")
 
 
-@patch("webhook_server.send_telegram_alert", return_value=True)
+@patch("webhook_server.emit_alert", return_value=True)
 def test_webhook_blocks_unmapped_repository(mock_alert):
     from webhook_server import _get_webhook_policy, handle_issue_opened
 
@@ -184,7 +184,7 @@ def test_resolve_project_for_repo_matches_gitlab_secondary_repo(monkeypatch):
 
 
 @patch("webhook_server._notify_lifecycle", return_value=True)
-@patch("webhook_server.send_telegram_alert", return_value=True)
+@patch("webhook_server.emit_alert", return_value=True)
 def test_webhook_maps_secondary_repo_to_same_project(_mock_alert, _mock_notify, tmp_path, monkeypatch):
     import webhook_server
 

@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from flask import Flask, jsonify
 
-from audit_store import AuditStore
 from config import DATA_DIR, LOGS_DIR
+from integrations.audit_query_factory import get_audit_query
 from rate_limiter import get_rate_limiter
 
 # Configure logging
@@ -108,7 +108,8 @@ def get_recent_audit_activity(hours: int = 1) -> dict:
         Dict with event counts
     """
     try:
-        events = AuditStore.read_all_audit_events(since_hours=hours)
+        query = get_audit_query()
+        events = query.get_events(since_hours=hours)
         if not events:
             return {"total_events": 0, "event_types": {}, "time_window_hours": hours}
 

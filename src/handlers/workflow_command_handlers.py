@@ -12,7 +12,8 @@ from typing import Any
 from config import NEXUS_CORE_STORAGE_DIR
 from interactive_context import InteractiveContext
 from runtime.agent_launcher import clear_launch_guard
-from state_manager import StateManager
+from integrations.workflow_state_factory import get_workflow_state
+from state_manager import HostStateManager
 from utils.log_utils import log_unauthorized_access
 
 
@@ -571,7 +572,7 @@ async def forget_handler(
         await ctx.reply_text("❌ Invalid project.")
         return
 
-    workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
+    workflow_id = get_workflow_state().get_workflow_id(str(issue_num))
     workflow_file_deleted = False
     if workflow_id:
         workflow_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
@@ -592,16 +593,16 @@ async def forget_handler(
     if pid and runtime_ops:
         killed = bool(runtime_ops.kill_process(pid, force=True))
 
-    launched = StateManager.load_launched_agents(recent_only=False)
+    launched = HostStateManager.load_launched_agents(recent_only=False)
     launched_removed = launched.pop(str(issue_num), None) is not None
-    StateManager.save_launched_agents(launched)
+    HostStateManager.save_launched_agents(launched)
 
-    tracked = StateManager.load_tracked_issues()
+    tracked = HostStateManager.load_tracked_issues()
     tracked_removed = tracked.pop(str(issue_num), None) is not None
-    StateManager.save_tracked_issues(tracked)
+    HostStateManager.save_tracked_issues(tracked)
 
-    StateManager.remove_workflow_mapping(str(issue_num))
-    StateManager.clear_pending_approval(str(issue_num))
+    get_workflow_state().remove_mapping(str(issue_num))
+    get_workflow_state().clear_pending_approval(str(issue_num))
 
     cleared_guards = clear_launch_guard(str(issue_num))
 

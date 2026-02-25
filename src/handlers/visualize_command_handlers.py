@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 from config import NEXUS_CORE_STORAGE_DIR
 from services.mermaid_render_service import build_mermaid_diagram
-from state_manager import StateManager
+from integrations.workflow_state_factory import get_workflow_state
 from utils.log_utils import log_unauthorized_access
 
 
@@ -51,7 +51,7 @@ async def visualize_handler(
     )
 
     # Load workflow steps from the workflow JSON file
-    workflow_id = StateManager.get_workflow_id_for_issue(issue_num)
+    workflow_id = get_workflow_state().get_workflow_id(issue_num)
     steps: list[dict[str, Any]] = []
     workflow_state = "unknown"
 

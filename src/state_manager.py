@@ -1,4 +1,12 @@
-"""State management for Nexus - handles persistent storage."""
+"""Host-level state management for Nexus bot runtime.
+
+Handles bot-host concerns only:
+- Launched agents tracking
+- Tracked issues
+- SocketIO transition broadcasting
+
+Workflow and approval state is managed by :mod:`integrations.workflow_state_factory`.
+"""
 import logging
 import time
 from collections.abc import Callable
@@ -34,8 +42,13 @@ def _get_state_store_plugin():
     )
 
 
-class StateManager:
-    """Manages all persistent state for the Nexus system."""
+class HostStateManager:
+    """Manages host-level persistent state for the Nexus bot runtime.
+
+    This class covers *bot-host* concerns only — launched agent tracking,
+    issue tracking, and SocketIO broadcast.  For workflow / approval state
+    see :func:`integrations.workflow_state_factory.get_workflow_state`.
+    """
 
     @staticmethod
     def emit_transition(event_type: str, data: dict) -> None:
@@ -82,7 +95,7 @@ class StateManager:
                 AGENT_RECENT_WINDOW. Pass False in dead-agent detection so
                 that crashed agents older than the window are still caught.
         """
-        data = StateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
+        data = HostStateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
         if not recent_only:
             return data
         cutoff = time.time() - AGENT_RECENT_WINDOW
@@ -91,7 +104,7 @@ class StateManager:
     @staticmethod
     def save_launched_agents(data: dict[str, dict]) -> None:
         """Save launched agents to persistent storage."""
-        StateManager._save_json_state(
+        HostStateManager._save_json_state(
             LAUNCHED_AGENTS_FILE,
             data,
             context="launched agents",
@@ -107,7 +120,7 @@ class StateManager:
         Returns:
             Tier name (e.g. ``"full"``, ``"fast-track"``) or ``None``.
         """
-        data = StateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
+        data = HostStateManager._load_json_state(LAUNCHED_AGENTS_FILE, default={}) or {}
         entry = data.get(str(issue_num))
         if entry and isinstance(entry, dict):
             return entry.get("tier")
@@ -116,7 +129,7 @@ class StateManager:
     @staticmethod
     def register_launched_agent(issue_num: str, agent_name: str, pid: int) -> None:
         """Register a newly launched agent."""
-        data = StateManager.load_launched_agents()
+        data = HostStateManager.load_launched_agents()
         key = f"{issue_num}_{agent_name}"
         data[key] = {
             "issue": issue_num,
@@ -124,9 +137,9 @@ class StateManager:
             "pid": pid,
             "timestamp": time.time()
         }
-        StateManager.save_launched_agents(data)
+        HostStateManager.save_launched_agents(data)
         logger.info(f"Registered launched agent: {agent_name} (PID: {pid}) for issue #{issue_num}")
-        StateManager.emit_transition("agent_registered", {
+        HostStateManager.emit_transition("agent_registered", {
             "issue": issue_num,
             "agent": agent_name,
             "pid": pid,
@@ -136,19 +149,19 @@ class StateManager:
     @staticmethod
     def was_recently_launched(issue_num: str, agent_name: str) -> bool:
         """Check if agent was recently launched (within 2-minute window)."""
-        data = StateManager.load_launched_agents()
+        data = HostStateManager.load_launched_agents()
         key = f"{issue_num}_{agent_name}"
         return key in data
 
     @staticmethod
-    def load_tracked_issues() -> dict[int, dict]:
+    def load_tracked_issues() -> dict[str, dict]:
         """Load tracked issues from file."""
-        return StateManager._load_json_state(TRACKED_ISSUES_FILE, default={})
+        return HostStateManager._load_json_state(TRACKED_ISSUES_FILE, default={})
 
     @staticmethod
-    def save_tracked_issues(data: dict[int, dict]) -> None:
+    def save_tracked_issues(data: dict[str, dict]) -> None:
         """Save tracked issues to file."""
-        StateManager._save_json_state(
+        HostStateManager._save_json_state(
             TRACKED_ISSUES_FILE,
             data,
             context="tracked issues",
@@ -157,119 +170,21 @@ class StateManager:
     @staticmethod
     def add_tracked_issue(issue_num: int, project: str, description: str) -> None:
         """Add an issue to tracking."""
-        data = StateManager.load_tracked_issues()
+        data = HostStateManager.load_tracked_issues()
         data[str(issue_num)] = {
             "project": project,
             "description": description,
             "created_at": time.time(),
             "status": "active"
         }
-        StateManager.save_tracked_issues(data)
+        HostStateManager.save_tracked_issues(data)
         logger.info(f"Added tracked issue: #{issue_num} ({project})")
 
     @staticmethod
     def remove_tracked_issue(issue_num: int) -> None:
         """Remove an issue from tracking."""
-        data = StateManager.load_tracked_issues()
+        data = HostStateManager.load_tracked_issues()
         data.pop(str(issue_num), None)
-        StateManager.save_tracked_issues(data)
+        HostStateManager.save_tracked_issues(data)
         logger.info(f"Removed tracked issue: #{issue_num}")
 
-    # --- NEXUS-CORE INTEGRATION ---
-    
-    @staticmethod
-    def load_workflow_mapping() -> dict[str, str]:
-        """Load issue_number -> workflow_id mapping."""
-        from config import WORKFLOW_ID_MAPPING_FILE
-        return StateManager._load_json_state(WORKFLOW_ID_MAPPING_FILE, default={})
-
-    @staticmethod
-    def save_workflow_mapping(data: dict[str, str]) -> None:
-        """Save issue_number -> workflow_id mapping."""
-        from config import WORKFLOW_ID_MAPPING_FILE
-        StateManager._save_json_state(
-            WORKFLOW_ID_MAPPING_FILE,
-            data,
-            context="workflow mapping",
-        )
-
-    @staticmethod
-    def map_issue_to_workflow(issue_num: str, workflow_id: str) -> None:
-        """Map an issue number to a workflow ID."""
-        data = StateManager.load_workflow_mapping()
-        data[str(issue_num)] = workflow_id
-        StateManager.save_workflow_mapping(data)
-        logger.info(f"Mapped issue #{issue_num} -> workflow {workflow_id}")
-        StateManager.emit_transition("workflow_mapped", {
-            "issue": issue_num,
-            "workflow_id": workflow_id,
-            "timestamp": time.time(),
-        })
-
-    @staticmethod
-    def get_workflow_id_for_issue(issue_num: str) -> str | None:
-        """Get workflow ID for an issue number."""
-        data = StateManager.load_workflow_mapping()
-        return data.get(str(issue_num))
-
-    @staticmethod
-    def remove_workflow_mapping(issue_num: str) -> None:
-        """Remove workflow mapping for an issue."""
-        data = StateManager.load_workflow_mapping()
-        data.pop(str(issue_num), None)
-        StateManager.save_workflow_mapping(data)
-        logger.info(f"Removed workflow mapping for issue #{issue_num}")
-
-    # --- APPROVAL GATE STATE ---
-
-    @staticmethod
-    def load_approval_state() -> dict[str, dict]:
-        """Load pending approval state from persistent storage."""
-        from config import APPROVAL_STATE_FILE
-        return StateManager._load_json_state(APPROVAL_STATE_FILE, default={})
-
-    @staticmethod
-    def save_approval_state(data: dict[str, dict]) -> None:
-        """Save approval state to persistent storage."""
-        from config import APPROVAL_STATE_FILE
-        StateManager._save_json_state(
-            APPROVAL_STATE_FILE,
-            data,
-            context="approval state",
-        )
-
-    @staticmethod
-    def set_pending_approval(
-        issue_num: str,
-        step_num: int,
-        step_name: str,
-        approvers: list[str],
-        approval_timeout: int,
-    ) -> None:
-        """Record that a workflow step is waiting for approval."""
-        data = StateManager.load_approval_state()
-        data[str(issue_num)] = {
-            "step_num": step_num,
-            "step_name": step_name,
-            "approvers": approvers,
-            "approval_timeout": approval_timeout,
-            "requested_at": time.time(),
-        }
-        StateManager.save_approval_state(data)
-        logger.info(
-            f"Set pending approval for issue #{issue_num} step {step_num} ({step_name})"
-        )
-
-    @staticmethod
-    def clear_pending_approval(issue_num: str) -> None:
-        """Remove approval gate record once resolved."""
-        data = StateManager.load_approval_state()
-        data.pop(str(issue_num), None)
-        StateManager.save_approval_state(data)
-        logger.info(f"Cleared pending approval for issue #{issue_num}")
-
-    @staticmethod
-    def get_pending_approval(issue_num: str) -> dict | None:
-        """Return pending approval info for an issue, or None if not awaiting approval."""
-        data = StateManager.load_approval_state()
-        return data.get(str(issue_num))

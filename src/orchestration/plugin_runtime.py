@@ -115,11 +115,16 @@ _BUILTIN_REGISTER_MODULES = (
     "nexus.plugins.builtin.agent_launch_policy_plugin",
     "nexus.plugins.builtin.github_issue_plugin",
     "nexus.plugins.builtin.telegram_notification_plugin",
+    "nexus.plugins.builtin.telegram_interactive_plugin",
+    "nexus.plugins.builtin.telegram_event_handler_plugin",
+    "nexus.plugins.builtin.discord_interactive_plugin",
+    "nexus.plugins.builtin.discord_event_handler_plugin",
     "nexus.plugins.builtin.json_state_plugin",
     "nexus.plugins.builtin.runtime_ops_plugin",
     "nexus.plugins.builtin.workflow_policy_plugin",
     "nexus.plugins.builtin.workflow_monitor_policy_plugin",
     "nexus.plugins.builtin.github_webhook_policy_plugin",
+    "nexus.plugins.builtin.github_workflow_policy_plugin",
     "nexus.plugins.builtin.workflow_state_engine_plugin",
 )
 

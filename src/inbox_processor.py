@@ -39,9 +39,9 @@ from config import (
     get_tasks_closed_dir,
 )
 from integrations.notifications import (
+    emit_alert,
     notify_agent_needs_input,
     notify_workflow_completed,
-    send_telegram_alert,
 )
 from orchestration.ai_orchestrator import get_orchestrator
 from orchestration.nexus_core_helpers import (
@@ -61,12 +61,12 @@ from runtime.agent_launcher import (
     invoke_copilot_agent,
     is_recent_launch,
 )
-from runtime.agent_monitor import WorkflowRouter
+from nexus.core.router import WorkflowRouter
 from runtime.nexus_agent_runtime import NexusAgentRuntime
 from services.workflow_signal_sync import (
     normalize_agent_reference as _normalize_agent_reference,
 )
-from state_manager import StateManager
+from state_manager import HostStateManager
 
 _STEP_COMPLETE_COMMENT_RE = re.compile(
     r"^\s*##\s+.+?\bcomplete\b\s+—\s+([a-zA-Z0-9_-]+)\s*$",
@@ -104,10 +104,12 @@ notified_comments = set()  # Track comment IDs we've already notified about
 auto_chained_agents = {}  # Track issue -> log_file to avoid re-chaining same completion
 POLLING_FAILURE_THRESHOLD = 3
 polling_failure_counts: dict[str, int] = {}
+from integrations.workflow_state_factory import get_workflow_state as _get_wf_state
+
 _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
-    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
-    "issue_to_workflow_map_setter": StateManager.map_issue_to_workflow,
+    "issue_to_workflow_id": lambda n: _get_wf_state().get_workflow_id(n),
+    "issue_to_workflow_map_setter": lambda n, w: _get_wf_state().map_issue(n, w),
     "workflow_definition_path_resolver": get_workflow_definition_path,
 }
 
@@ -148,7 +150,7 @@ def _resolve_tier_for_issue(
         ``None`` when the tier cannot be determined.  When ``None`` is
         returned, a Telegram alert has already been sent.
     """
-    tracker_tier = StateManager.get_last_tier_for_issue(issue_num)
+    tracker_tier = HostStateManager.get_last_tier_for_issue(issue_num)
     label_tier = get_sop_tier_from_issue(issue_num, project_name, repo_override=repo)
 
     if tracker_tier and label_tier:
@@ -173,10 +175,11 @@ def _resolve_tier_for_issue(
         f"Cannot determine workflow tier for issue #{issue_num} "
         f"({context}): no tracker entry and no workflow: label."
     )
-    send_telegram_alert(
+    emit_alert(
         f"⚠️ {context.title()} halted for issue #{issue_num}: "
         f"missing `workflow:` label and no prior launch data.\n"
-        f"Add a label (e.g. `workflow:full`) to the issue and retry."
+        f"Add a label (e.g. `workflow:full`) to the issue and retry.",
+        severity="warning", source="inbox_processor",
     )
     return None
 
@@ -192,17 +195,17 @@ def _ensure_workflow_label(issue_num: str, tier_name: str, repo: str) -> None:
         logger.warning(f"Failed to add label '{label}' to issue #{issue_num}: {e}")
 
 
-# Wrapper functions for backward compatibility - these now delegate to StateManager
+# Wrapper functions for backward compatibility - these now delegate to HostStateManager
 def load_launched_agents():
     """Load recently launched agents from persistent storage."""
-    return StateManager.load_launched_agents()
+    return HostStateManager.load_launched_agents()
 
 def save_launched_agents(data):
     """Save launched agents to persistent storage."""
-    StateManager.save_launched_agents(data)
+    HostStateManager.save_launched_agents(data)
 
 # Load persisted state
-launched_agents_tracker = StateManager.load_launched_agents()
+launched_agents_tracker = HostStateManager.load_launched_agents()
 # PROJECT_CONFIG is now imported from config.py
 
 # Failed task file lookup tracking (stop checking after 3 failures)
@@ -271,11 +274,12 @@ def _record_polling_failure(scope: str, error: Exception) -> None:
         return
 
     try:
-        send_telegram_alert(
+        emit_alert(
             "⚠️ **Polling Error Threshold Reached**\n\n"
             f"Scope: `{scope}`\n"
             f"Consecutive failures: {count}\n"
-            f"Last error: `{error}`"
+            f"Last error: `{error}`",
+            severity="error", source="inbox_processor",
         )
     except Exception as notify_err:
         logger.error(f"Failed to send polling escalation alert for {scope}: {notify_err}")
@@ -451,7 +455,7 @@ def _resolve_repo_strict(project_name: str, issue_num: str) -> str:
             "Workflow finalization blocked."
         )
         logger.error(message)
-        send_telegram_alert(message)
+        emit_alert(message, severity="error", source="inbox_processor")
         raise ValueError(message)
 
     return issue_repo or (project_repos[0] if project_repos else get_github_repo(get_default_project()))
@@ -523,7 +527,7 @@ def reconcile_completion_signals_on_startup() -> None:
     Safe startup check only: emits alerts when signals diverge, does not mutate
     workflow state or completion files.
     """
-    mappings = StateManager.load_workflow_mapping()
+    mappings = _get_wf_state().load_all_mappings()
     if not mappings:
         return
 
@@ -657,12 +661,13 @@ def reconcile_completion_signals_on_startup() -> None:
         logger.warning(
             f"Startup signal drift for issue #{issue_num} ({', '.join(drifts)}): {details}"
         )
-        send_telegram_alert(
+        emit_alert(
             f"⚠️ Startup routing drift detected for issue #{issue_num}\n"
             f"Workflow RUNNING: `{expected_running_agent}`\n"
             f"Local completion next: `{local_next or 'n/a'}`\n"
             f"Latest structured comment next: `{comment_next or 'n/a'}`\n\n"
-            "No automatic state changes were made. Reconcile manually before /continue."
+            "No automatic state changes were made. Reconcile manually before /continue.",
+            severity="warning", source="inbox_processor",
         )
 
 
@@ -719,9 +724,10 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
                     issue_num,
                     state,
                 )
-                send_telegram_alert(
+                emit_alert(
                     "⚠️ Finalization blocked for "
-                    f"issue #{issue_num}: workflow state is `{state}` (expected terminal)."
+                    f"issue #{issue_num}: workflow state is `{state}` (expected terminal).",
+                    severity="warning", source="inbox_processor",
                 )
                 return
     except Exception as exc:
@@ -764,7 +770,7 @@ def _finalize_workflow(issue_num: str, repo: str, last_agent: str, project_name:
         create_pr_from_changes=_create_pr_from_changes,
         find_existing_pr=_find_existing_pr,
         close_issue=_close_issue,
-        send_notification=send_telegram_alert,
+        send_notification=lambda msg: emit_alert(msg, severity="info", source="workflow_policy"),
         cache_key="workflow-policy:finalize",
     )
 
@@ -926,29 +932,30 @@ def _get_initial_agent_from_workflow(project_name: str, workflow_type: str = "")
     path = get_workflow_definition_path(project_name)
     if not path:
         logger.error(f"Missing workflow_definition_path for project '{project_name}'")
-        send_telegram_alert(
-            f"Missing workflow_definition_path for project '{project_name}'."
+        emit_alert(
+            f"Missing workflow_definition_path for project '{project_name}'.",
+            severity="error", source="inbox_processor",
         )
         return ""
     if not os.path.exists(path):
         logger.error(f"Workflow definition not found: {path}")
-        send_telegram_alert(f"Workflow definition not found: {path}")
+        emit_alert(f"Workflow definition not found: {path}", severity="error", source="inbox_processor")
         return ""
     try:
         workflow = WorkflowDefinition.from_yaml(path, workflow_type=workflow_type)
         if not workflow.steps:
             logger.error(f"Workflow definition has no steps: {path}")
-            send_telegram_alert(f"Workflow definition has no steps: {path}")
+            emit_alert(f"Workflow definition has no steps: {path}", severity="error", source="inbox_processor")
             return ""
         first_step = workflow.steps[0]
         return first_step.agent.name or first_step.agent.display_name or ""
     except Exception as e:
         logger.error(f"Failed to read workflow definition {path}: {e}")
-        send_telegram_alert(f"Failed to read workflow definition {path}: {e}")
+        emit_alert(f"Failed to read workflow definition {path}: {e}", severity="error", source="inbox_processor")
         return ""
 
 
-# send_telegram_alert is now imported from notifications module
+
 
 
 def check_stuck_agents():
@@ -1398,7 +1405,7 @@ def process_file(filepath):
                     "Blocking processing to avoid cross-project execution."
                 )
                 logger.error(message)
-                send_telegram_alert(message)
+                emit_alert(message, severity="error", source="inbox_processor")
                 return
 
             configured_repos = []
@@ -1417,7 +1424,7 @@ def process_file(filepath):
                         f"moved to project '{reroute_project}'."
                     )
                     logger.warning(message)
-                    send_telegram_alert(message)
+                    emit_alert(message, severity="warning", source="inbox_processor")
                     if rerouted_path:
                         logger.info(f"Moved webhook task to: {rerouted_path}")
                     return
@@ -1428,7 +1435,7 @@ def process_file(filepath):
                     f"but issue URL points to '{issue_repo}'. Processing blocked."
                 )
                 logger.error(message)
-                send_telegram_alert(message)
+                emit_alert(message, severity="error", source="inbox_processor")
                 return
             
             logger.info(f"📌 Webhook task for existing issue #{issue_number}, launching agent directly")
@@ -1463,7 +1470,7 @@ def process_file(filepath):
                     agent_type = _get_initial_agent_from_workflow(project_name)
                     if not agent_type:
                         logger.error(f"Stopping launch: missing workflow definition for {project_name}")
-                        send_telegram_alert(f"Stopping launch: missing workflow for {project_name}")
+                        emit_alert(f"Stopping launch: missing workflow for {project_name}", severity="error", source="inbox_processor")
                         return
                 
                 # Resolve tier (halt if unknown — prevents wrong workflow execution)
@@ -1477,9 +1484,10 @@ def process_file(filepath):
                         f"Missing git_repo for project '{project_name}', cannot resolve tier "
                         f"for issue #{issue_number}."
                     )
-                    send_telegram_alert(
+                    emit_alert(
                         f"Missing git_repo for project '{project_name}' "
-                        f"(issue #{issue_number})."
+                        f"(issue #{issue_number}).",
+                        severity="error", source="inbox_processor",
                     )
                     return
                 tier_name = _resolve_tier_for_issue(
@@ -1655,8 +1663,9 @@ def process_file(filepath):
                 logger.error(
                     f"Stopping launch: missing workflow definition for {project_name}"
                 )
-                send_telegram_alert(
-                    f"Stopping launch: missing workflow definition for {project_name}"
+                emit_alert(
+                    f"Stopping launch: missing workflow definition for {project_name}",
+                    severity="error", source="inbox_processor",
                 )
                 return
 

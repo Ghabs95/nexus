@@ -195,7 +195,7 @@ class NotificationChannel(ABC):
 
 ## Core Framework Structure
 
-### New Package Layout
+### Package Layout
 
 ```
 nexus-core/
@@ -210,8 +210,12 @@ nexus-core/
 │   ├── core/
 │   │   ├── workflow.py          # WorkflowEngine, WorkflowDefinition
 │   │   ├── orchestrator.py      # AgentOrchestrator (from ai_orchestrator)
-│   │   ├── state.py             # StateManager (abstracted)
-│   │   ├── monitor.py           # AgentMonitor (from agent_monitor)
+│   │   ├── state.py             # HostStateManager (abstracted)
+│   │   ├── monitor.py           # MonitorEngine (from agent_monitor)
+│   │   ├── router.py            # WorkflowRouter (tier detection)
+│   │   ├── execution.py         # ExecutionEngine (agent launching)
+│   │   ├── analytics.py         # MetricsEngine (performance data)
+│   │   ├── events.py            # EventBus, NexusEvent (Phase 3)
 │   │   └── models.py            # Core models (cleaned)
 │   ├── adapters/
 │   │   ├── input/
@@ -223,7 +227,8 @@ nexus-core/
 │   │   │   ├── base.py          # StorageBackend interface
 │   │   │   ├── file.py
 │   │   │   ├── postgres.py
-│   │   │   └── redis.py
+│   │   │   ├── redis.py
+│   │   │   └── structured_log.py # JSON logs for Grafana Loki
 │   │   ├── git/
 │   │   │   ├── base.py          # GitPlatform interface
 │   │   │   ├── github.py
@@ -234,11 +239,15 @@ nexus-core/
 │   │   │   ├── gemini_cli.py
 │   │   │   ├── openai_api.py
 │   │   │   └── anthropic_api.py
+│   │   ├── analytics/
+│   │   │   └── loki.py          # LogQL adapter for Grafana Loki
 │   │   └── notifications/
 │   │       ├── base.py          # NotificationChannel interface
 │   │       ├── telegram.py
 │   │       ├── slack.py
 │   │       └── email.py
+│   ├── plugins/
+│   │   └── base.py              # PluginRegistry, PluginSpec, PluginKind
 │   ├── utils/
 │   │   ├── retry.py             # Retry logic (from error_handling)
 │   │   ├── rate_limiter.py      # Rate limiting
@@ -256,64 +265,242 @@ nexus-core/
 
 ## Migration Strategy
 
-### Phase 1: Extract Core (Week 1-2)
+### Phase 1: Extract Core ✅ COMPLETED
 
 **Goal**: Create `nexus-core` package with no breaking changes to existing Nexus
 
-1. Create new directory structure
-2. Extract these modules as-is:
+1. ✅ Created new directory structure
+2. ✅ Extracted these modules:
    - `models.py` → `nexus/core/models.py`
    - `agent_monitor.py` → `nexus/core/monitor.py`
    - `ai_orchestrator.py` → `nexus/core/orchestrator.py`
    - `rate_limiter.py` → `nexus/utils/rate_limiter.py`
    - `error_handling.py` → `nexus/utils/retry.py`
-
-3. Create base interfaces:
+3. ✅ Created base interfaces:
    - `nexus/adapters/storage/base.py`
    - `nexus/adapters/git/base.py`
    - `nexus/adapters/ai/base.py`
    - `nexus/adapters/notifications/base.py`
+4. ✅ Implemented file-based & GitHub adapters (migrated existing code)
 
-4. Implement file-based & GitHub adapters (migrate existing code)
+---
 
-**Validation**: Existing Nexus still works with imports from `nexus-core`
+### Phase 2: Logic & Intelligence ✅ COMPLETED
 
-### Phase 2: Workflow Engine (Week 3-4)
+**Goal**: Move orchestration intelligence and observability from the host into `nexus-core`
 
-**Goal**: Generic workflow orchestration engine
+#### Targeted Extractions
 
-1. Create `WorkflowEngine` class:
-   - Load workflow definitions from YAML/JSON
-   - Execute steps sequentially
-   - Handle state transitions
-   - Persist state via `StorageBackend`
+| Feature | Previous Location (`nexus`) | New Path (`nexus-core`) | Status |
+| :--- | :--- | :--- | :--- |
+| Audit Logic | `src/audit_store.py` | `nexus/core/storage/audit.py` | ✅ Done |
+| Analytics Engines | `src/analytics.py` | `nexus/core/analytics.py` | ✅ Done |
+| Timeout/Retry Logic | `src/runtime/agent_monitor.py` | `nexus/core/monitor.py` | ✅ Done |
+| Tier Selection Logic | `src/runtime/agent_monitor.py` | `nexus/core/routing.py` | ✅ Done |
+| CLI Agent Launcher | `src/runtime/agent_launcher.py` | `nexus/core/execution.py` | ✅ Done |
+| Workflow State | `src/state_manager.py` | `nexus/core/workflow_state.py` | ✅ Done |
 
-2. Create `WorkflowDefinition` format:
-```yaml
-name: "Feature Development"
-version: "1.0"
-steps:
-  - name: "triage"
-    agent: "ProjectLead"
-    inputs: ["issue_description", "labels"]
-    outputs: ["tier", "priority"]
-    timeout: 300
-    retry: 3
-  - name: "design"
-    agent: "Architect"
-    condition: "tier == 'full'"
-    inputs: ["triage.tier", "issue_description"]
-    outputs: ["architecture_doc"]
-    timeout: 600
-    retry: 2
-  # ... more steps
+#### Key Accomplishments
+
+**1. Centralized Observability (Audit & Analytics)**
+- Extracted audit logging logic to `nexus.core.storage.audit`. The host application now delegates all auditing to the core framework.
+- Added `list_all_audit_events` to the `FileStorage` adapter for efficient cross-event analysis.
+- Created `StructuredLogAuditBackend` decorator to natively emit structured JSON logs suitable for Promtail/Fluentbit scraping into Grafana Loki.
+- Created `nexus.core.analytics.MetricsEngine` for file-based computation, alongside `LokiAnalyticsAdapter` for direct LogQL querying of Grafana Loki.
+- Both engines support built-in Markdown report generation.
+
+**2. Standardized Reliability & Monitoring**
+- Created `nexus.core.monitor.MonitorEngine` for process health checks and timeout detection.
+- Refactored the host's `AgentMonitor` to delegate its core detection logic to the framework.
+- The `WorkflowEngine` now natively handles step-level retries with configurable backoff strategies (linear, exponential, constant).
+
+**3. Intelligence & Routing**
+- Created `nexus.core.router.WorkflowRouter` to centralize tier detection logic (Full vs. Shortened vs. Fast-track) based on issue labels and content.
+- Created `nexus.core.execution.ExecutionEngine` to handle agent resolution, instruction generation (Copilot Instructions), and workspace skill synchronization.
+
+**4. State Management Refactoring**
+- Extracted workflow state (mapping + approvals) into `WorkflowStateStore` protocol in `nexus-core` with `FileWorkflowStateStore` and `PostgresWorkflowStateStore` implementations.
+- Renamed `StateManager` → `HostStateManager` in the host app, scoped to host-only concerns (launched agents, tracked issues, SocketIO).
+- Created `workflow_state_factory.py` with broadcasting decorator for real-time SocketIO updates.
+
+#### Refactored Files in `nexus`
+- `src/audit_store.py` → delegates to `nexus.core.storage.audit`
+- `src/analytics.py` → delegates to `nexus.core.analytics`
+- `src/runtime/agent_monitor.py` → delegates to `nexus.core.monitor` and `nexus.core.router`
+- `src/runtime/agent_launcher.py` → uses `nexus.core.execution` and `nexus.core.monitor`
+- `src/state_manager.py` → `HostStateManager` (host-only concerns)
+- `src/integrations/workflow_state_factory.py` → provides `WorkflowStateStore` via factory
+
+---
+
+### Phase 3: Event Bus & Plugin System 🔜 NEXT
+
+**Goal**: Add reactive event-driven architecture and enhanced plugin lifecycle
+
+#### Part A: Event Bus (`nexus.core.events`)
+
+**Problem**: No internal event system. When a workflow step completes, the engine calls a hardcoded `on_step_transition` callback. No way for other modules (audit, analytics, monitoring, notifications) to subscribe independently.
+
+**Core Abstractions**:
+
+```
+nexus/core/events.py
+├── NexusEvent          — base dataclass for all events
+├── EventBus            — singleton pub/sub dispatcher
+├── EventHandler        — Protocol for handler callables
+└── event types:
+    ├── WorkflowStarted
+    ├── WorkflowCompleted
+    ├── WorkflowFailed
+    ├── StepStarted
+    ├── StepCompleted
+    ├── StepFailed
+    ├── AgentLaunched
+    ├── AgentTimeout
+    ├── AgentRetry
+    └── AuditLogged
 ```
 
-3. Migrate `WORKFLOW_CHAIN` config to YAML files
+**`NexusEvent` Base**:
 
-**Validation**: Can run existing workflows with new engine
+```python
+@dataclass
+class NexusEvent:
+    event_type: str
+    timestamp: datetime
+    workflow_id: str | None = None
+    data: dict[str, Any] = field(default_factory=dict)
+```
 
-### Phase 3: Multi-Adapter Support (Week 5-6)
+**`EventBus` API**:
+
+```python
+class EventBus:
+    def subscribe(self, event_type: str, handler: EventHandler) -> str:
+        """Subscribe a handler. Returns subscription ID."""
+    
+    def unsubscribe(self, subscription_id: str) -> None:
+        """Remove a subscription."""
+    
+    async def emit(self, event: NexusEvent) -> None:
+        """Emit event to all matching subscribers."""
+    
+    def subscribe_pattern(self, pattern: str, handler: EventHandler) -> str:
+        """Subscribe using glob pattern (e.g., 'workflow.*')."""
+```
+
+**Integration Points**:
+
+| Component | Currently | After Phase 3 |
+|---|---|---|
+| `WorkflowEngine.complete_step` | Calls `on_step_transition` callback | Emits `StepCompleted` event |
+| `WorkflowEngine.start_workflow` | Direct state mutation | Emits `WorkflowStarted` event |
+| `AuditStore.log` | Direct storage write | Also emits `AuditLogged` event |
+| `StructuredLogAuditBackend` | Listens to storage calls | Subscribes to `audit.*` events |
+| `MonitorEngine` | Called explicitly | Subscribes to `agent.*` events |
+
+#### Part B: Plugin System Enhancement
+
+**Problem**: Current plugin system (`PluginRegistry`, `PluginSpec`, `PluginKind`) is solid for factory-based instantiation but lacks lifecycle hooks, event handler plugins, dependency resolution, and health monitoring.
+
+**New `PluginKind`: `EVENT_HANDLER`**:
+
+```python
+class PluginKind(Enum):
+    # ... existing kinds ...
+    EVENT_HANDLER = "event_handler"
+```
+
+**`PluginLifecycle` Protocol**:
+
+```python
+@runtime_checkable
+class PluginLifecycle(Protocol):
+    async def on_load(self, registry: PluginRegistry) -> None:
+        """Called after the plugin is registered."""
+    
+    async def on_unload(self) -> None:
+        """Called before the plugin is removed."""
+    
+    async def health_check(self) -> PluginHealthStatus:
+        """Return current plugin health."""
+```
+
+**`PluginHealthStatus`**:
+
+```python
+@dataclass
+class PluginHealthStatus:
+    healthy: bool
+    name: str
+    details: str = ""
+    last_check: datetime = field(default_factory=lambda: datetime.now(UTC))
+```
+
+**Registry Extensions**:
+
+```python
+class PluginRegistry:
+    # ... existing methods ...
+    
+    async def health_check_all(self) -> list[PluginHealthStatus]:
+        """Run health checks on all plugins that support it."""
+    
+    def get_event_handlers(self) -> list[PluginSpec]:
+        """List all registered event handler plugins."""
+```
+
+#### Implementation Steps
+
+- [ ] **Step 1: Event Bus Core** — Create `nexus/core/events.py` with `NexusEvent`, `EventBus`, typed event classes. Add unit tests for subscribe/emit/unsubscribe/pattern matching.
+- [ ] **Step 2: Wire EventBus into WorkflowEngine** — Add `event_bus` parameter to `WorkflowEngine.__init__`. Emit events from `start_workflow`, `complete_step`, `cancel_workflow`, `pause_workflow`. Maintain backward compat with `on_step_transition`.
+- [ ] **Step 3: Plugin Lifecycle** — Add `PluginLifecycle` protocol. Add `PluginHealthStatus` dataclass. Add `EVENT_HANDLER` to `PluginKind` enum. Extend `PluginRegistry` with `health_check_all()`.
+- [ ] **Step 4: Built-in Event Subscribers** — Refactor `StructuredLogAuditBackend` to subscribe to events. Create `TelegramNotificationSubscriber` as event handler plugin example. Wire `MonitorEngine` as event subscriber.
+- [ ] **Step 5: Host Integration** — Initialize `EventBus` in host startup. Update `nexus_core_helpers.get_workflow_engine()` to pass EventBus. Migrate callbacks to event subscriptions.
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    nexus (host)                      │
+│  ┌───────────┐  ┌─────────────┐  ┌───────────────┐ │
+│  │  Bot/CLI  │  │  Scheduler  │  │  Webhooks     │ │
+│  └─────┬─────┘  └──────┬──────┘  └───────┬───────┘ │
+│        │               │                 │          │
+│        └───────────────┬┘                 │          │
+│                        ▼                  │          │
+│  ┌─────────────────────────────────────────────────┐│
+│  │              WorkflowEngine                     ││
+│  │         (emits events on state changes)         ││
+│  └──────────────────┬──────────────────────────────┘│
+│                     ▼                               │
+│  ┌─────────────────────────────────────────────────┐│
+│  │                 EventBus                        ││
+│  │    subscribe() / emit() / unsubscribe()         ││
+│  └──┬──────┬──────┬──────┬──────┬─────────────────┘│
+│     │      │      │      │      │                   │
+│     ▼      ▼      ▼      ▼      ▼                   │
+│  ┌────┐ ┌────┐ ┌────┐ ┌────┐ ┌──────────┐          │
+│  │Loki│ │Tele│ │Mon │ │Aud │ │3rd Party │          │
+│  │Log │ │gram│ │itor│ │ it │ │ Plugins  │          │
+│  └────┘ └────┘ └────┘ └────┘ └──────────┘          │
+│                                                     │
+│  ┌─────────────────────────────────────────────────┐│
+│  │              PluginRegistry                     ││
+│  │   register() / create() / health_check_all()    ││
+│  │   load_entrypoint_plugins() / get_event_handlers││
+│  └─────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────┘
+```
+
+#### Backward Compatibility
+- The `on_step_transition` and `on_workflow_complete` callbacks remain functional — invoked alongside EventBus emissions. Zero breakage for existing host code.
+- The `EventBus` is optional for `WorkflowEngine`. If not provided, the engine works exactly as before.
+- Plugin lifecycle hooks are optional. Existing plugins continue to work unchanged.
+
+---
+
+### Phase 4: Multi-Adapter Support (Future)
 
 **Goal**: Support Slack, GitLab, OpenAI, PostgreSQL
 
@@ -321,7 +508,6 @@ steps:
    - `SlackInputSource` + `SlackNotifier`
    - `GitLabPlatform`
    - `OpenAIProvider`
-   - `PostgreSQLStorageBackend`
 
 2. Create adapter registry & factory:
 ```python
@@ -350,9 +536,9 @@ adapters:
       smtp_host: ${SMTP_HOST}
 ```
 
-**Validation**: Can run workflows with different adapter combos
+---
 
-### Phase 4: Documentation & Examples (Week 7-8)
+### Phase 5: Documentation & Examples (Future)
 
 1. API documentation (Sphinx)
 2. Tutorial: "Build Your First Workflow"
@@ -361,10 +547,7 @@ adapters:
    - Support ticket routing
    - Code review agent
    - Documentation generator
-
 4. Migration guide: Nexus → nexus-core
-
-**Validation**: External developer can build workflow in <1 hour
 
 ---
 
@@ -439,38 +622,23 @@ monitoring:
 
 ---
 
-## Breaking Changes & Migration Path
-
-### For Existing Nexus Users (You)
-
-**Option A: Continue with Nexus Classic**
-- Keep current codebase in `nexus/` directory
-- Import core components from `nexus-core` package
-- Gradually migrate to new config format
-
-**Option B: Migrate to Nexus Core**
-1. Install: `pip install nexus-core`
-2. Create `nexus.yaml` config
-3. Run migration script: `nexus migrate-config`
-4. Update systemd services to use new CLI
-
-### For New Users
-
-1. `pip install nexus-core`
-2. Generate config: `nexus init`
-3. Define workflow: `nexus workflow create my_workflow.yaml`
-4. Run: `nexus start`
-
----
-
 ## Success Criteria
 
 ### Technical
-- [ ] All core components have abstract interfaces
-- [ ] File & Postgres storage adapters work
-- [ ] GitHub & GitLab git adapters work
-- [ ] Copilot, Gemini, OpenAI providers work
-- [ ] Telegram & Slack notifiers work
+- [x] All core components have abstract interfaces
+- [x] File storage adapter works
+- [x] GitHub git adapter works
+- [x] Copilot & Gemini providers work
+- [x] Telegram notifier works
+- [x] Audit & analytics extracted to core
+- [x] Monitor & routing extracted to core
+- [x] Workflow state management decoupled
+- [ ] Postgres storage adapter works
+- [ ] GitLab git adapter works
+- [ ] OpenAI provider works
+- [ ] Slack notifier works
+- [ ] Event Bus implemented
+- [ ] Plugin lifecycle hooks implemented
 - [ ] 90%+ test coverage
 - [ ] Example workflows run successfully
 
@@ -490,23 +658,11 @@ monitoring:
 
 ## Timeline
 
-| Week | Milestone | Deliverable |
-|------|-----------|-------------|
-| 1-2 | Extract Core | `nexus-core` package, base interfaces |
-| 3-4 | Workflow Engine | YAML-based workflows, WorkflowEngine class |
-| 5-6 | Multi-Adapter | Slack, GitLab, OpenAI, Postgres adapters |
-| 7-8 | Documentation | Docs site, tutorials, examples |
-| 9-10 | Beta Testing | 5 beta users, bug fixes |
-| 11-12 | Launch | Public release, blog post, HN launch |
-
----
-
-## Next: Implementation
-
-Ready to start? I'll create:
-1. Base package structure
-2. Core interfaces
-3. First adapter implementations (File, GitHub, Telegram)
-4. Example workflow
-
-Let's build this! 🚀
+| Phase | Status | Milestone | Deliverable |
+|-------|--------|-----------|-------------|
+| 1 | ✅ Done | Extract Core | `nexus-core` package, base interfaces, adapters |
+| 2 | ✅ Done | Logic & Intelligence | Audit, analytics, monitoring, routing, state mgmt |
+| 3 | 🔜 Next | Event Bus & Plugins | EventBus, plugin lifecycle, health checks |
+| 4 | ⏳ Future | Multi-Adapter | Slack, GitLab, OpenAI, Postgres adapters |
+| 5 | ⏳ Future | Documentation | Docs site, tutorials, examples |
+| — | ⏳ Future | Beta & Launch | Beta users, bug fixes, public release |

@@ -247,18 +247,22 @@ class TestWorkflowEngineWithApprovalGates:
 
 
 # ---------------------------------------------------------------------------
-# StateManager approval state persistence tests
+# HostStateManager approval state persistence tests
 # ---------------------------------------------------------------------------
 
-class TestStateManagerApprovalState:
+class TestWorkflowStateApproval:
     def test_set_and_get_pending_approval(self, tmp_path, monkeypatch):
         import config
-        monkeypatch.setattr(config, "APPROVAL_STATE_FILE", str(tmp_path / "approval_state.json"))
         monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
 
-        from state_manager import StateManager
+        # Reset singleton so factory re-creates with tmp_path
+        import integrations.workflow_state_factory as wsf
+        monkeypatch.setattr(wsf, "_instance", None)
 
-        StateManager.set_pending_approval(
+        from integrations.workflow_state_factory import get_workflow_state
+
+        store = get_workflow_state()
+        store.set_pending_approval(
             issue_num="42",
             step_num=3,
             step_name="deploy",
@@ -266,7 +270,7 @@ class TestStateManagerApprovalState:
             approval_timeout=3600,
         )
 
-        pending = StateManager.get_pending_approval("42")
+        pending = store.get_pending_approval("42")
         assert pending is not None
         assert pending["step_num"] == 3
         assert pending["step_name"] == "deploy"
@@ -275,26 +279,32 @@ class TestStateManagerApprovalState:
 
     def test_get_pending_approval_returns_none_when_absent(self, tmp_path, monkeypatch):
         import config
-        monkeypatch.setattr(config, "APPROVAL_STATE_FILE", str(tmp_path / "approval_state.json"))
         monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
 
-        from state_manager import StateManager
+        import integrations.workflow_state_factory as wsf
+        monkeypatch.setattr(wsf, "_instance", None)
 
-        assert StateManager.get_pending_approval("99") is None
+        from integrations.workflow_state_factory import get_workflow_state
+
+        assert get_workflow_state().get_pending_approval("99") is None
 
     def test_clear_pending_approval(self, tmp_path, monkeypatch):
         import config
-        monkeypatch.setattr(config, "APPROVAL_STATE_FILE", str(tmp_path / "approval_state.json"))
         monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
 
-        from state_manager import StateManager
+        import integrations.workflow_state_factory as wsf
+        monkeypatch.setattr(wsf, "_instance", None)
 
-        StateManager.set_pending_approval(
+        from integrations.workflow_state_factory import get_workflow_state
+
+        store = get_workflow_state()
+        store.set_pending_approval(
             issue_num="55",
             step_num=1,
             step_name="review",
             approvers=[],
             approval_timeout=86400,
         )
-        StateManager.clear_pending_approval("55")
-        assert StateManager.get_pending_approval("55") is None
+        store.clear_pending_approval("55")
+        assert store.get_pending_approval("55") is None
+

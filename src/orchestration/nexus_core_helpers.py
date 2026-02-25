@@ -11,6 +11,7 @@ from typing import Any
 from nexus.adapters.git.github import GitHubPlatform
 from nexus.adapters.git.gitlab import GitLabPlatform
 from nexus.adapters.storage.file import FileStorage
+from nexus.core.events import EventBus
 from nexus.core.workflow import WorkflowEngine
 
 from audit_store import AuditStore
@@ -24,15 +25,72 @@ from config import (
     get_project_platform,
 )
 from orchestration.plugin_runtime import get_workflow_state_plugin
-from state_manager import StateManager
+
 
 logger = logging.getLogger(__name__)
+
+# Singleton EventBus shared across the host application
+_event_bus: EventBus | None = None
+
+
+def get_event_bus() -> EventBus:
+    """Get or create the global EventBus instance."""
+    global _event_bus
+    if _event_bus is None:
+        _event_bus = EventBus()
+    return _event_bus
 
 
 def get_workflow_engine() -> WorkflowEngine:
     """Get initialized workflow engine instance."""
     storage = FileStorage(base_path=NEXUS_CORE_STORAGE_DIR)
-    return WorkflowEngine(storage=storage)
+    return WorkflowEngine(storage=storage, event_bus=get_event_bus())
+
+
+def setup_event_handlers() -> None:
+    """Attach event handler plugins to the shared EventBus.
+
+    Reads config from environment variables:
+        - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID → Telegram handler
+        - DISCORD_WEBHOOK_URL → Discord handler
+
+    Safe to call multiple times; handlers are only attached once.
+    """
+    bus = get_event_bus()
+
+    # Already initialized?
+    if getattr(setup_event_handlers, "_done", False):
+        return
+    setup_event_handlers._done = True  # type: ignore[attr-defined]
+
+    import os
+
+    # Telegram
+    tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    tg_chat = os.getenv("TELEGRAM_CHAT_ID", "")
+    if tg_token and tg_chat:
+        try:
+            from nexus.plugins.builtin.telegram_event_handler_plugin import TelegramEventHandler
+            handler = TelegramEventHandler({"bot_token": tg_token, "chat_id": tg_chat})
+            handler.attach(bus)
+            logger.info("Telegram event handler attached to EventBus")
+        except Exception as exc:
+            logger.warning("Failed to setup Telegram event handler: %s", exc)
+
+    # Discord
+    dc_webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
+    dc_channel = os.getenv("DISCORD_ALERT_CHANNEL_ID", "")
+    if dc_webhook or dc_channel:
+        try:
+            from nexus.plugins.builtin.discord_event_handler_plugin import DiscordEventHandler
+            handler = DiscordEventHandler({
+                "webhook_url": dc_webhook or None,
+                "alert_channel_id": dc_channel or None,
+            })
+            handler.attach(bus)
+            logger.info("Discord event handler attached to EventBus")
+        except Exception as exc:
+            logger.warning("Failed to setup Discord event handler: %s", exc)
 
 
 def get_git_platform(repo: str = None, project_name: str = None):
@@ -104,13 +162,15 @@ def get_workflow_definition_path(project_name: str) -> str | None:
     return None
 
 
+from integrations.workflow_state_factory import get_workflow_state as _get_wf_state
+
 _WORKFLOW_STATE_PLUGIN_BASE_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
-    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
-    "issue_to_workflow_map_setter": StateManager.map_issue_to_workflow,
+    "issue_to_workflow_id": lambda n: _get_wf_state().get_workflow_id(n),
+    "issue_to_workflow_map_setter": lambda n, w: _get_wf_state().map_issue(n, w),
     "workflow_definition_path_resolver": get_workflow_definition_path,
-    "set_pending_approval": StateManager.set_pending_approval,
-    "clear_pending_approval": StateManager.clear_pending_approval,
+    "set_pending_approval": lambda *a: _get_wf_state().set_pending_approval(*a),
+    "clear_pending_approval": lambda n: _get_wf_state().clear_pending_approval(n),
     "audit_log": AuditStore.audit_log,
 }
 _WORKFLOW_STATE_PLUGIN_CACHE_KEY = "workflow:state-engine"
@@ -163,16 +223,16 @@ async def create_workflow_for_issue(
             "Cannot create workflow without a YAML definition."
         )
         logger.error(msg)
-        from integrations.notifications import send_telegram_alert
-        send_telegram_alert(f"❌ {msg}")
+        from integrations.notifications import emit_alert
+        emit_alert(f"❌ {msg}", severity="error", source="nexus_core_helpers")
     elif not os.path.exists(workflow_definition_path):
         msg = (
             f"Workflow definition not found at: {workflow_definition_path} "
             f"(project: {project_name})"
         )
         logger.error(msg)
-        from integrations.notifications import send_telegram_alert
-        send_telegram_alert(f"❌ {msg}")
+        from integrations.notifications import emit_alert
+        emit_alert(f"❌ {msg}", severity="error", source="nexus_core_helpers")
     return None
 
 

@@ -6,7 +6,7 @@ test suite lives in nexus-core's ``tests/test_process_orchestrator.py``.
 
 This file verifies the nexus-side integration:
   - ``NexusAgentRuntime`` correctly delegates to ``AgentMonitor``,
-    ``StateManager``, and ``notifications``
+    ``HostStateManager``, and ``notifications``
   - ``check_stuck_agents()`` in inbox_processor delegates to the orchestrator
     and records polling failures on exception
 """
@@ -27,8 +27,8 @@ class TestNexusAgentRuntimeShouldRetry:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.load_launched_agents", return_value={}), \
-             patch("state_manager.StateManager.save_launched_agents"), \
+        with patch("state_manager.HostStateManager.load_launched_agents", return_value={}), \
+             patch("state_manager.HostStateManager.save_launched_agents"), \
              patch("runtime.agent_monitor.AgentMonitor") as MockMonitor:
             MockMonitor.should_retry.return_value = True
             result = runtime.should_retry("42", "developer")
@@ -41,8 +41,8 @@ class TestNexusAgentRuntimeShouldRetry:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.load_launched_agents", return_value={}), \
-             patch("state_manager.StateManager.save_launched_agents"), \
+        with patch("state_manager.HostStateManager.load_launched_agents", return_value={}), \
+             patch("state_manager.HostStateManager.save_launched_agents"), \
              patch("runtime.agent_monitor.AgentMonitor") as MockMonitor:
             MockMonitor.should_retry.return_value = False
             result = runtime.should_retry("42", "developer")
@@ -57,8 +57,8 @@ class TestNexusAgentRuntimeShouldRetry:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.load_launched_agents", return_value={"42": {}}), \
-             patch("state_manager.StateManager.save_launched_agents") as save_mock, \
+        with patch("state_manager.HostStateManager.load_launched_agents", return_value={"42": {}}), \
+             patch("state_manager.HostStateManager.save_launched_agents") as save_mock, \
              patch("runtime.agent_monitor.AgentMonitor") as MockMonitor, \
              patch.object(runtime, "send_alert", return_value=True) as alert_mock:
             MockMonitor.should_retry.return_value = True
@@ -78,7 +78,7 @@ class TestRetryFuseStatus:
     def test_returns_empty_status_when_missing(self):
         from runtime.nexus_agent_runtime import get_retry_fuse_status
 
-        with patch("state_manager.StateManager.load_launched_agents", return_value={}):
+        with patch("state_manager.HostStateManager.load_launched_agents", return_value={}):
             status = get_retry_fuse_status("404", now_ts=1700000000.0)
 
         assert status["exists"] is False
@@ -107,7 +107,7 @@ class TestRetryFuseStatus:
             ],
         }
 
-        with patch("state_manager.StateManager.load_launched_agents", return_value={"44": entry}):
+        with patch("state_manager.HostStateManager.load_launched_agents", return_value={"44": entry}):
             status = get_retry_fuse_status("44", now_ts=now)
 
         assert status["exists"] is True
@@ -138,8 +138,8 @@ class TestRetryFuseStatus:
             "retry_fuse_trip_times": [prior_trip],
         }
 
-        with patch("state_manager.StateManager.load_launched_agents", return_value={"44": seeded_entry}), \
-             patch("state_manager.StateManager.save_launched_agents") as save_mock, \
+        with patch("state_manager.HostStateManager.load_launched_agents", return_value={"44": seeded_entry}), \
+             patch("state_manager.HostStateManager.save_launched_agents") as save_mock, \
              patch("runtime.agent_monitor.AgentMonitor") as MockMonitor, \
              patch.object(runtime, "send_alert", return_value=True) as alert_mock:
             MockMonitor.should_retry.return_value = True
@@ -156,7 +156,7 @@ class TestNexusAgentRuntimeGetWorkflowState:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-10-full"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value={"state": "cancelled"}):
                     result = runtime.get_workflow_state("10")
@@ -168,7 +168,7 @@ class TestNexusAgentRuntimeGetWorkflowState:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-11-full"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value={"state": "paused"}):
                     result = runtime.get_workflow_state("11")
@@ -180,7 +180,7 @@ class TestNexusAgentRuntimeGetWorkflowState:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-12-full"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value={"state": "active"}):
                     result = runtime.get_workflow_state("12")
@@ -192,7 +192,8 @@ class TestNexusAgentRuntimeGetWorkflowState:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value=None):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
+            mock_wf.return_value.get_workflow_id.return_value = None
             result = runtime.get_workflow_state("10")
 
         assert result is None
@@ -211,7 +212,7 @@ class TestNexusAgentRuntimeShouldRetryDeadAgent:
             ],
         }
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-44-shortened"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value=payload):
                     result = runtime.should_retry_dead_agent("44", "triage")
@@ -231,7 +232,7 @@ class TestNexusAgentRuntimeShouldRetryDeadAgent:
             ],
         }
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-44-shortened"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value=payload):
                     result = runtime.should_retry_dead_agent("44", "triage")
@@ -253,7 +254,7 @@ class TestNexusAgentRuntimeGetExpectedRunningAgent:
             ],
         }
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-44-shortened"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value=payload):
                     result = runtime.get_expected_running_agent("44")
@@ -267,7 +268,7 @@ class TestNexusAgentRuntimeGetExpectedRunningAgent:
 
         payload = {"state": "completed", "steps": []}
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-44-shortened"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value=payload):
                     result = runtime.get_expected_running_agent("44")
@@ -281,7 +282,7 @@ class TestNexusAgentRuntimeGetExpectedRunningAgent:
 
         payload = {"state": "completed", "steps": []}
 
-        with patch("state_manager.StateManager.get_workflow_id_for_issue", return_value="nexus-44-shortened"):
+        with patch("integrations.workflow_state_factory.get_workflow_state") as mock_wf:
             with patch("builtins.open", create=True):
                 with patch("json.load", return_value=payload):
                     result = runtime.should_retry_dead_agent("44", "triage")
@@ -317,10 +318,10 @@ class TestNexusAgentRuntimeSendAlert:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("integrations.notifications.send_telegram_alert", return_value=True) as mock_tg:
+        with patch("integrations.notifications.emit_alert", return_value=True) as mock_tg:
             result = runtime.send_alert("hello")
 
-        mock_tg.assert_called_once_with("hello")
+        mock_tg.assert_called_once_with("hello", severity="warning", source="agent_runtime")
         assert result is True
 
     def test_returns_false_on_failure(self):
@@ -328,7 +329,7 @@ class TestNexusAgentRuntimeSendAlert:
 
         runtime = NexusAgentRuntime(finalize_fn=lambda *a, **kw: None)
 
-        with patch("integrations.notifications.send_telegram_alert", return_value=False):
+        with patch("integrations.notifications.emit_alert", return_value=False):
             result = runtime.send_alert("hello")
 
         assert result is False

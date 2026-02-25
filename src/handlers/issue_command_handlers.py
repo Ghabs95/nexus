@@ -386,7 +386,7 @@ async def myissues_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> N
 
 
 async def tracked_handler(ctx: InteractiveContext, deps: IssueHandlerDeps) -> None:
-    """Show globally tracked issues stored in StateManager."""
+    """Show globally tracked issues stored in HostStateManager."""
     deps.logger.info(f"Global tracked issues requested by user: {ctx.user_id}")
     if deps.allowed_user_ids and int(ctx.user_id) not in deps.allowed_user_ids:
         log_unauthorized_access(getattr(deps, "logger", None), int(ctx.user_id))

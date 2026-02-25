@@ -424,33 +424,77 @@ def notify_approval_required(
     return send_notification(message, keyboard=keyboard)
 
 
-# Legacy compatibility function
-def send_telegram_alert(message: str) -> bool:
-    """
-    Legacy function for backward compatibility.
-    
+# ---------------------------------------------------------------------------
+# EventBus-based alerting
+# ---------------------------------------------------------------------------
+
+def emit_alert(
+    message: str,
+    severity: str = "info",
+    source: str = "",
+    workflow_id: str | None = None,
+) -> bool:
+    """Emit a :class:`SystemAlert` on the shared EventBus.
+
+    All attached event-handler plugins (Telegram, Discord, …) will receive
+    the alert.  If the EventBus has no ``system.alert`` subscribers, the
+    function falls back to the direct Telegram plugin so that alerts are
+    never silently swallowed.
+
     Args:
-        message: Message text (Markdown)
-    
+        message:     Plain-text alert body.
+        severity:    ``info``, ``warning``, ``error``, or ``critical``.
+        source:      Originating module name (informational).
+        workflow_id: Optional workflow context.
+
     Returns:
-        True if sent successfully
+        ``True`` if the alert was delivered by at least one channel.
     """
+    import asyncio
+
+    from nexus.core.events import SystemAlert
+
+    try:
+        from orchestration.nexus_core_helpers import get_event_bus
+        bus = get_event_bus()
+    except Exception:
+        bus = None
+
+    # Try EventBus path first
+    if bus and bus.subscriber_count("system.alert") > 0:
+        event = SystemAlert(
+            message=message,
+            severity=severity,
+            source=source,
+            workflow_id=workflow_id,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        try:
+            if loop and loop.is_running():
+                # Already in an async context — schedule as a task
+                loop.create_task(bus.emit(event))
+            else:
+                asyncio.run(bus.emit(event))
+            return True
+        except Exception as exc:
+            logger.warning("EventBus emit failed, falling back to direct send: %s", exc)
+
+    # Fallback: direct Telegram plugin (guarantees alert delivery)
     plugin = _get_notification_plugin()
-    normalized_message = _normalize_telegram_markdown(message, "Markdown")
+    normalized = _normalize_telegram_markdown(message, "Markdown")
     if plugin:
         try:
             if hasattr(plugin, "send_alert_sync"):
-                sent = bool(plugin.send_alert_sync(normalized_message, severity="info"))
-                if not sent:
-                    logger.warning("Telegram send_alert_sync returned False")
-                return sent
+                return bool(plugin.send_alert_sync(normalized, severity=severity))
             if hasattr(plugin, "send_message_sync"):
-                sent = bool(plugin.send_message_sync(normalized_message, parse_mode="Markdown"))
-                if not sent:
-                    logger.warning("Telegram send_message_sync returned False in alert fallback")
-                return sent
+                return bool(plugin.send_message_sync(normalized, parse_mode="Markdown"))
         except Exception as exc:
-            logger.warning(f"Telegram plugin alert failed: {exc}")
+            logger.warning("Direct Telegram alert failed: %s", exc)
 
-    logger.warning("Telegram notification plugin unavailable, skipping alert")
+    logger.warning("No alert channel available: %s", message[:120])
     return False
+

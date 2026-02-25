@@ -10,7 +10,7 @@ class _FakePlugin:
         return True
 
 
-def test_send_telegram_alert_uses_plugin(monkeypatch):
+def test_emit_alert_uses_plugin(monkeypatch):
     import integrations.notifications as notifications
 
     fake = _FakePlugin()
@@ -18,7 +18,7 @@ def test_send_telegram_alert_uses_plugin(monkeypatch):
     monkeypatch.setattr(notifications, "_get_notification_plugin", lambda: fake)
     monkeypatch.setattr(notifications, "send_notification", lambda *args, **kwargs: False)
 
-    ok = notifications.send_telegram_alert("hello")
+    ok = notifications.emit_alert("hello")
 
     assert ok is True
     assert fake.calls == 1

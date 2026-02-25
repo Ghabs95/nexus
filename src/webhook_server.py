@@ -37,8 +37,8 @@ from config import (
     get_tasks_active_dir,
 )
 from integrations.notifications import (
+    emit_alert,
     send_notification,
-    send_telegram_alert,
 )
 from orchestration.plugin_runtime import get_github_webhook_policy_plugin
 from runtime.agent_launcher import launch_next_agent
@@ -60,11 +60,11 @@ socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
 # Track processed events to avoid duplicates
 processed_events = set()
 
-# Register SocketIO emitter with StateManager for real-time transition broadcasting
+# Register SocketIO emitter with HostStateManager for real-time transition broadcasting
 try:
     from state_manager import set_socketio_emitter
     set_socketio_emitter(lambda event, data: socketio.emit(event, data, namespace="/visualizer"))
-    logger.info("✅ SocketIO emitter registered with StateManager")
+    logger.info("✅ SocketIO emitter registered with HostStateManager")
 except Exception as _e:
     logger.warning(f"⚠️ Could not register SocketIO emitter: {_e}")
 
@@ -97,7 +97,7 @@ def _notify_lifecycle(message: str) -> bool:
     """Send lifecycle notification via abstract notifier, fallback to Telegram alert."""
     if send_notification(message):
         return True
-    return send_telegram_alert(message)
+    return emit_alert(message, severity="info", source="webhook_server")
 
 
 def verify_signature(payload_body, signature_header):
@@ -219,7 +219,7 @@ def handle_issue_opened(payload, event):
                 "Webhook issue task creation blocked to enforce project boundaries."
             )
             logger.error(message)
-            send_telegram_alert(message)
+            emit_alert(message, severity="warning", source="webhook_server")
             return {
                 "status": "ignored",
                 "reason": "unmapped_repository",
@@ -279,7 +279,7 @@ The actual agent assignment depends on the current project's workflow configurat
         
     except Exception as e:
         logger.error(f"❌ Error creating task file for issue #{issue_number}: {e}", exc_info=True)
-        send_telegram_alert(f"Issue processing error for #{issue_number}: {str(e)}")
+        emit_alert(f"Issue processing error for #{issue_number}: {str(e)}", severity="error", source="webhook_server")
         return {
             "status": "error",
             "issue": issue_number,
@@ -573,7 +573,7 @@ def webhook():
     
     except Exception as e:
         logger.error(f"❌ Error processing webhook: {e}", exc_info=True)
-        send_telegram_alert(f"Webhook Error: {str(e)}")
+        emit_alert(f"Webhook Error: {str(e)}", severity="error", source="webhook_server")
         return jsonify({"error": str(e)}), 500
 
 

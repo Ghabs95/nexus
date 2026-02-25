@@ -1,13 +1,12 @@
+from unittest.mock import MagicMock, patch
+
 from report_scheduler import ReportScheduler
 
 
-class _DummyBot:
-    async def send_message(self, **_kwargs):
-        return None
-
-
 def test_tracked_issues_status_normalizes_legacy_entries(monkeypatch):
-    scheduler = ReportScheduler(bot=_DummyBot(), chat_id=1)
+    # Patch get_user_manager before constructing ReportScheduler
+    with patch("report_scheduler.get_user_manager", return_value=MagicMock()):
+        scheduler = ReportScheduler()
 
     monkeypatch.setattr(
         scheduler.state_manager,

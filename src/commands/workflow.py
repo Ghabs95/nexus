@@ -12,14 +12,15 @@ from orchestration.plugin_runtime import (
     get_workflow_state_plugin,
 )
 from project_key_utils import normalize_project_key_str as _normalize_project_key
-from state_manager import StateManager
+from integrations.workflow_state_factory import get_workflow_state
+from state_manager import HostStateManager
 
 logger = logging.getLogger(__name__)
 
 _issue_plugin_cache = {}
 _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
-    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
+    "issue_to_workflow_id": lambda n: get_workflow_state().get_workflow_id(n),
 }
 
 
@@ -189,10 +190,10 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AuditStore.audit_log(int(issue_num), "WORKFLOW_STOPPED")
 
     # Remove from launched_agents tracker to prevent false dead-agent alerts
-    launched = StateManager.load_launched_agents()
+    launched = HostStateManager.load_launched_agents()
     if str(issue_num) in launched:
         del launched[str(issue_num)]
-        StateManager.save_launched_agents(launched)
+        HostStateManager.save_launched_agents(launched)
         logger.info(f"Removed issue #{issue_num} from launched_agents tracker")
 
     # Close the GitHub issue

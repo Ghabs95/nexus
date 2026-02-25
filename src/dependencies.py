@@ -72,7 +72,8 @@ from services.workflow_ops_service import (
     build_workflow_snapshot,
     reconcile_issue_from_signals,
 )
-from state_manager import StateManager
+from integrations.workflow_state_factory import get_workflow_state
+from state_manager import HostStateManager
 from user_manager import get_user_manager
 
 # --- LOGGING ---
@@ -108,8 +109,8 @@ user_manager = get_user_manager()
 GITHUB_REPO = get_default_github_repo()
 _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
-    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
-    "clear_pending_approval": StateManager.clear_pending_approval,
+    "issue_to_workflow_id": lambda n: get_workflow_state().get_workflow_id(n),
+    "clear_pending_approval": lambda n: get_workflow_state().clear_pending_approval(n),
     "audit_log": AuditStore.audit_log,
 }
 
@@ -131,7 +132,7 @@ def _workflow_handler_deps() -> WorkflowHandlerDeps:
         invoke_copilot_agent=invoke_copilot_agent,
         get_sop_tier_from_issue=get_sop_tier_from_issue,
         get_sop_tier=get_sop_tier,
-        get_last_tier_for_issue=StateManager.get_last_tier_for_issue,
+        get_last_tier_for_issue=HostStateManager.get_last_tier_for_issue,
         prepare_continue_context=prepare_continue_context,
         kill_issue_agent=kill_issue_agent,
         get_runtime_ops_plugin=get_runtime_ops_plugin,

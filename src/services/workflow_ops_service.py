@@ -14,7 +14,7 @@ from orchestration.plugin_runtime import (
     get_runtime_ops_plugin,
     get_workflow_state_plugin,
 )
-from state_manager import StateManager
+from integrations.workflow_state_factory import get_workflow_state
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ def build_workflow_snapshot(
     extract_structured_completion_signals: Callable[[list[dict]], list[dict[str, str]]],
 ) -> dict[str, Any]:
     """Build workflow/process/local/comment snapshot used by /wfstate."""
-    workflow_id = StateManager.get_workflow_id_for_issue(issue_num)
+    workflow_id = get_workflow_state().get_workflow_id(issue_num)
     workflow_file = (
         os.path.join(NEXUS_CORE_STORAGE_DIR, "workflows", f"{workflow_id}.json")
         if workflow_id

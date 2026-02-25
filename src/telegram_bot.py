@@ -259,7 +259,7 @@ from services.workflow_signal_sync import (
     read_latest_local_completion,
     write_local_completion_from_signal,
 )
-from state_manager import StateManager
+from state_manager import HostStateManager
 from user_manager import get_user_manager
 
 # --- LOGGING ---
@@ -293,10 +293,12 @@ user_manager = get_user_manager()
 
 # Legacy alias for compatibility
 GITHUB_REPO = get_default_github_repo()
+from integrations.workflow_state_factory import get_workflow_state as _get_wf_state
+
 _WORKFLOW_STATE_PLUGIN_KWARGS = {
     "storage_dir": NEXUS_CORE_STORAGE_DIR,
-    "issue_to_workflow_id": StateManager.get_workflow_id_for_issue,
-    "clear_pending_approval": StateManager.clear_pending_approval,
+    "issue_to_workflow_id": lambda n: _get_wf_state().get_workflow_id(n),
+    "clear_pending_approval": lambda n: _get_wf_state().clear_pending_approval(n),
     "audit_log": AuditStore.audit_log,
 }
 
@@ -318,7 +320,7 @@ def _workflow_handler_deps() -> WorkflowHandlerDeps:
         invoke_copilot_agent=invoke_copilot_agent,
         get_sop_tier_from_issue=get_sop_tier_from_issue,
         get_sop_tier=get_sop_tier,
-        get_last_tier_for_issue=StateManager.get_last_tier_for_issue,
+        get_last_tier_for_issue=HostStateManager.get_last_tier_for_issue,
         prepare_continue_context=prepare_continue_context,
         kill_issue_agent=kill_issue_agent,
         get_runtime_ops_plugin=get_runtime_ops_plugin,
@@ -560,12 +562,12 @@ def rate_limited(action: str, limit: RateLimit = None):
 
 def load_tracked_issues():
     """Load tracked issues from file."""
-    return StateManager.load_tracked_issues()
+    return HostStateManager.load_tracked_issues()
 
 
 def save_tracked_issues(data):
     """Save tracked issues to file."""
-    StateManager.save_tracked_issues(data)
+    HostStateManager.save_tracked_issues(data)
 
 
 # Moved `_refine_task_description` to inbox_routing_handler.py
@@ -588,7 +590,7 @@ def get_issue_details(issue_num, repo: str = None):
 
 def _get_expected_running_agent_from_workflow(issue_num: str) -> str | None:
     """Return the current RUNNING workflow agent for an issue, if available."""
-    workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
+    workflow_id = _get_wf_state().get_workflow_id(str(issue_num))
     if not workflow_id:
         return None
 
@@ -1820,7 +1822,7 @@ async def progress_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Unauthorized access attempt by ID: {update.effective_user.id}")
         return
 
-    launched_agents = StateManager.load_launched_agents()
+    launched_agents = HostStateManager.load_launched_agents()
     if not launched_agents:
         await update.effective_message.reply_text("ℹ️ No active agents tracked.")
         return
@@ -2042,20 +2044,20 @@ if __name__ == '__main__':
     # Initialize report scheduler (start it after app runs)
     report_scheduler = None
     if os.getenv('ENABLE_SCHEDULED_REPORTS', 'true').lower() == 'true':
-        report_scheduler = ReportScheduler(bot=app.bot, chat_id=TELEGRAM_CHAT_ID)
+        report_scheduler = ReportScheduler()
         logger.info("📊 Scheduled reports will be enabled after startup")
     
     # Initialize alerting system (start it after app runs)
     alerting_system = None
     if os.getenv('ENABLE_ALERTING', 'true').lower() == 'true':
-        alerting_system = init_alerting_system(bot=app.bot, chat_id=TELEGRAM_CHAT_ID)
+        alerting_system = init_alerting_system()
         logger.info("🚨 Alerting system will be enabled after startup")
     
     # Register commands on startup (Telegram client menu)
     original_post_init = on_startup
     
     async def post_init_with_scheduler(application):
-        """Post init that also starts the report scheduler and alerting system."""
+        """Post init that also starts the report scheduler, alerting system, and event handlers."""
         await original_post_init(application)
         if report_scheduler:
             report_scheduler.start()
@@ -2063,6 +2065,13 @@ if __name__ == '__main__':
         if alerting_system:
             alerting_system.start()
             logger.info("🚨 Alerting system started")
+        # Attach EventBus event handlers (Telegram & Discord notifications)
+        try:
+            from orchestration.nexus_core_helpers import setup_event_handlers
+            setup_event_handlers()
+            logger.info("🔔 EventBus event handlers initialized")
+        except Exception as exc:
+            logger.warning("EventBus event handler setup failed: %s", exc)
     
     app.post_init = post_init_with_scheduler
 

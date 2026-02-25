@@ -36,11 +36,11 @@ from config import (
     get_nexus_dir_name,
     get_project_platform,
 )
-from integrations.notifications import notify_agent_completed, send_telegram_alert
+from integrations.notifications import notify_agent_completed, emit_alert
 from nexus.plugins.builtin.ai_runtime_plugin import ToolUnavailableError
 from orchestration.ai_orchestrator import get_orchestrator
 from orchestration.plugin_runtime import get_profiled_plugin
-from state_manager import StateManager
+from state_manager import HostStateManager
 
 logger = logging.getLogger(__name__)
 _issue_plugin_cache = {}
@@ -201,7 +201,7 @@ def _persist_issue_excluded_tools(issue_num: str, tools: list[str]) -> None:
     if not merged:
         return
 
-    launched_agents = StateManager.load_launched_agents(recent_only=False)
+    launched_agents = HostStateManager.load_launched_agents(recent_only=False)
     previous_entry = launched_agents.get(str(issue_num), {})
     if not isinstance(previous_entry, dict):
         previous_entry = {}
@@ -209,7 +209,7 @@ def _persist_issue_excluded_tools(issue_num: str, tools: list[str]) -> None:
     entry = dict(previous_entry)
     entry["exclude_tools"] = _merge_excluded_tools(previous_entry.get("exclude_tools", []), merged)
     launched_agents[str(issue_num)] = entry
-    StateManager.save_launched_agents(launched_agents)
+    HostStateManager.save_launched_agents(launched_agents)
 
 
 def _pgrep_and_logfile_guard(issue_id: str, agent_type: str) -> bool:
@@ -319,103 +319,56 @@ def _build_agent_search_dirs(agents_dir: str) -> list:
     return dirs
 
 
-def _normalize_skill_name(value: str) -> str:
-    """Normalize a skill directory name to lowercase underscore format."""
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
-    return normalized or "agent"
+from nexus.core.execution import ExecutionEngine, find_agent_definition
+from nexus.core.monitor import MonitorEngine
 
-
-def _resolve_skill_name(yaml_path: str, agent_type: str) -> str:
-    """Resolve workspace skill name from YAML metadata, with agent_type fallback."""
-    try:
-        with open(yaml_path, encoding="utf-8") as handle:
-            payload = yaml.safe_load(handle) or {}
-        metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
-        candidate = metadata.get("name") if isinstance(metadata, dict) else None
-        return _normalize_skill_name(str(candidate or agent_type))
-    except Exception:
-        return _normalize_skill_name(agent_type)
-
-
-def _ensure_workspace_skill(
-    workspace_dir: str | None,
-    yaml_path: str,
-    agent_type: str,
-    md_content: str,
-) -> None:
-    """Ensure workspace skill file exists and is up to date for Gemini-style tooling."""
-    if not workspace_dir:
-        return
-    if not md_content or not md_content.strip():
-        return
-
-    skill_name = _resolve_skill_name(yaml_path, agent_type)
-    skill_path = os.path.join(workspace_dir, ".agent", "skills", skill_name, "SKILL.md")
-
-    try:
-        needs_write = True
-        if os.path.exists(skill_path):
-            skill_mtime = os.path.getmtime(skill_path)
-            yaml_mtime = os.path.getmtime(yaml_path)
-            if skill_mtime >= yaml_mtime and os.path.getsize(skill_path) > 0:
-                needs_write = False
-
-        if needs_write:
-            os.makedirs(os.path.dirname(skill_path), exist_ok=True)
-            with open(skill_path, "w", encoding="utf-8") as handle:
-                handle.write(md_content)
-            logger.info(f"✅ Generated workspace skill: {skill_path}")
-    except Exception as exc:
-        logger.warning(f"Failed to generate workspace skill for '{agent_type}': {exc}")
-
-
+def _resolve_skill_name(agent_type: str) -> str:
+    """Normalize agent name for workspace skill directory."""
+    return re.sub(r"[^a-z0-9]+", "_", agent_type.lower()).strip("_")
 
 
 def _ensure_agent_definition(agents_dir: str, agent_type: str, workspace_dir: str | None = None) -> bool:
-    """Ensure an agent definition exists by generating it from YAML if needed."""
+    """Ensure an agent definition exists and sync workspace skills if needed."""
     search_dirs = _build_agent_search_dirs(agents_dir)
-    yaml_path = find_agent_yaml(agent_type, search_dirs)
+    yaml_path = find_agent_definition(agent_type, search_dirs)
+    
     if not yaml_path:
-        logger.error(f"Missing agent YAML for agent_type '{agent_type}' in {search_dirs}")
-        send_telegram_alert(
-            f"Missing agent YAML for agent_type '{agent_type}' in {search_dirs}."
-        )
+        msg = f"Missing agent YAML for agent_type '{agent_type}' in {search_dirs}"
+        logger.error(msg)
+        emit_alert(msg, severity="error", source="agent_launcher")
         return False
 
     agent_md_path = os.path.splitext(yaml_path)[0] + ".agent.md"
-    if os.path.exists(agent_md_path):
-        if os.path.getmtime(agent_md_path) >= os.path.getmtime(yaml_path):
-            try:
-                with open(agent_md_path, encoding="utf-8") as handle:
-                    _ensure_workspace_skill(workspace_dir, yaml_path, agent_type, handle.read())
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to sync workspace skill from existing agent file for '{agent_type}': {exc}"
-                )
-            return True
-
-    try:
-        from nexus.translators.to_copilot import translate_agent_to_copilot
-        
-        md_content = translate_agent_to_copilot(yaml_path)
-        if not md_content or not md_content.strip():
-            logger.error(f"Translator produced empty output for {yaml_path}")
-            send_telegram_alert(
-                f"Translator produced empty output for agent_type '{agent_type}'."
-            )
+    
+    # Generate instructions if missing or outdated
+    needs_sync = False
+    if not os.path.exists(agent_md_path) or os.path.getmtime(agent_md_path) < os.path.getmtime(yaml_path):
+        try:
+            from nexus.translators.to_copilot import translate_agent_to_copilot
+            md_content = translate_agent_to_copilot(yaml_path)
+            if md_content:
+                with open(agent_md_path, "w", encoding="utf-8") as handle:
+                    handle.write(md_content)
+                logger.info(f"✅ Generated agent instructions: {agent_md_path}")
+                needs_sync = True
+            else:
+                return False
+        except Exception as e:
+            logger.error(f"Translator error for {yaml_path}: {e}")
             return False
-            
-        with open(agent_md_path, "w", encoding="utf-8") as handle:
-            handle.write(md_content)
-        _ensure_workspace_skill(workspace_dir, yaml_path, agent_type, md_content)
-        logger.info(f"✅ Generated agent instructions: {agent_md_path}")
-        return True
-    except Exception as e:
-        logger.error(f"Translator error for {yaml_path}: {e}")
-        send_telegram_alert(
-            f"Translator error for agent_type '{agent_type}': {str(e)}"
-        )
-        return False
+    else:
+        needs_sync = True
+
+    # Sync to workspace skill
+    if needs_sync and workspace_dir:
+        try:
+            with open(agent_md_path, encoding="utf-8") as f:
+                content = f.read()
+            ExecutionEngine.sync_workspace_skill(workspace_dir, agent_type, content)
+        except Exception as e:
+            logger.warning(f"Failed to sync workspace skill for {agent_type}: {e}")
+
+    return True
 
 
 def get_sop_tier_from_issue(issue_number, project="nexus", repo_override: str | None = None):
@@ -585,7 +538,7 @@ def invoke_copilot_agent(
             if _tool_is_rate_limited(orchestrator, "gemini"):
                 dynamic_exclusions.append("gemini")
 
-            launched_agents = StateManager.load_launched_agents()
+            launched_agents = HostStateManager.load_launched_agents()
             previous_entry = launched_agents.get(str(issue_num), {})
             if not isinstance(previous_entry, dict):
                 previous_entry = {}
@@ -605,7 +558,7 @@ def invoke_copilot_agent(
                 )
             })
             launched_agents[str(issue_num)] = entry
-            StateManager.save_launched_agents(launched_agents)
+            HostStateManager.save_launched_agents(launched_agents)
             
             # Record in LaunchGuard for dedup
             record_agent_launch(issue_num, agent_type=agent_type, pid=pid)
@@ -746,9 +699,9 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
         return None, None
     
     # Get workflow tier: launched_agents tracker → issue labels → halt if unknown
-    from state_manager import StateManager
+    from state_manager import HostStateManager
     repo = resolved_repo or get_github_repo(project_root)
-    tracker_tier = StateManager.get_last_tier_for_issue(issue_number)
+    tracker_tier = HostStateManager.get_last_tier_for_issue(issue_number)
     label_tier = get_sop_tier_from_issue(issue_number, project_root, repo_override=repo)
     tier_name = label_tier or tracker_tier
     if not tier_name:
@@ -760,7 +713,7 @@ def launch_next_agent(issue_number, next_agent, trigger_source="unknown", exclud
 
     # Merge caller-provided exclude_tools with any persisted ones from previous runs
     if exclude_tools is None:
-        launched_agents = StateManager.load_launched_agents()
+        launched_agents = HostStateManager.load_launched_agents()
         persisted = launched_agents.get(str(issue_number), {}).get("exclude_tools", [])
         if persisted:
             exclude_tools = list(persisted)

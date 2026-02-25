@@ -1,124 +1,81 @@
 """Dedicated audit storage utilities for Nexus.
 
 Keeps audit read/write concerns separate from generic state management.
+Delegates to nexus-core for standardized storage.
 """
 
-import json
+import asyncio
 import logging
-import os
-from datetime import datetime, timedelta
+from datetime import datetime
+from pathlib import Path
 
 from config import NEXUS_CORE_STORAGE_DIR
+from nexus.adapters.storage.file import FileStorage
+from nexus.adapters.storage.structured_log import StructuredLogAuditBackend
+from nexus.core.storage.audit import AuditStore as CoreAuditStore
 
 logger = logging.getLogger(__name__)
 
 
 class AuditStore:
-    """Read/write audit events in nexus-core JSONL format."""
+    """Read/write audit events using nexus-core implementation."""
 
-    @staticmethod
-    def _get_workflow_id(issue_num: int) -> str:
-        """Resolve workflow ID for an issue, with system fallback."""
-        from state_manager import StateManager
+    _core_store = None
 
-        workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
-        return workflow_id or "_nexus_system"
+    @classmethod
+    def _get_core_store(cls):
+        if cls._core_store is None:
+            base_storage = FileStorage(base_path=NEXUS_CORE_STORAGE_DIR)
+            storage = StructuredLogAuditBackend(
+                backend=base_storage,
+                logger_name="nexus.audit",
+                extra_labels={"app": "nexus", "env": "prod"},
+            )
+            cls._core_store = CoreAuditStore(storage=storage)
+        return cls._core_store
 
     @staticmethod
     def audit_log(issue_num: int, event: str, details: str | None = None) -> None:
         """Log an audit event in nexus-core JSONL format."""
+        from integrations.workflow_state_factory import get_workflow_state
+
+        workflow_id = get_workflow_state().get_workflow_id(str(issue_num)) or "_nexus_system"
+
+        store = AuditStore._get_core_store()
         try:
-            timestamp = datetime.now().isoformat()
-            workflow_id = AuditStore._get_workflow_id(issue_num)
-
-            audit_dir = os.path.join(NEXUS_CORE_STORAGE_DIR, "audit")
-            os.makedirs(audit_dir, exist_ok=True)
-            audit_file = os.path.join(audit_dir, f"{workflow_id}.jsonl")
-
-            entry = {
-                "workflow_id": workflow_id,
-                "timestamp": timestamp,
-                "event_type": event,
-                "data": {
-                    "issue_number": issue_num,
-                    "details": details,
-                },
-                "user_id": None,
-            }
-            with open(audit_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
-
-            logger.debug(f"Audit: #{issue_num} {event} -> {audit_file}")
+            asyncio.run(
+                store.log(
+                    workflow_id=workflow_id,
+                    event_type=event,
+                    data={"issue_number": issue_num, "details": details},
+                )
+            )
+            logger.debug(f"Audit: #{issue_num} {event}")
         except Exception as e:
             logger.error(f"Failed to write audit log: {e}")
 
     @staticmethod
     def get_audit_history(issue_num: int, limit: int = 50) -> list[dict]:
-        """Get recent audit events for an issue from JSONL audit files."""
-        from state_manager import StateManager
+        """Get recent audit events for an issue."""
+        from integrations.workflow_state_factory import get_workflow_state
 
+        workflow_id = get_workflow_state().get_workflow_id(str(issue_num))
+        if not workflow_id:
+            return []
+
+        store = AuditStore._get_core_store()
         try:
-            workflow_id = StateManager.get_workflow_id_for_issue(str(issue_num))
-            if not workflow_id:
-                return []
-
-            audit_file = os.path.join(NEXUS_CORE_STORAGE_DIR, "audit", f"{workflow_id}.jsonl")
-            if not os.path.exists(audit_file):
-                return []
-
-            entries: list[dict] = []
-            with open(audit_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-
-            return entries[-limit:]
+            events = asyncio.run(store.get_workflow_history(workflow_id, limit=limit))
+            return [
+                {
+                    "workflow_id": e.workflow_id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "event_type": e.event_type,
+                    "data": e.data,
+                    "user_id": e.user_id,
+                }
+                for e in events[-limit:]
+            ]
         except Exception as e:
             logger.error(f"Failed to read audit log: {e}")
             return []
-
-    @staticmethod
-    def read_all_audit_events(since_hours: int | None = None) -> list[dict]:
-        """Read all audit events across workflow audit JSONL files."""
-        audit_dir = os.path.join(NEXUS_CORE_STORAGE_DIR, "audit")
-        if not os.path.isdir(audit_dir):
-            return []
-
-        cutoff = datetime.now() - timedelta(hours=since_hours) if since_hours is not None else None
-
-        events: list[dict] = []
-        for fname in os.listdir(audit_dir):
-            if not fname.endswith(".jsonl"):
-                continue
-
-            fpath = os.path.join(audit_dir, fname)
-            try:
-                with open(fpath, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            evt = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-
-                        if cutoff is not None:
-                            try:
-                                ts = datetime.fromisoformat(evt.get("timestamp", ""))
-                                if ts < cutoff:
-                                    continue
-                            except (ValueError, TypeError):
-                                continue
-
-                        events.append(evt)
-            except Exception:
-                continue
-
-        events.sort(key=lambda event: event.get("timestamp", ""))
-        return events
