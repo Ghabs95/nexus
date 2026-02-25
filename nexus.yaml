@@ -1,0 +1,22 @@
+apiVersion: "nexus-core/v1"
+kind: "NexusProfile"
+metadata:
+  name: "nexus"
+  description: "Thin profile that composes nexus-core with Telegram adapters"
+
+spec:
+  imports:
+    - package: "nexus-core"
+      extras: ["telegram"]
+
+  adapters:
+    interactive_clients:
+      - type: "telegram-interactive-http"
+        config:
+          bot_token_env: "TELEGRAM_TOKEN"
+
+    notification_channels:
+      - type: "telegram-notification-http"
+        config:
+          bot_token_env: "TELEGRAM_TOKEN"
+          chat_id_env: "TELEGRAM_CHAT_ID"

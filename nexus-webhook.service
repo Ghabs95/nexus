@@ -5,12 +5,12 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/git/ghabs/nexus
-ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python3 /home/ubuntu/git/ghabs/nexus/src/webhook_server.py
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/telegram-bot
+ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python /home/ubuntu/git/ghabs/nexus-core/examples/telegram-bot/src/webhook_server.py
 Restart=always
 RestartSec=10
-StandardOutput=append:/home/ubuntu/git/ghabs/nexus/logs/webhook.log
-StandardError=append:/home/ubuntu/git/ghabs/nexus/logs/webhook_error.log
+StandardOutput=append:/var/log/nexus/webhook.log
+StandardError=append:/var/log/nexus/webhook_error.log
 
 # Environment
 Environment="PATH=/home/ubuntu/git/ghabs/nexus/venv/bin:/usr/local/bin:/usr/bin:/bin"

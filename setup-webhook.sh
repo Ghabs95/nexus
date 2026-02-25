@@ -16,29 +16,30 @@ if [[ $EUID -eq 0 ]]; then
    exit 1
 fi
 
-NEXUS_DIR="/home/ubuntu/git/ghabs/nexus"
+NEXUS_DIR="/home/ubuntu/git/ghabs/nexus-core/examples/telegram-bot"
+NEXUS_ENV_FILE="/home/ubuntu/git/ghabs/nexus/.env"
 SERVICE_FILE="nexus-webhook.service"
 
 # Step 1: Generate webhook secret if not exists
 echo "📝 Step 1: Webhook Secret"
 echo "-------------------------"
 
-if grep -q "^WEBHOOK_SECRET=$" "$NEXUS_DIR/.env"; then
+if grep -q "^WEBHOOK_SECRET=$" "$NEXUS_ENV_FILE"; then
     echo "No webhook secret found. Generating one..."
     WEBHOOK_SECRET=$(openssl rand -hex 32)
-    sed -i "s|^WEBHOOK_SECRET=$|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_DIR/.env"
+    sed -i "s|^WEBHOOK_SECRET=$|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_ENV_FILE"
     echo "✅ Generated webhook secret: $WEBHOOK_SECRET"
     echo ""
     echo "⚠️  IMPORTANT: Save this secret! You'll need it for GitHub webhook configuration."
-    echo "   Add it to GitHub at: https://github.com/Ghabs95/agents/settings/hooks"
+    echo "   Add it to your repository webhook settings page"
     echo ""
 else
-    WEBHOOK_SECRET=$(grep "^WEBHOOK_SECRET=" "$NEXUS_DIR/.env" | cut -d= -f2)
+    WEBHOOK_SECRET=$(grep "^WEBHOOK_SECRET=" "$NEXUS_ENV_FILE" | cut -d= -f2)
     if [[ -z "$WEBHOOK_SECRET" ]]; then
-        echo "⚠️  Warning: WEBHOOK_SECRET is empty in .env"
+        echo "⚠️  Warning: WEBHOOK_SECRET is empty in $NEXUS_ENV_FILE"
         echo "   Generating a new secret..."
         WEBHOOK_SECRET=$(openssl rand -hex 32)
-        sed -i "s|^WEBHOOK_SECRET=.*|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_DIR/.env"
+        sed -i "s|^WEBHOOK_SECRET=.*|WEBHOOK_SECRET=$WEBHOOK_SECRET|" "$NEXUS_ENV_FILE"
         echo "✅ Generated webhook secret: $WEBHOOK_SECRET"
     else
         echo "✅ Webhook secret already configured"
@@ -96,7 +97,7 @@ echo ""
 echo "🧪 Step 5: Test Endpoint"
 echo "-----------------------"
 
-WEBHOOK_PORT=$(grep "^WEBHOOK_PORT=" "$NEXUS_DIR/.env" | cut -d= -f2)
+WEBHOOK_PORT=$(grep "^WEBHOOK_PORT=" "$NEXUS_ENV_FILE" | cut -d= -f2)
 WEBHOOK_PORT=${WEBHOOK_PORT:-8081}
 
 sleep 1
@@ -112,8 +113,8 @@ echo ""
 echo "🔧 Step 6: GitHub Configuration"
 echo "-------------------------------"
 echo ""
-echo "Configure GitHub webhook at:"
-echo "👉 https://github.com/Ghabs95/agents/settings/hooks"
+echo "Configure a webhook in your repository settings"
+echo "(Settings → Webhooks → Add webhook)"
 echo ""
 echo "Settings:"
 echo "  • Payload URL: http://<your-server-ip>:$WEBHOOK_PORT/webhook"

@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-# Add src directory to Python path for imports
-src_path = Path(__file__).parent.parent / "src"
+# Add runtime src directory to Python path for imports
+src_path = Path(__file__).parent.parent.parent / "nexus-core" / "examples" / "telegram-bot" / "src"
 sys.path.insert(0, str(src_path))
 
 

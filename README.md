@@ -1,5 +1,14 @@
 # Nexus - Telegram AI Task Router Bot
 
+## Migration Status
+
+The runtime bot implementation has been migrated to:
+
+- `nexus-core/examples/telegram-bot`
+
+This repository is transitioning to a thin wrapper/profile layer (dependency + config), with runtime
+logic owned by `nexus-core` examples.
+
 A Telegram bot powered by Google Gemini that intelligently routes voice messages and text input to project-specific
 GitHub inboxes. Perfect for quickly capturing ideas and tasks on the go.
 
