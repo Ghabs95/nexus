@@ -26,13 +26,12 @@ projects:
       - nexus core
       - nexus-core
 
-# PR Merge Policy (project-level enforcement)
-# Controls whether @OpsCommander can auto-merge PRs or must wait for human approval
-# Options:
-#   - always: Human approval REQUIRED for all PRs (overrides workflow settings)
-#   - workflow-based: Workflow YAML controls per-workflow/per-step merge behavior
-#   - never: Auto-merge allowed (NOT recommended for production)
-require_human_merge_approval: always  # Enforce human review for all projects
+# Merge queue behavior (project-level enforcement)
+# review_mode:
+#   - manual: PR merge requires human approval
+#   - auto: PR can be merged automatically by the queue worker when ready
+merge_queue:
+  review_mode: manual
 
 # GitHub Issue Triage Configuration
 # Maps incoming GitHub issues to agent types (not specific agents)
@@ -90,21 +89,37 @@ ai_tool_preferences:
   writer: gemini             # Generic close-loop writing
   finalizer: gemini          # Generic rejected/closure handling
 
+# Global operation task -> agent type mapping.
+# Provider is selected through ai_tool_preferences for that agent type.
+operation_agents:
+  default: triage
+  classify: triage
+  route: triage
+  detect_intent: triage
+  generate_name: triage
+  refine_description: triage
+  transcribe_audio: triage
+  overrides:
+    issue:
+      refine_description: triage
+
 # Project configurations
 case_italia:
   agents_dir: ghabs/agents/casit-agents
   workspace: case_italia
   git_repo: Ghabs95/agents
-  chat_agents:
-    business: {}
-    marketing: {}
-    triage: {}
-    developer: {}
-    reviewer: {}
-    compliance: {}
-    deployer: {}
-    designer: {}
-    docs: {}
+  operation_agents:
+    default: triage
+    chat:
+      business: {}
+      marketing: {}
+      triage: {}
+      developer: {}
+      reviewer: {}
+      compliance: {}
+      deployer: {}
+      designer: {}
+      docs: {}
 
 wallible:
   agents_dir: wallible/wlbl-workflow-os/agents
@@ -118,21 +133,23 @@ wallible:
     - wallible/wlbl-business-os
     - wallible/wlbl-marketing-os
     - wallible/wlbl-workflow-os
-  chat_agents:
-    ceo: {}
-    business:
-      context_path: wlbl-business-os
-      context_files:
-        - AGENTS.md
-        - README.md
-        - WORKFLOWS.md
-    marketing:
-      context_path: wlbl-marketing-os
-      context_files:
-        - AGENTS.md
-        - README.md
-        - WORKFLOWS.md
-    cto: {}
+  operation_agents:
+    default: triage
+    chat:
+      ceo: {}
+      business:
+        context_path: wlbl-business-os
+        context_files:
+          - AGENTS.md
+          - README.md
+          - WORKFLOWS.md
+      marketing:
+        context_path: wlbl-marketing-os
+        context_files:
+          - AGENTS.md
+          - README.md
+          - WORKFLOWS.md
+      cto: {}
   # Wallible-specific AI tool preferences (complete role set)
   ai_tool_preferences:
     ceo: gemini              # Vision and scope approval
@@ -152,16 +169,18 @@ biome:
   agents_dir: ghabs/agents/bm-agents
   workspace: biome
   git_repo: Ghabs95/agents
-  chat_agents:
-    business: {}
-    marketing: {}
-    triage: {}
-    developer: {}
-    reviewer: {}
-    compliance: {}
-    deployer: {}
-    designer: {}
-    docs: {}
+  operation_agents:
+    default: triage
+    chat:
+      business: {}
+      marketing: {}
+      triage: {}
+      developer: {}
+      reviewer: {}
+      compliance: {}
+      deployer: {}
+      designer: {}
+      docs: {}
 
 nexus:
   agents_dir: ghabs/nexus-core/examples/agents
@@ -170,14 +189,16 @@ nexus:
   git_repos:
     - Ghabs95/nexus-core
     - Ghabs95/nexus
-  chat_agents:
-    designer:
-      context_path: ghabs/nexus-core/examples/telegram-bot/docs
-      context_files:
-        - AGENTS.md
-    triage: {}
-    compliance: {}
-    writer: {}
+  operation_agents:
+    default: triage
+    chat:
+      designer:
+        context_path: ghabs/nexus-core/examples/telegram-bot/docs
+        context_files:
+          - AGENTS.md
+      triage: {}
+      compliance: {}
+      writer: {}
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
   workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
   # AI tool preferences for enterprise workflow agent types
