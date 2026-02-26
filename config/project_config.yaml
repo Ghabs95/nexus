@@ -66,6 +66,7 @@ issue_triage:
 
 # Global AI tool preferences (which AI tool each AGENT TYPE uses)
 # Maps AGENT TYPES (not individual agents) to AI providers
+# Valid provider values: copilot, gemini, codex
 #
 # Architecture:
 # 1. Agent YAML files define: spec.agent_type (e.g., "triage", "debug", "escalation")
