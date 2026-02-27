@@ -204,10 +204,10 @@ nexus:
   # AI tool preferences for enterprise workflow agent types
   ai_tool_preferences:
     triage: copilot          # Triage agent - issue classification
-    designer: copilot        # Design agent - architecture proposals
+    designer: codex          # Design agent - architecture proposals
     debug: copilot           # Debug agent - root cause analysis
-    developer: copilot       # Develop agent - code implementation
-    reviewer: copilot        # Review agent - PR reviews
+    developer: codex         # Develop agent - code implementation
+    reviewer: codex          # Review agent - PR reviews
     compliance: copilot      # Compliance agent - security/privacy review
     deployer: copilot        # Deploy agent - merge & release
     writer: gemini           # Write agent - docs & close (faster)
