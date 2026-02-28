@@ -137,6 +137,7 @@ wallible:
     - wallible/wlbl-workflow-os
   operation_agents:
     default: triage
+    launch: triage
     chat:
       ceo: {}
       business:
