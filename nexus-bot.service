@@ -5,11 +5,12 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/nexus-bot
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus-arc/examples/nexus-bot
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/.env
 Environment="PYTHONUNBUFFERED=1"
 # Include system paths so system binaries (e.g. /usr/bin/gh) are available
 Environment="PATH=/home/ubuntu/git/ghabs/nexus/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/home/ubuntu/git/ghabs/nexus-arc"
 ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python src/telegram_bot.py
 Restart=always
 RestartSec=10

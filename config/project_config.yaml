@@ -56,8 +56,8 @@ model_profiles:
     # ollama: deepseek-coder-v2:16b  # Uncomment to enable local fallback
 
 profile_provider_priority:
-  fast: [gemini, copilot, codex, ollama]
-  reasoning: [codex, copilot, gemini, ollama]
+  fast: [gemini, copilot, codex]
+  reasoning: [codex, copilot, gemini]
 
 ai_tool_preferences:
   # Most agents rely on fallback priority (provider: auto)
@@ -72,7 +72,7 @@ ai_tool_preferences:
   docs: {profile: fast, provider: gemini}         # Docs and summaries
   writer: {profile: fast, provider: auto}         # Close-loop writing
   finalizer: {profile: fast, provider: auto}      # Rejected/closure handling
-  transcriber: {profile: fast, provider: whisper} # Audio processing
+  transcriber: {profile: fast, provider: auto}    # Audio processing
 
 # Global operation task -> agent type mapping.
 # Provider is selected through ai_tool_preferences for that agent type.

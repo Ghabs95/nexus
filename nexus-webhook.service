@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/nexus-bot
-ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python /home/ubuntu/git/ghabs/nexus-core/examples/nexus-bot/src/webhook_server.py
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus-arc/examples/nexus-bot
+ExecStart=/home/ubuntu/git/ghabs/nexus/venv/bin/python /home/ubuntu/git/ghabs/nexus-arc/examples/nexus-bot/src/webhook_server.py
 Restart=always
 RestartSec=10
 StandardOutput=append:/var/log/nexus/webhook.log
@@ -14,6 +14,7 @@ StandardError=append:/var/log/nexus/webhook_error.log
 
 # Environment
 Environment="PATH=/home/ubuntu/git/ghabs/nexus/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/home/ubuntu/git/ghabs/nexus-arc"
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/.env
 
