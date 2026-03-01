@@ -16,7 +16,7 @@ if [[ $EUID -eq 0 ]]; then
    exit 1
 fi
 
-NEXUS_DIR="/home/ubuntu/git/ghabs/nexus-core/examples/telegram-bot"
+NEXUS_DIR="/home/ubuntu/git/ghabs/nexus-core/examples/nexus-bot"
 NEXUS_ENV_FILE="/home/ubuntu/git/ghabs/nexus/.env"
 SERVICE_FILE="nexus-webhook.service"
 

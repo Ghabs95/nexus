@@ -6,7 +6,7 @@ Wants=nexus-bot.service nexus-processor.service
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/telegram-bot
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/nexus-bot
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/.env
 Environment="HEALTH_CHECK_PORT=8080"
 Environment="HEALTH_CHECK_HOST=127.0.0.1"

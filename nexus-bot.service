@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/telegram-bot
+WorkingDirectory=/home/ubuntu/git/ghabs/nexus-core/examples/nexus-bot
 EnvironmentFile=/home/ubuntu/git/ghabs/nexus/.env
 Environment="PYTHONUNBUFFERED=1"
 # Include system paths so system binaries (e.g. /usr/bin/gh) are available

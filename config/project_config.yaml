@@ -33,74 +33,58 @@ projects:
 merge_queue:
   review_mode: manual
 
-# GitHub Issue Triage Configuration
-# Maps incoming GitHub issues to agent types (not specific agents)
-# 
-# Agent types are abstract roles that workflows implement:
-#   - triage: Initial issue analysis and classification
-#   - escalation: High-priority/urgent issues (escalate to senior agent)
-#   - debug: Bug analysis and root cause
-#
-# Each project's workflow defines which actual agent implements each type.
-# Example:
-#   - nexus uses enterprise_workflow.yaml: triage → @triage, escalation → @triage (with priority flag)
-#   - ghabs org uses ghabs_org_workflow.yaml: triage → @ProjectLead, escalation → @Atlas
-issue_triage:
-  # Default agent type when no specific mapping applies
-  # Routes to whatever agent is configured for this type in the current workflow
-  default_agent_type: "triage"
-  
-  # Per-repository agent type override (if different from default)
-  per_repo:
-    "Ghabs95/nexus-core": "triage"      # Nexus core issues use triage workflow
-    "Ghabs95/agents": "triage"  # Agent workflow issues use triage
-  
-  # Label-based routing to agent types
-  label_based:
-    "docs": "triage"              # Documentation issues → triage agent
-    "good first issue": "triage"  # Beginner issues → triage agent
-    "bug": "debug"                # Bugs → debug agent (root cause analysis)
-    "urgent": "escalation"        # Urgent → escalation agent (senior review)
-    "critical": "escalation"      # Critical → escalation agent
-
-# Global AI tool preferences: which AI tool (and optionally model) to use
-# for each AGENT TYPE.
-# Valid providers: copilot, gemini, codex
-# Model override syntax: tool["model-name"] (e.g., copilot["gpt-4o-mini"])
-# When no model is specified, the tool's default model is used.
+# Global model profiles and AI tool preferences.
+# model_profiles define concrete model IDs per provider for each profile.
+# ai_tool_preferences map agent_type -> {profile, provider}.
+# provider can be: copilot, gemini, codex, auto.
 #
 # Architecture:
 # 1. Agent YAML files define: spec.agent_type (e.g., "triage", "debug", "escalation")
 # 2. Tasks are routed to agent types (not specific agent names)
 # 3. The first available agent with that type handles the task
 # 4. This config maps type → AI tool, so all agents of that type use the same tool
-#
-# Example agent YAML:
-#   spec:
-#     agent_type: "triage"       # This agent handles type: triage
-#     provider_preference: null  # Will use value from ai_tool_preferences
+model_profiles:
+  fast:
+    copilot: gpt-4o-mini
+    gemini: gemini-3.0-flash
+    codex: gpt-5-mini
+    # ollama: llama3.1:8b  # Uncomment to enable local fallback
+  reasoning:
+    copilot: gpt-5.3-codex
+    gemini: gemini-3.1-pro
+    codex: gpt-5.3-codex
+    # ollama: deepseek-coder-v2:16b  # Uncomment to enable local fallback
+
+profile_provider_priority:
+  fast: [gemini, copilot, codex, ollama]
+  reasoning: [codex, copilot, gemini, ollama]
+
 ai_tool_preferences:
-  triage: copilot["gpt-4o-mini"]        # Lightweight classification task
-  developer: copilot                    # Code implementation
-  reviewer: copilot                     # Code/quality review
-  compliance: copilot["gpt-4o-mini"]    # Checklist-style security review
-  deployer: copilot["gpt-4o-mini"]      # Mechanical deployment steps
-  debug: copilot                        # Root-cause analysis
-  designer: gemini                      # UX/UI and product design
-  docs: gemini["gemini-2.0-flash"]      # Docs and summaries (fast + cheap)
-  writer: gemini["gemini-2.0-flash"]    # Close-loop writing (fast + cheap)
-  finalizer: gemini["gemini-2.0-flash"] # Rejected/closure handling (fast + cheap)
+  # Most agents rely on fallback priority (provider: auto)
+  # Lock specific agents to a provider if they require specific capabilities
+  triage: {profile: fast, provider: auto}         # Lightweight classification task
+  developer: {profile: reasoning, provider: auto} # Code implementation
+  reviewer: {profile: reasoning, provider: auto}  # Code/quality review
+  debug: {profile: reasoning, provider: copilot}  # Root-cause analysis
+  designer: {profile: fast, provider: gemini}     # UX/UI and product design
+  compliance: {profile: fast, provider: copilot}  # Checklist-style security review
+  deployer: {profile: fast, provider: copilot}    # Mechanical deployment steps
+  docs: {profile: fast, provider: gemini}         # Docs and summaries
+  writer: {profile: fast, provider: auto}         # Close-loop writing
+  finalizer: {profile: fast, provider: auto}      # Rejected/closure handling
+  transcriber: {profile: fast, provider: whisper} # Audio processing
 
 # Global operation task -> agent type mapping.
 # Provider is selected through ai_tool_preferences for that agent type.
-operation_agents:
+system_operations:
   default: triage
+  inbox: triage
   classify: triage
   route: triage
   detect_intent: triage
   generate_name: triage
   refine_description: triage
-  transcribe_audio: triage
+  transcribe_audio: transcriber
   overrides:
     issue:
       refine_description: triage
@@ -110,7 +94,7 @@ case_italia:
   agents_dir: ghabs/agents/casit-agents
   workspace: case_italia
   git_repo: Ghabs95/agents
-  operation_agents:
+  system_operations:
     default: triage
     chat:
       business: {}
@@ -135,7 +119,7 @@ wallible:
     - wallible/wlbl-business-os
     - wallible/wlbl-marketing-os
     - wallible/wlbl-workflow-os
-  operation_agents:
+  system_operations:
     default: triage
     launch: triage
     chat:
@@ -153,26 +137,28 @@ wallible:
           - README.md
           - WORKFLOWS.md
       cto: {}
-  # Wallible-specific AI tool preferences (complete role set)
+  # Wallible-specific overrides (inherits global model_profiles and profile_provider_priority)
   ai_tool_preferences:
-    ceo: gemini                          # Vision and scope approval
-    cto: gemini                          # Strategic technical feasibility
-    business: gemini                     # Business strategy
-    marketing: gemini                    # GTM and growth
-    architect: copilot                   # System design and architecture
-    developer: copilot                   # Code implementation
-    deployer: copilot["gpt-4o-mini"]     # Deployment and ops
-    compliance: copilot["gpt-4o-mini"]   # Security and privacy audits
-    designer: gemini                     # UX/UI and product design
-    triage: copilot["gpt-4o-mini"]       # Intake and routing
-    reviewer: copilot                    # Code/quality review
-    docs: gemini["gemini-2.0-flash"]     # Documentation and summaries
+    # Wallible execs get locked to Gemini reasoning
+    ceo: {profile: reasoning, provider: gemini}     # Vision and scope approval
+    cto: {profile: reasoning, provider: gemini}     # Strategic technical feasibility
+    # Others use auto for fallbacks
+    business: {profile: reasoning, provider: auto}  # Business strategy
+    marketing: {profile: reasoning, provider: auto} # GTM and growth
+    architect: {profile: reasoning, provider: auto} # System design and architecture
+    compliance: {profile: fast, provider: copilot}  # Security and privacy audits
+    developer: {profile: reasoning, provider: auto}
+    deployer: {profile: fast, provider: copilot}
+    designer: {profile: fast, provider: gemini}
+    triage: {profile: fast, provider: auto}
+    reviewer: {profile: reasoning, provider: auto}
+    docs: {profile: fast, provider: gemini}
 
 biome:
   agents_dir: ghabs/agents/bm-agents
   workspace: biome
   git_repo: Ghabs95/agents
-  operation_agents:
+  system_operations:
     default: triage
     chat:
       business: {}
@@ -192,11 +178,11 @@ nexus:
   git_repos:
     - Ghabs95/nexus-core
     - Ghabs95/nexus
-  operation_agents:
+  system_operations:
     default: triage
     chat:
       designer:
-        context_path: ghabs/nexus-core/examples/telegram-bot/docs
+        context_path: ghabs/nexus-core/examples/nexus-bot/docs
         context_files:
           - AGENTS.md
       triage: {}
@@ -204,14 +190,14 @@ nexus:
       writer: {}
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
   workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
-  # AI tool preferences for enterprise workflow agent types
+  # Nexus-specific overrides (inherits global profiles, defines custom preferences)
   ai_tool_preferences:
-    triage: copilot["gpt-4o-mini"]        # Lightweight classification
-    designer: codex                       # Architecture proposals
-    debug: copilot                        # Root cause analysis
-    developer: codex                      # Code implementation
-    reviewer: codex                       # PR reviews
-    compliance: copilot["gpt-4o-mini"]    # Security/privacy review
-    deployer: copilot["gpt-4o-mini"]      # Merge & release
-    writer: gemini["gemini-2.0-flash"]    # Docs & close (fast + cheap)
-    finalizer: gemini["gemini-2.0-flash"] # Rejected issue close (fast + cheap)
+    triage: {profile: fast, provider: copilot}
+    designer: {profile: reasoning, provider: codex}
+    debug: {profile: fast, provider: copilot}
+    developer: {profile: reasoning, provider: auto}
+    reviewer: {profile: reasoning, provider: copilot}
+    compliance: {profile: fast, provider: copilot}
+    deployer: {profile: fast, provider: copilot}
+    writer: {profile: fast, provider: auto}
+    finalizer: {profile: fast, provider: auto}

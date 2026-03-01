@@ -3,10 +3,10 @@ name: nexus-prod
 services:
   bot:
     build:
-      context: ../nexus-core/examples/telegram-bot
+      context: ../nexus-core/examples/nexus-bot
       dockerfile: Dockerfile
     image: nexus-bot:local
-    command: ["python", "src/telegram_bot.py"]
+    command: ["nexus-bot"]
     working_dir: /app
     restart: unless-stopped
     env_file:
@@ -24,7 +24,7 @@ services:
     image: nexus-bot:local
     depends_on:
       - bot
-    command: ["python", "src/inbox_processor.py"]
+    command: ["nexus-processor"]
     working_dir: /app
     restart: unless-stopped
     env_file:
@@ -40,7 +40,7 @@ services:
 
   webhook:
     image: nexus-bot:local
-    command: ["python", "src/webhook_server.py"]
+    command: ["nexus-webhook"]
     working_dir: /app
     restart: unless-stopped
     env_file:
@@ -62,7 +62,7 @@ services:
     depends_on:
       - bot
       - processor
-    command: ["python", "src/health_check.py"]
+    command: ["nexus-health"]
     working_dir: /app
     restart: unless-stopped
     env_file:

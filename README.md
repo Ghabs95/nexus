@@ -4,7 +4,7 @@
 
 The runtime bot implementation has been migrated to:
 
-- `nexus-core/examples/telegram-bot`
+- `nexus-core/examples/nexus-bot`
 
 This repository is transitioning to a thin wrapper/profile layer (dependency + config), with runtime
 logic owned by `nexus-core` examples.
