@@ -1,9 +1,9 @@
 {
     "extraPaths": [
         "src",
-        "../nexus-core"
+        "../nexus-arc"
     ],
-    "venvPath": "../nexus-core",
+    "venvPath": "../nexus-arc",
     "venv": "venv",
     "pythonVersion": "3.14",
     "typeCheckingMode": "basic",

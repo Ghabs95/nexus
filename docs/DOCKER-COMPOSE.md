@@ -5,7 +5,7 @@ This is the deployment-focused Compose stack for the `nexus` repo.
 ## Purpose
 
 - `nexus/docker-compose.yml` is the runtime stack for your deployed bot.
-- `nexus-core/examples/nexus-bot/docker-compose.yml` remains a generic template.
+- `nexus-arc/examples/nexus-bot/docker-compose.yml` remains a generic template.
 
 ## Prerequisites
 
@@ -49,11 +49,14 @@ Wrapper usage:
 
 ```bash
 ./scripts/deploy.sh [up|down|restart|status|logs]
+./scripts/deploy.sh status --quiet
+./scripts/health-check.sh
+./scripts/smoke-deploy.sh
 ```
 
 ## Notes
 
 - Compose loads env from `./.env`.
-- Runtime code is built from `../nexus-core/examples/nexus-bot`.
+- Runtime code is built from `../nexus-arc/examples/nexus-bot`.
 - Runtime config is forced to `/app/config/project_config.yaml` (mounted from `./config`).
 - Host workspaces are mounted from `${BASE_DIR}` so agent workflows can access repositories.

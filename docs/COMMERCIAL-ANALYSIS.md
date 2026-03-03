@@ -254,7 +254,7 @@
 ### 6-Month Roadmap
 
 #### Month 1-2: Abstract & Document
-- Extract core into `nexus-core` package
+- Extract core into `nexus-arc` package
 - Create adapter interfaces (storage, notifications, git)
 - Write comprehensive docs + tutorial
 - Build 3 example workflows (CI/CD, support tickets, code review)
@@ -282,7 +282,7 @@
 ## Next Steps
 
 1. **Decide**: Which option resonates with you?
-2. **Abstract**: I'll help you build `nexus-core` (Option 3)
+2. **Abstract**: I'll help you build `nexus-arc` (Option 3)
 3. **Document**: Create architecture docs, API reference
 4. **Launch**: Get feedback from 10 developers
 

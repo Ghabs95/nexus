@@ -198,7 +198,7 @@ class NotificationChannel(ABC):
 ### Package Layout
 
 ```
-nexus-core/
+nexus-arc/
 ├── pyproject.toml
 ├── README.md
 ├── examples/
@@ -267,7 +267,7 @@ nexus-core/
 
 ### Phase 1: Extract Core ✅ COMPLETED
 
-**Goal**: Create `nexus-core` package with no breaking changes to existing Nexus
+**Goal**: Create `nexus-arc` package with no breaking changes to existing Nexus
 
 1. ✅ Created new directory structure
 2. ✅ Extracted these modules:
@@ -287,11 +287,11 @@ nexus-core/
 
 ### Phase 2: Logic & Intelligence ✅ COMPLETED
 
-**Goal**: Move orchestration intelligence and observability from the host into `nexus-core`
+**Goal**: Move orchestration intelligence and observability from the host into `nexus-arc`
 
 #### Targeted Extractions
 
-| Feature | Previous Location (`nexus`) | New Path (`nexus-core`) | Status |
+| Feature | Previous Location (`nexus`) | New Path (`nexus-arc`) | Status |
 | :--- | :--- | :--- | :--- |
 | Audit Logic | `src/audit_store.py` | `nexus/core/storage/audit.py` | ✅ Done |
 | Analytics Engines | `src/analytics.py` | `nexus/core/analytics.py` | ✅ Done |
@@ -319,7 +319,7 @@ nexus-core/
 - Created `nexus.core.execution.ExecutionEngine` to handle agent resolution, instruction generation (Copilot Instructions), and workspace skill synchronization.
 
 **4. State Management Refactoring**
-- Extracted workflow state (mapping + approvals) into `WorkflowStateStore` protocol in `nexus-core` with `FileWorkflowStateStore` and `PostgresWorkflowStateStore` implementations.
+- Extracted workflow state (mapping + approvals) into `WorkflowStateStore` protocol in `nexus-arc` with `FileWorkflowStateStore` and `PostgresWorkflowStateStore` implementations.
 - Renamed `StateManager` → `HostStateManager` in the host app, scoped to host-only concerns (launched agents, tracked issues, SocketIO).
 - Created `workflow_state_factory.py` with broadcasting decorator for real-time SocketIO updates.
 
@@ -547,7 +547,7 @@ adapters:
    - Support ticket routing
    - Code review agent
    - Documentation generator
-4. Migration guide: Nexus → nexus-core
+4. Migration guide: Nexus → nexus-arc
 
 ---
 
@@ -660,7 +660,7 @@ monitoring:
 
 | Phase | Status | Milestone | Deliverable |
 |-------|--------|-----------|-------------|
-| 1 | ✅ Done | Extract Core | `nexus-core` package, base interfaces, adapters |
+| 1 | ✅ Done | Extract Core | `nexus-arc` package, base interfaces, adapters |
 | 2 | ✅ Done | Logic & Intelligence | Audit, analytics, monitoring, routing, state mgmt |
 | 3 | 🔜 Next | Event Bus & Plugins | EventBus, plugin lifecycle, health checks |
 | 4 | ⏳ Future | Multi-Adapter | Slack, GitLab, OpenAI, Postgres adapters |

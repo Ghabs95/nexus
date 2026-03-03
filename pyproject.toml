@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nexus"
 version = "0.1.0"
-description = "Thin Nexus profile package that composes nexus-core + Telegram adapter configuration"
+description = "Thin Nexus profile package that composes nexus-arc + Telegram adapter configuration"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

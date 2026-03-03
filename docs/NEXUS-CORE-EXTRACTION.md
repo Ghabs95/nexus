@@ -59,7 +59,7 @@ Every agent action creates **permanent, traceable artifacts** in Git:
 
 Run it:
 ```bash
-cd /home/ubuntu/git/ghabs/nexus-core
+cd /home/ubuntu/git/ghabs/nexus-arc
 python examples/basic_workflow.py
 ```
 
@@ -188,15 +188,15 @@ Extracted from production Nexus code with 115 unit tests.
 
 **Option A**: Keep as-is (no migration needed)
 
-**Option B**: Gradually migrate to nexus-core
-1. Install: `pip install -e ../nexus-core`
+**Option B**: Gradually migrate to nexus-arc
+1. Install: `pip install -e ../nexus-arc`
 2. Import adapters: `from nexus.adapters.storage import FileStorage`
 3. Replace components one by one
 
 ### For Commercial Launch
 
 1. **Polish the code** (add missing providers, more tests)
-2. **Create a landing page** (nexus-core.dev)
+2. **Create a landing page** (nexus-arc.dev)
 3. **Build community** (GitHub stars, Discord)
 4. **Find 5-10 beta users** (offer free consulting)
 5. **Launch** (HN, Reddit, Product Hunt)
@@ -227,7 +227,7 @@ When implementing missing adapters, reference these files:
 - `nexus/src/agent_monitor.py` → Timeout/retry logic
 
 ### Models
-- `nexus/src/models.py` → Already migrated to nexus-core!
+- `nexus/src/models.py` → Already migrated to nexus-arc!
 
 ---
 
@@ -320,7 +320,7 @@ The abstraction is complete, the architecture is sound, and the documentation is
 - ✅ COMMERCIAL-ANALYSIS.md
 - ✅ ABSTRACTION-PLAN.md
 
-### In /home/ubuntu/git/ghabs/nexus-core
+### In /home/ubuntu/git/ghabs/nexus-arc
 - ✅ Complete package structure
 - ✅ Core framework (workflow engine, orchestrator)
 - ✅ Base adapters (storage, git, ai, notifications)

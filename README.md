@@ -4,10 +4,10 @@
 
 The runtime bot implementation has been migrated to:
 
-- `nexus-core/examples/nexus-bot`
+- `nexus-arc/examples/nexus-bot`
 
 This repository is transitioning to a thin wrapper/profile layer (dependency + config), with runtime
-logic owned by `nexus-core` examples.
+logic owned by `nexus-arc` examples.
 
 A Telegram bot powered by Google Gemini that intelligently routes voice messages and text input to project-specific
 GitHub inboxes. Perfect for quickly capturing ideas and tasks on the go.
@@ -131,7 +131,7 @@ Step through an interactive menu:
    ```
 
    In config/project_config.yaml, make sure the nexus project points to the
-   nexus-core workspace so agent PRs land in the correct repo.
+   nexus-arc workspace so agent PRs land in the correct repo.
 
    For manual testing, you can also export them:
    ```bash

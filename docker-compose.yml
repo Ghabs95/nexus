@@ -3,7 +3,7 @@ name: nexus-prod
 services:
   bot:
     build:
-      context: ../nexus-core/examples/nexus-bot
+      context: ../nexus-arc/examples/nexus-bot
       dockerfile: Dockerfile
     image: nexus-bot:local
     command: ["nexus-bot"]

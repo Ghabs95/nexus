@@ -1,12 +1,12 @@
-apiVersion: "nexus-core/v1"
+apiVersion: "nexus-arc/v1"
 kind: "NexusProfile"
 metadata:
   name: "nexus"
-  description: "Thin profile that composes nexus-core with Telegram adapters"
+  description: "Thin profile that composes nexus-arc with Telegram adapters"
 
 spec:
   imports:
-    - package: "nexus-core"
+    - package: "nexus-arc"
       extras: ["telegram"]
 
   adapters:

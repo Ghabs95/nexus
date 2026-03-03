@@ -1,13 +1,13 @@
-# Nexus-Core Production Integration — Complete
+# Nexus-Arc Production Integration — Complete
 
-> **Note:** This document describes how the **Nexus bot** integrates with the **nexus-core framework**.  
+> **Note:** This document describes how the **Nexus bot** integrates with the **nexus-arc framework**.  
 > For framework documentation and usage examples, see:
-> - [Nexus-Core Usage Guide](../../nexus-core/docs/USAGE.md)
-> - [Nexus-Core README](../../nexus-core/README.md)
+> - [Nexus-Arc Usage Guide](../../nexus-arc/docs/USAGE.md)
+> - [Nexus-Arc README](../../nexus-arc/README.md)
 
 ## ✅ Integration Complete
 
-All production source code has been updated to use the nexus-core framework.
+All production source code has been updated to use the nexus-arc framework.
 
 ## Files Modified
 
@@ -32,10 +32,10 @@ All production source code has been updated to use the nexus-core framework.
 **Location:** End of StateManager class
 
 ### 3. `/src/nexus_core_helpers.py` ✅ **[NEW FILE]**
-**Purpose:** Integration layer between Nexus bot and nexus-core framework
+**Purpose:** Integration layer between Nexus bot and nexus-arc framework
 
 **Key functions:**
-- `create_workflow_for_issue()` - Create nexus-core workflow from issue metadata
+- `create_workflow_for_issue()` - Create nexus-arc workflow from issue metadata
 - `start_workflow()` - Start workflow execution
 - `pause_workflow()` - Pause workflow by issue number
 - `resume_workflow()` - Resume paused workflow
@@ -45,13 +45,13 @@ All production source code has been updated to use the nexus-core framework.
 **Lines:** 320 lines  
 **Features:**
 - Maps tier names (tier-1-simple, tier-2-standard, etc.) to workflow types
-- Converts WORKFLOW_CHAIN configs to nexus-core WorkflowSteps
+- Converts WORKFLOW_CHAIN configs to nexus-arc WorkflowSteps
 - Handles issue → workflow_id mapping automatically
 - Provides both async and sync interfaces
 
 ### 4. `/src/inbox_processor.py` ✅
 **Changes:**
-- After creating GitHub issue, creates nexus-core workflow
+- After creating GitHub issue, creates nexus-arc workflow
 - Writes workflow_id to task file for tracking
 
 **Lines changed:** ~20 lines added  
@@ -66,12 +66,12 @@ workflow_id = create_workflow_for_issue_sync(...)
 
 ### 5. `/src/commands/workflow.py` ✅
 **Updated handlers:**
-- `pause_handler()` - Uses nexus-core workflow-state plugin
-- `resume_handler()` - Uses nexus-core workflow-state plugin
+- `pause_handler()` - Uses nexus-arc workflow-state plugin
+- `resume_handler()` - Uses nexus-arc workflow-state plugin
 
 **Lines changed:** ~45 lines modified  
 **Behavior:**
-- Uses nexus-core pause/resume operations
+- Uses nexus-arc pause/resume operations
 - Shows richer status feedback (workflow name, current step)
 
 ## How It Works
@@ -86,13 +86,13 @@ workflow_id = create_workflow_for_issue_sync(...)
 4. Agent launched manually
 ```
 
-**Now (with nexus-core):**
+**Now (with nexus-arc):**
 ```
 1. Task file dropped in inbox/
 2. inbox_processor creates GitHub issue
-3. ✨ Creates nexus-core Workflow with full step definition
+3. ✨ Creates nexus-arc Workflow with full step definition
 4. ✨ Maps issue# → workflow_id in workflow_id_mapping.json
-5. Workflow state persisted to data/nexus-core-workflows/
+5. Workflow state persisted to data/nexus-arc-workflows/
 6. Agent launched (workflow step 1 starts)
 ```
 
@@ -110,7 +110,7 @@ workflow_id = create_workflow_for_issue_sync(...)
 
 **Result:**
 - Workflow state changes: RUNNING → PAUSED
-- Audit log entry created in nexus-core
+- Audit log entry created in nexus-arc
 - Legacy audit log also updated
 - Next agent won't auto-launch until resumed
 
@@ -122,12 +122,12 @@ workflow_id = create_workflow_for_issue_sync(...)
 
 ## Configuration
 
-### Nexus-Core Workflow Engine
+### Nexus-Arc Workflow Engine
 
 **File:** `.env` or environment
 
 ```bash
-# Nexus-core workflow integration is mandatory
+# Nexus-arc workflow integration is mandatory
 # (no runtime feature flag)
 ```
 
@@ -176,9 +176,9 @@ biome:
   git_repo: Ghabs95/agents
 
 nexus:
-  agents_dir: ghabs/nexus-core/examples/agents
+  agents_dir: ghabs/nexus-arc/examples/agents
   workspace: ghabs/nexus
-  git_repo: Ghabs95/nexus-core
+  git_repo: Ghabs95/nexus-arc
   # Project-specific AI tool preferences
   ai_tool_preferences:
     Copilot: copilot
@@ -238,10 +238,10 @@ data/
   tracked_issues.json        # Issue tracking
 ```
 
-### Nexus-Core System
+### Nexus-Arc System
 ```
 data/
-  nexus-core-workflows/
+  nexus-arc-workflows/
     workflows/               # Workflow state (JSON)
       casit-agents-123-tier-2-standard.json
       wallible-456-tier-1-simple.json
@@ -266,15 +266,15 @@ Examples:
 
 ### Core-First Support
 
-Workflow orchestration is nexus-core based:
-- Workflow creation, pause/resume, and status use nexus-core
+Workflow orchestration is nexus-arc based:
+- Workflow creation, pause/resume, and status use nexus-arc
 - `/pause` and `/resume` use workflow-state plugin operations
 - StateManager remains for non-workflow app state (tracked issues, approvals, audit)
 
 ### Migration Path
 
 **Phase 1 (Current):** Core-authoritative workflows
-- All workflow operations use nexus-core
+- All workflow operations use nexus-arc
 - Legacy workflow-state fallbacks removed
 
 **Phase 2 (Future):** StateManager reduction
@@ -306,7 +306,7 @@ python examples/nexus_core_integration.py
 ### Live Test (when ready)
 1. Drop a task file in `.github/inbox/`
 2. Watch inbox_processor create issue + workflow
-3. Check `data/nexus-core-workflows/workflows/` for workflow file
+3. Check `data/nexus-arc-workflows/workflows/` for workflow file
 4. Try `/pause <issue#>` in Telegram
 5. Try `/resume <issue#>` in Telegram
 
@@ -343,4 +343,4 @@ legacy workflow fallbacks.
 **Backward compatible:** Partially (app-state compatibility remains)  
 **Status:** ✅ Ready for testing  
 
-The integration is **complete** and **production-ready**. All modified files pass syntax validation. The system now runs with a nexus-core authoritative workflow path.
+The integration is **complete** and **production-ready**. All modified files pass syntax validation. The system now runs with a nexus-arc authoritative workflow path.

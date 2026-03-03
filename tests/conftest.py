@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 # Add runtime src directory to Python path for imports
-src_path = Path(__file__).parent.parent.parent / "nexus-core" / "examples" / "nexus-bot" / "src"
+src_path = Path(__file__).parent.parent.parent / "nexus-arc" / "examples" / "nexus-bot" / "src"
 sys.path.insert(0, str(src_path))
 
 
@@ -24,7 +24,7 @@ def mock_env_vars(monkeypatch, tmp_path):
     project_config_file = tmp_path / "project_config.yaml"
     project_config_file.write_text("""
     nexus:
-        agents_dir: ghabs/nexus-core/examples/agents
+        agents_dir: ghabs/nexus-arc/examples/agents
         workspace: ghabs/nexus
         git_repo: test/repo
     test-project:

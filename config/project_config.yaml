@@ -24,7 +24,7 @@ projects:
     code: nexus
     aliases:
       - nexus core
-      - nexus-core
+      - nexus-arc
 
 # Merge queue behavior (project-level enforcement)
 # review_mode:
@@ -172,28 +172,28 @@ biome:
       docs: {}
 
 nexus:
-  agents_dir: ghabs/nexus-core/examples/agents
+  agents_dir: ghabs/nexus-arc/examples/agents
   workspace: ghabs
-  git_repo: Ghabs95/nexus-core
+  git_repo: Ghabs95/nexus-arc
   git_repos:
-    - Ghabs95/nexus-core
+    - Ghabs95/nexus-arc
     - Ghabs95/nexus
   system_operations:
     default: triage
     chat:
       designer:
-        context_path: ghabs/nexus-core/examples/nexus-bot/docs
+        context_path: ghabs/nexus-arc/examples/nexus-bot/docs
         context_files:
           - AGENTS.md
       triage: {}
       compliance: {}
       writer: {}
   # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
-  workflow_definition_path: ghabs/nexus-core/examples/workflows/enterprise_workflow.yaml
+  workflow_definition_path: ghabs/nexus-arc/examples/workflows/enterprise_workflow.yaml
   # Nexus-specific overrides (inherits global profiles, defines custom preferences)
   ai_tool_preferences:
     triage: {profile: fast, provider: copilot}
-    designer: {profile: reasoning, provider: codex}
+    designer: {profile: reasoning, provider: gemini}
     debug: {profile: fast, provider: copilot}
     developer: {profile: reasoning, provider: auto}
     reviewer: {profile: reasoning, provider: copilot}
