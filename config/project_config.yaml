@@ -36,7 +36,7 @@ merge_queue:
 # Global model profiles and AI tool preferences.
 # model_profiles define concrete model IDs per provider for each profile.
 # ai_tool_preferences map agent_type -> {profile, provider}.
-# provider can be: copilot, gemini, codex, auto.
+# provider can be: copilot, gemini, codex, claude, auto.
 #
 # Architecture:
 # 1. Agent YAML files define: spec.agent_type (e.g., "triage", "debug", "escalation")
@@ -48,16 +48,18 @@ model_profiles:
     copilot: gpt-4o-mini
     gemini: gemini-3.0-flash
     codex: gpt-5-mini
+    claude: claude-3-5-haiku-latest
     # ollama: llama3.1:8b  # Uncomment to enable local fallback
   reasoning:
     copilot: gpt-5.3-codex
     gemini: gemini-3.1-pro
     codex: gpt-5.3-codex
+    claude: claude-sonnet-4-20250514
     # ollama: deepseek-coder-v2:16b  # Uncomment to enable local fallback
 
 profile_provider_priority:
-  fast: [gemini, copilot, codex]
-  reasoning: [codex, copilot, gemini]
+  fast: [gemini, copilot, codex, claude]
+  reasoning: [codex, claude, copilot, gemini]
 
 ai_tool_preferences:
   # Most agents rely on fallback priority (provider: auto)
@@ -106,6 +108,9 @@ case_italia:
       deployer: {}
       designer: {}
       docs: {}
+  access_control:
+    github_users:
+      - Ghabs95
 
 wallible:
   agents_dir: wallible/wlbl-workflow-os/agents
@@ -153,6 +158,11 @@ wallible:
     triage: {profile: fast, provider: auto}
     reviewer: {profile: reasoning, provider: auto}
     docs: {profile: fast, provider: gemini}
+  access_control:
+    gitlab_groups:
+      - wallible
+    gitlab_users:
+      - Ghabs
 
 biome:
   agents_dir: ghabs/agents/bm-agents
@@ -170,6 +180,11 @@ biome:
       deployer: {}
       designer: {}
       docs: {}
+  access_control:
+    github_teams:
+      - mybiohackingdata/developer
+    github_users:
+      - Ghabs95
 
 nexus:
   agents_dir: ghabs/nexus-arc/examples/agents
@@ -201,3 +216,6 @@ nexus:
     deployer: {profile: fast, provider: copilot}
     writer: {profile: fast, provider: auto}
     finalizer: {profile: fast, provider: auto}
+  access_control:
+    github_users:
+      - Ghabs95
