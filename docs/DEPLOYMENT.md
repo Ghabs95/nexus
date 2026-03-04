@@ -53,7 +53,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install Python dependencies
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### 3. Configure Environment Variables
@@ -118,7 +118,7 @@ venv/bin/pytest -v
 
 ```bash
 # Copy service files
-sudo cp nexus-bot.service /etc/systemd/system/
+sudo cp nexus-telegram.service /etc/systemd/system/
 sudo cp nexus-processor.service /etc/systemd/system/
 sudo cp nexus-health.service /etc/systemd/system/  # If using health check
 
@@ -126,12 +126,12 @@ sudo cp nexus-health.service /etc/systemd/system/  # If using health check
 sudo systemctl daemon-reload
 
 # Enable services (start on boot)
-sudo systemctl enable nexus-bot
+sudo systemctl enable nexus-telegram
 sudo systemctl enable nexus-processor
 sudo systemctl enable nexus-health
 
 # Start services
-sudo systemctl start nexus-bot
+sudo systemctl start nexus-telegram
 sudo systemctl start nexus-processor
 sudo systemctl start nexus-health
 ```
@@ -140,7 +140,7 @@ sudo systemctl start nexus-health
 
 ```bash
 # Check status
-systemctl status nexus-bot
+systemctl status nexus-telegram
 systemctl status nexus-processor
 systemctl status nexus-health
 
@@ -181,34 +181,34 @@ curl http://localhost:8080/metrics | python3 -m json.tool
 
 ```bash
 # Real-time logs
-sudo journalctl -u nexus-bot -f
+sudo journalctl -u nexus-telegram -f
 sudo journalctl -u nexus-processor -f
 
 # Last 50 lines
-sudo journalctl -u nexus-bot -n 50
+sudo journalctl -u nexus-telegram -n 50
 sudo journalctl -u nexus-processor -n 50
 
 # Logs since specific time
-sudo journalctl -u nexus-bot --since "1 hour ago"
-sudo journalctl -u nexus-bot --since "2026-02-16 10:00:00"
+sudo journalctl -u nexus-telegram --since "1 hour ago"
+sudo journalctl -u nexus-telegram --since "2026-02-16 10:00:00"
 
 # Filter by priority
-sudo journalctl -u nexus-bot -p err  # Errors only
+sudo journalctl -u nexus-telegram -p err  # Errors only
 ```
 
 ### Service Management
 
 ```bash
 # Restart services
-sudo systemctl restart nexus-bot
+sudo systemctl restart nexus-telegram
 sudo systemctl restart nexus-processor
 
 # Stop services
-sudo systemctl stop nexus-bot
+sudo systemctl stop nexus-telegram
 sudo systemctl stop nexus-processor
 
 # View service status
-systemctl status nexus-bot --no-pager -l
+systemctl status nexus-telegram --no-pager -l
 ```
 
 ### Database Backups
@@ -236,7 +236,7 @@ echo "Backup created: $BACKUP_DIR"
 
 ```bash
 # Check logs for errors
-sudo journalctl -u nexus-bot -n 100 --no-pager
+sudo journalctl -u nexus-telegram -n 100 --no-pager
 
 # Common issues:
 # 1. Missing environment variables
@@ -262,7 +262,7 @@ ps aux | grep python | grep nexus
 pkill -f "copilot.*issues/"
 
 # Restart services
-sudo systemctl restart nexus-bot nexus-processor
+sudo systemctl restart nexus-telegram nexus-processor
 ```
 
 ### Rate Limiting Issues
@@ -273,7 +273,7 @@ cat /home/ubuntu/git/ghabs/nexus/data/rate_limits.json | python3 -m json.tool
 
 # Reset rate limits (if needed)
 rm /home/ubuntu/git/ghabs/nexus/data/rate_limits.json
-sudo systemctl restart nexus-bot
+sudo systemctl restart nexus-telegram
 ```
 
 ### GitHub CLI Authentication Expired
@@ -286,7 +286,7 @@ gh auth login
 gh auth status
 
 # Restart services
-sudo systemctl restart nexus-bot nexus-processor
+sudo systemctl restart nexus-telegram nexus-processor
 ```
 
 ## Performance Tuning
@@ -346,7 +346,7 @@ Edit rate limit thresholds in `src/rate_limiter.py`:
 cd /home/ubuntu/git/ghabs/nexus
 
 # Stop services
-sudo systemctl stop nexus-bot nexus-processor
+sudo systemctl stop nexus-telegram nexus-processor
 
 # Backup current state
 cp -r data data.backup.$(date +%Y%m%d)
@@ -356,23 +356,23 @@ git pull
 
 # Update dependencies
 source venv/bin/activate
-pip install -r requirements.txt --upgrade
+pip install -e . --upgrade
 
 # Run tests
 venv/bin/pytest -v
 
 # Restart services
-sudo systemctl start nexus-bot nexus-processor
+sudo systemctl start nexus-telegram nexus-processor
 
 # Verify
-systemctl status nexus-bot nexus-processor
+systemctl status nexus-telegram nexus-processor
 ```
 
 ### Rollback (if needed)
 
 ```bash
 # Stop services
-sudo systemctl stop nexus-bot nexus-processor
+sudo systemctl stop nexus-telegram nexus-processor
 
 # Restore previous version
 git reset --hard <previous-commit-hash>
@@ -382,7 +382,7 @@ rm -rf data
 mv data.backup.20260216 data
 
 # Restart services
-sudo systemctl start nexus-bot nexus-processor
+sudo systemctl start nexus-telegram nexus-processor
 ```
 
 ## Monitoring Dashboard (Optional)
@@ -427,7 +427,7 @@ curl http://localhost:8080/metrics
 ## Support
 
 For issues or questions:
-1. Check logs: `sudo journalctl -u nexus-bot -n 100`
+1. Check logs: `sudo journalctl -u nexus-telegram -n 100`
 2. Run diagnostics: `venv/bin/pytest -v`
 3. Review [README.md](README.md) for command reference
 4. Check [ARCHITECTURE.md](ARCHITECTURE.md) for system design

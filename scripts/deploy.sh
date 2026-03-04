@@ -4,7 +4,7 @@ set -euo pipefail
 
 NEXUS_DIR="/home/ubuntu/git/ghabs/nexus"
 ENV_FILE="$NEXUS_DIR/.env"
-SYSTEMD_UNITS=("nexus-bot" "nexus-processor" "nexus-webhook" "nexus-health")
+SYSTEMD_UNITS=("nexus-telegram" "nexus-processor" "nexus-webhook" "nexus-health")
 COMPOSE_SERVICES=("bot" "processor" "webhook" "health")
 
 ACTION="up"
@@ -267,7 +267,7 @@ run_systemd() {
       fi
       ;;
     logs)
-      sudo journalctl -u nexus-bot -u nexus-processor -u nexus-webhook -u nexus-health -f
+      sudo journalctl -u nexus-telegram -u nexus-processor -u nexus-webhook -u nexus-health -f
       ;;
   esac
 }

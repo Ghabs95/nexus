@@ -98,7 +98,7 @@ python3 -m venv venv
 
 # Activate and install dependencies
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 
 # Verify installation
 python3 -c "from config import WORKFLOW_CHAIN; print('✅ Imports OK')"
@@ -178,7 +178,7 @@ find /home/ubuntu/git/ghabs/agents -type d -name inbox -o -type d -name active
 cd /home/ubuntu/git/ghabs/nexus
 
 # Copy service files
-sudo cp nexus-bot.service /etc/systemd/system/
+sudo cp nexus-telegram.service /etc/systemd/system/
 sudo cp nexus-health.service /etc/systemd/system/
 sudo cp nexus-processor.service /etc/systemd/system/
 sudo cp nexus-webhook.service /etc/systemd/system/
@@ -187,7 +187,7 @@ sudo cp nexus-webhook.service /etc/systemd/system/
 sudo systemctl daemon-reload
 
 # Enable services (start on boot)
-sudo systemctl enable nexus-bot.service
+sudo systemctl enable nexus-telegram.service
 sudo systemctl enable nexus-health.service
 sudo systemctl enable nexus-processor.service
 sudo systemctl enable nexus-webhook.service
@@ -196,13 +196,13 @@ sudo systemctl enable nexus-webhook.service
 ### 3.2 Start Services
 
 ```bash
-sudo systemctl start nexus-bot.service
+sudo systemctl start nexus-telegram.service
 sudo systemctl start nexus-health.service
 sudo systemctl start nexus-processor.service
 sudo systemctl start nexus-webhook.service
 
 # Verify all running
-systemctl status nexus-bot.service nexus-health.service nexus-processor.service nexus-webhook.service --no-pager
+systemctl status nexus-telegram.service nexus-health.service nexus-processor.service nexus-webhook.service --no-pager
 ```
 
 ### 3.3 Setup Log Rotation
@@ -292,7 +292,7 @@ conv_handler = ConversationHandler(
 
 Then restart:
 ```bash
-sudo systemctl restart nexus-bot.service
+sudo systemctl restart nexus-telegram.service
 ```
 
 ### 5.2 Fix Log File Permissions
@@ -360,7 +360,7 @@ curl -s http://158.180.233.4:8081/health
 
 ```bash
 # Telegram bot
-sudo journalctl -u nexus-bot.service -f
+sudo journalctl -u nexus-telegram.service -f
 
 # Webhook server
 sudo journalctl -u nexus-webhook.service -f
@@ -413,8 +413,8 @@ python3 -c "import telegram; import flask"
 cat /home/ubuntu/git/ghabs/nexus/.env
 
 # 4. Review service logs
-sudo systemctl status nexus-bot.service --no-pager -l
-sudo journalctl -u nexus-bot.service -n 100
+sudo systemctl status nexus-telegram.service --no-pager -l
+sudo journalctl -u nexus-telegram.service -n 100
 ```
 
 ### GitHub CLI Not Authenticated

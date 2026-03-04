@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-UNITS=("nexus-bot" "nexus-processor" "nexus-webhook" "nexus-health")
+UNITS=("nexus-telegram" "nexus-processor" "nexus-webhook" "nexus-health")
 FAILED=0
 
 check_unit() {

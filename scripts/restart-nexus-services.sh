@@ -2,7 +2,7 @@
 set -euo pipefail
 
 services=(
-  nexus-bot.service
+  nexus-telegram.service
   nexus-processor.service
   nexus-webhook.service
   nexus-health.service

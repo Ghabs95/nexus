@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="/etc/systemd/system"
 
 services=(
-  nexus-bot.service
+  nexus-telegram.service
+  nexus-discord.service
   nexus-processor.service
   nexus-webhook.service
   nexus-health.service

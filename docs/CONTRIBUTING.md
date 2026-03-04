@@ -23,7 +23,7 @@ python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -e .
 
 # Install development dependencies
 pip install pytest pytest-mock pytest-asyncio pytest-cov black flake8
@@ -165,7 +165,7 @@ nexus/
 ├── ARCHITECTURE.md           # System design
 ├── DEPLOYMENT.md             # Deployment guide
 ├── CONTRIBUTING.md           # This file
-└── requirements.txt          # Python dependencies
+└── pyproject.toml          # Project dependencies and metadata
 ```
 
 ## Making Changes

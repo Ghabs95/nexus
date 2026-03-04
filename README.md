@@ -89,7 +89,7 @@ Step through an interactive menu:
 
 3. **Install Python dependencies**:
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
    
    This installs all required packages including:
@@ -154,29 +154,29 @@ For constant running with auto-restart:
 
 1. Copy the service file:
    ```bash
-   sudo cp nexus-bot.service /etc/systemd/system/
+   sudo cp nexus-telegram.service /etc/systemd/system/
    ```
 
 2. Enable and start the service:
    ```bash
-   sudo systemctl enable nexus-bot
-   sudo systemctl start nexus-bot
+   sudo systemctl enable nexus-telegram
+   sudo systemctl start nexus-telegram
    ```
 
 3. Check status:
    ```bash
-   sudo systemctl status nexus-bot
+   sudo systemctl status nexus-telegram
    ```
 
 4. View logs:
    ```bash
-   sudo journalctl -u nexus-bot -f
+   sudo journalctl -u nexus-telegram -f
    ```
 
 Stop the service:
 
    ```bash
-   sudo systemctl stop nexus-bot
+   sudo systemctl stop nexus-telegram
    ```
 
 ### Inbox Processor Service (Optional)
@@ -377,7 +377,7 @@ PROJECT_CONFIG_PATH=config/project_config.yaml    # Per-project settings
 ```bash
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 python src/telegram_bot.py
 ```
 
@@ -385,8 +385,8 @@ python src/telegram_bot.py
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now nexus-bot.service
-sudo systemctl status nexus-bot.service
+sudo systemctl enable --now nexus-telegram.service
+sudo systemctl status nexus-telegram.service
 ```
 
 - Common environment variables (set in `.env`):
@@ -441,13 +441,13 @@ nexus/
 │   ├── inbox_processor.log       # Processor service logs
 │   ├── telegram_bot.log          # Bot service logs
 │   └── webhook.log               # Webhook server logs
-├── requirements.txt              # Python dependencies
+├── pyproject.toml               # Project dependencies and metadata
 ├── logrotate.conf                # Log rotation configuration (7-day retention)
 ├── README.md                     # This file
 ├── .gitignore                    # Git ignore rules
 ├── setup-webhook.sh              # Webhook setup script
 ├── WEBHOOK-REFERENCE.md          # Webhook operations guide
-├── nexus-bot.service             # Systemd service file (Telegram bot)
+├── nexus-telegram.service             # Systemd service file (Telegram bot)
 ├── nexus-processor.service       # Inbox processor service file
 ├── nexus-webhook.service         # GitHub webhook server service file
 └── nexus-health.service          # Health check endpoint service file
@@ -737,7 +737,7 @@ Issue closed or marked done
 
 ## Requirements
 
-See [requirements.txt](requirements.txt) for all dependencies.
+Dependencies are declared in [pyproject.toml](pyproject.toml).
 
 ## Troubleshooting
 
@@ -769,11 +769,11 @@ See [requirements.txt](requirements.txt) for all dependencies.
 ### Workflow Control Issues
 
 - **Can't pause/resume issue**: Verify issue number is correct and exists in GitHub. Check data/workflow_state.json.
-- **Workflow state not persisting**: Restart services after changes: `sudo systemctl restart nexus-bot nexus-processor`
+- **Workflow state not persisting**: Restart services after changes: `sudo systemctl restart nexus-telegram nexus-processor`
 
 ### Service Issues
 
-- **Service won't start**: Check `sudo journalctl -u nexus-bot -n 50` for startup errors. Verify all imports work with `cd src && python3 -c "import config, state_manager, agent_monitor"`
+- **Service won't start**: Check `sudo journalctl -u nexus-telegram -n 50` for startup errors. Verify all imports work with `cd src && python3 -c "import config, state_manager, agent_monitor"`
 - **Process crashes after restart**: Check file permissions on data/ directory: `chmod 755 data/`
 - **High memory usage**: Check for stuck processes with `ps aux | grep copilot`. Kill orphaned processes with `pkill -f "copilot"`
 

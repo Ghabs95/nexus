@@ -545,5 +545,5 @@ Other potential improvements:
 
 - [README.md](README.md) - User guide and command reference
 - [DEPLOYMENT.md](DEPLOYMENT.md) - Production deployment guide
-- [requirements.txt](requirements.txt) - Python dependencies
+- [pyproject.toml](pyproject.toml) - Project dependencies
 - [tests/](tests/) - Unit test suite
