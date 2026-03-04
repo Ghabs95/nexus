@@ -163,6 +163,8 @@ wallible:
       - wallible
     gitlab_users:
       - Ghabs
+      - federico.vanti
+      - simprecicchiani
 
 biome:
   agents_dir: ghabs/agents/bm-agents
@@ -185,6 +187,7 @@ biome:
       - mybiohackingdata/developer
     github_users:
       - Ghabs95
+      - lorerave85
 
 nexus:
   agents_dir: ghabs/nexus-arc/examples/agents
