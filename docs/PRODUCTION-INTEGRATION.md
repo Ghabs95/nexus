@@ -179,6 +179,18 @@ nexus:
   agents_dir: ghabs/nexus-arc/examples/agents
   workspace: ghabs/nexus
   git_repo: Ghabs95/nexus-arc
+  git_repos:
+    - Ghabs95/nexus-arc
+    - Ghabs95/nexus
+  git_branches:
+    default: main
+    repos:
+      Ghabs95/nexus: develop
+  git_sync:
+    on_workflow_start: true
+    network_auth_retries: 3
+    retry_backoff_seconds: 5
+    decision_timeout_seconds: 120
   # Project-specific AI tool preferences
   ai_tool_preferences:
     Copilot: copilot
@@ -196,6 +208,12 @@ nexus:
   - `git_repo` - Primary repository slug in format `owner/repo` (GitHub) or `group/repo` (GitLab)
   - `git_repos` (optional) - Additional repositories for multi-repo projects
     - If omitted, Nexus attempts workspace repo auto-discovery from local `git remote origin` URLs
+  - `git_branches` (optional) - Base branch policy for each project
+    - `default`: fallback base branch for all repos in the project
+    - `repos`: per-repo overrides keyed by exact repo slug
+  - `git_sync` (optional) - Workflow-start sync settings
+    - `on_workflow_start`: enable worktree-safe `git fetch` before first agent launch
+    - `network_auth_retries`, `retry_backoff_seconds`, `decision_timeout_seconds`: retry and decision controls
   - `workflow_definition_path` (optional) - Project-specific override of global workflow path
   - `ai_tool_preferences` (optional) - Project-specific override of global AI tool preferences
 

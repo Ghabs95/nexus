@@ -124,6 +124,15 @@ wallible:
     - wallible/wlbl-business-os
     - wallible/wlbl-marketing-os
     - wallible/wlbl-workflow-os
+  git_branches:
+    default: develop
+    repos:
+      wallible/wlbl-workflow-os: main
+  git_sync:
+    on_workflow_start: true
+    network_auth_retries: 3
+    retry_backoff_seconds: 5
+    decision_timeout_seconds: 120
   system_operations:
     default: triage
     launch: triage
@@ -196,6 +205,15 @@ nexus:
   git_repos:
     - Ghabs95/nexus-arc
     - Ghabs95/nexus
+  git_branches:
+    default: develop
+    repos:
+      Ghabs95/nexus: main
+  git_sync:
+    on_workflow_start: true
+    network_auth_retries: 3
+    retry_backoff_seconds: 5
+    decision_timeout_seconds: 120
   system_operations:
     default: triage
     chat:
