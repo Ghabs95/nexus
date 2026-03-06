@@ -1,81 +1,195 @@
-name: nexus-prod
+name: nexus
+
+x-common: &common
+  working_dir: /app
+  restart: unless-stopped
+  env_file:
+    - ./.env
+  environment:
+    PROJECT_CONFIG_PATH: /app/config/project_config.yaml
+    PYTHONUNBUFFERED: "1"
+    PYTHONPATH: /app/src
+    HOME: /home/ubuntu
+    NEXUS_STORAGE_BACKEND: ${NEXUS_STORAGE_BACKEND:-postgres}
+    NEXUS_STORAGE_DSN: ${NEXUS_STORAGE_DSN:-postgresql://nexus:nexus@postgres:5432/nexus}
+    REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+    - ./config:/app/config:ro
+    - /home/ubuntu/.copilot:/home/ubuntu/.copilot
+    - /home/ubuntu/.gemini:/home/ubuntu/.gemini
+    - /home/ubuntu/.codex:/home/ubuntu/.codex
+    - /home/ubuntu/.claude:/home/ubuntu/.claude
+    - ${BASE_DIR:-/home/ubuntu/git}:${BASE_DIR:-/home/ubuntu/git}
 
 services:
   bot:
+    <<: *common
+    profiles: ["local"]
     build:
-      context: ../nexus-arc/examples/nexus-bot
-      dockerfile: Dockerfile
+      context: ../nexus-arc
+      dockerfile: examples/nexus-bot/Dockerfile
     image: nexus-bot:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["nexus-bot"]
-    working_dir: /app
-    restart: unless-stopped
-    env_file:
-      - ./.env
-    environment:
-      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
-      PYTHONUNBUFFERED: "1"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./config:/app/config:ro
-      - ${BASE_DIR:-/home/ubuntu/git}:${BASE_DIR:-/home/ubuntu/git}
 
   processor:
+    <<: *common
+    profiles: ["local"]
     image: nexus-bot:local
     depends_on:
-      - bot
+      bot:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: ["nexus-processor"]
-    working_dir: /app
-    restart: unless-stopped
-    env_file:
-      - ./.env
-    environment:
-      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
-      PYTHONUNBUFFERED: "1"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./config:/app/config:ro
-      - ${BASE_DIR:-/home/ubuntu/git}:${BASE_DIR:-/home/ubuntu/git}
 
   webhook:
-    image: nexus-bot:local
-    command: ["nexus-webhook"]
-    working_dir: /app
-    restart: unless-stopped
-    env_file:
-      - ./.env
-    environment:
-      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
-      WEBHOOK_PORT: "8081"
-      PYTHONUNBUFFERED: "1"
-    ports:
-      - "8081:8081"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./config:/app/config:ro
-      - ${BASE_DIR:-/home/ubuntu/git}:${BASE_DIR:-/home/ubuntu/git}
-
-  health:
+    <<: *common
+    profiles: ["local"]
     image: nexus-bot:local
     depends_on:
-      - bot
-      - processor
-    command: ["nexus-health"]
-    working_dir: /app
-    restart: unless-stopped
-    env_file:
-      - ./.env
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["nexus-webhook"]
     environment:
       PROJECT_CONFIG_PATH: /app/config/project_config.yaml
+      PYTHONUNBUFFERED: "1"
+      WEBHOOK_PORT: "8081"
+    ports:
+      - "8081:8081"
+
+  health:
+    <<: *common
+    profiles: ["local"]
+    image: nexus-bot:local
+    depends_on:
+      bot:
+        condition: service_started
+      processor:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["nexus-health"]
+    environment:
+      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
+      PYTHONUNBUFFERED: "1"
       HEALTH_CHECK_PORT: "8080"
       HEALTH_CHECK_HOST: "0.0.0.0"
-      PYTHONUNBUFFERED: "1"
     ports:
       - "8080:8080"
+
+  bot-prod:
+    <<: *common
+    profiles: ["prod"]
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["nexus-bot"]
+
+  processor-prod:
+    <<: *common
+    profiles: ["prod"]
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+    depends_on:
+      bot-prod:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["nexus-processor"]
+
+  webhook-prod:
+    <<: *common
+    profiles: ["prod"]
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["nexus-webhook"]
+    environment:
+      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
+      PYTHONUNBUFFERED: "1"
+      WEBHOOK_PORT: "8081"
+    ports:
+      - "8081:8081"
+
+  health-prod:
+    <<: *common
+    profiles: ["prod"]
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+    depends_on:
+      bot-prod:
+        condition: service_started
+      processor-prod:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["nexus-health"]
+    environment:
+      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
+      PYTHONUNBUFFERED: "1"
+      HEALTH_CHECK_PORT: "8080"
+      HEALTH_CHECK_HOST: "0.0.0.0"
+    ports:
+      - "8080:8080"
+
+  postgres:
+    profiles: ["prod", "local"]
+    image: postgres:15-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus}
+      POSTGRES_DB: ${POSTGRES_DB:-nexus}
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./config:/app/config:ro
-      - ${BASE_DIR:-/home/ubuntu/git}:${BASE_DIR:-/home/ubuntu/git}
+      - nexus-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    profiles: ["prod", "local"]
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - nexus-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  nexus-pg-data:
+  nexus-redis-data:

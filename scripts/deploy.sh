@@ -4,14 +4,23 @@ set -euo pipefail
 
 NEXUS_DIR="/home/ubuntu/git/ghabs/nexus"
 ENV_FILE="$NEXUS_DIR/.env"
+LOGGING_COMPOSE_FILE="/home/ubuntu/git/ghabs/vsc-server-infra/logging/docker-compose.yml"
 SYSTEMD_UNITS=("nexus-telegram" "nexus-processor" "nexus-webhook" "nexus-health")
 COMPOSE_SERVICES=("bot" "processor" "webhook" "health")
+COMPOSE_PROFILE="${COMPOSE_PROFILE:-local}"
+COMPOSE_BUILD=true
+OBSERVABILITY_ENABLED="${OBSERVABILITY_ENABLED:-false}"
+INFRA_ENABLED="${INFRA_ENABLED:-false}"
 
 ACTION="up"
 QUIET=false
 ACTION_SET=false
 
 CLI_DEPLOY_TYPE=""
+CLI_COMPOSE_PROFILE=""
+CLI_COMPOSE_BUILD=""
+CLI_OBSERVABILITY=""
+CLI_INFRA=""
 CLI_NEXUS_RUNTIME_DIR=""
 CLI_NEXUS_CORE_STORAGE_DIR=""
 CLI_LOGS_DIR=""
@@ -23,6 +32,12 @@ Usage: $0 [up|down|restart|status|logs] [options]
 Options:
   --quiet                             Only valid with status
   --deploy-type <compose|systemd>
+  --docker                            Alias for --deploy-type compose
+  --systemd                           Alias for --deploy-type systemd
+  --compose-profile <local|prod>      Compose profile (default: local)
+  --observability / --no-observability Include Loki/Promtail/Grafana compose stack
+  --infra                             Include Postgres/Redis services
+  --build / --no-build                Compose up/restart image build behavior
   --nexus-runtime-dir <path>
   --nexus-core-storage-dir <path>
   --logs-dir <path>
@@ -152,6 +167,43 @@ parse_args() {
         CLI_DEPLOY_TYPE="${1#*=}"
         shift
         ;;
+      --docker)
+        CLI_DEPLOY_TYPE="compose"
+        shift
+        ;;
+      --systemd)
+        CLI_DEPLOY_TYPE="systemd"
+        shift
+        ;;
+      --compose-profile|--profile)
+        [[ $# -ge 2 ]] || die "Missing value for --compose-profile"
+        CLI_COMPOSE_PROFILE="$2"
+        shift 2
+        ;;
+      --compose-profile=*|--profile=*)
+        CLI_COMPOSE_PROFILE="${1#*=}"
+        shift
+        ;;
+      --build)
+        CLI_COMPOSE_BUILD="true"
+        shift
+        ;;
+      --no-build)
+        CLI_COMPOSE_BUILD="false"
+        shift
+        ;;
+      --observability)
+        CLI_OBSERVABILITY="true"
+        shift
+        ;;
+      --no-observability)
+        CLI_OBSERVABILITY="false"
+        shift
+        ;;
+      --infra)
+        CLI_INFRA="true"
+        shift
+        ;;
       --nexus-runtime-dir)
         [[ $# -ge 2 ]] || die "Missing value for --nexus-runtime-dir"
         CLI_NEXUS_RUNTIME_DIR="$2"
@@ -204,7 +256,7 @@ ensure_runtime_dirs() {
 
 compose_quiet_status() {
   local running
-  running="$(docker compose ps --services --filter status=running 2>/dev/null || true)"
+  running="$("${COMPOSE_CMD[@]}" ps --services --filter status=running 2>/dev/null || true)"
   for service in "${COMPOSE_SERVICES[@]}"; do
     if grep -Fxq "$service" <<< "$running"; then
       echo "$service: active"
@@ -215,27 +267,52 @@ compose_quiet_status() {
 }
 
 run_compose() {
-  cd "$NEXUS_DIR"
+  local up_args=(-d)
+  local app_services=()
+  local target_services=()
+  [[ "$COMPOSE_BUILD" == "true" ]] && up_args+=(--build)
+
+  COMPOSE_CMD=(docker compose -f "$NEXUS_DIR/docker-compose.yml")
+  if [[ "$OBSERVABILITY_ENABLED" == "true" ]]; then
+    [[ -f "$LOGGING_COMPOSE_FILE" ]] || die "Missing logging compose file: $LOGGING_COMPOSE_FILE"
+    COMPOSE_CMD+=(-f "$LOGGING_COMPOSE_FILE")
+  fi
+  COMPOSE_CMD+=(--profile "$COMPOSE_PROFILE")
+
+  if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
+    app_services=("bot-prod" "processor-prod" "webhook-prod" "health-prod")
+  else
+    app_services=("bot" "processor" "webhook" "health")
+  fi
+
+  target_services=("${app_services[@]}")
+  if [[ "$INFRA_ENABLED" == "true" ]]; then
+    target_services+=("postgres" "redis")
+  fi
+  if [[ "$OBSERVABILITY_ENABLED" == "true" ]]; then
+    target_services+=("loki" "promtail" "grafana")
+  fi
+  COMPOSE_SERVICES=("${target_services[@]}")
   case "$ACTION" in
     up)
-      docker compose up -d --build
+      "${COMPOSE_CMD[@]}" up "${up_args[@]}" "${target_services[@]}"
       ;;
     down)
-      docker compose down
+      "${COMPOSE_CMD[@]}" stop "${target_services[@]}" || true
+      "${COMPOSE_CMD[@]}" rm -f "${target_services[@]}" || true
       ;;
     restart)
-      docker compose down
-      docker compose up -d --build
+      "${COMPOSE_CMD[@]}" up "${up_args[@]}" --force-recreate "${target_services[@]}"
       ;;
     status)
       if [[ "$QUIET" == "true" ]]; then
         compose_quiet_status
       else
-        docker compose ps
+        "${COMPOSE_CMD[@]}" ps
       fi
       ;;
     logs)
-      docker compose logs -f bot processor webhook health
+      "${COMPOSE_CMD[@]}" logs -f "${COMPOSE_SERVICES[@]}"
       ;;
   esac
 }
@@ -277,11 +354,20 @@ parse_args "$@"
 [[ -f "$ENV_FILE" ]] || die "Missing $ENV_FILE (create from $NEXUS_DIR/.env.example)"
 
 DOTENV_DEPLOY_TYPE="$(read_env_var "DEPLOY_TYPE")"
+DOTENV_COMPOSE_PROFILE="$(read_env_var "COMPOSE_PROFILE")"
+DOTENV_OBSERVABILITY="$(read_env_var "OBSERVABILITY_ENABLED")"
+DOTENV_INFRA="$(read_env_var "INFRA_ENABLED")"
 DOTENV_NEXUS_RUNTIME_DIR="$(read_env_var "NEXUS_RUNTIME_DIR")"
 DOTENV_NEXUS_CORE_STORAGE_DIR="$(read_env_var "NEXUS_CORE_STORAGE_DIR")"
 DOTENV_LOGS_DIR="$(read_env_var "LOGS_DIR")"
 
 DEPLOY_TYPE="$(resolve_value "DEPLOY_TYPE" "$CLI_DEPLOY_TYPE" "$DOTENV_DEPLOY_TYPE" "compose")"
+COMPOSE_PROFILE="$(resolve_value "COMPOSE_PROFILE" "$CLI_COMPOSE_PROFILE" "$DOTENV_COMPOSE_PROFILE" "$COMPOSE_PROFILE")"
+OBSERVABILITY_ENABLED="$(resolve_value "OBSERVABILITY_ENABLED" "$CLI_OBSERVABILITY" "$DOTENV_OBSERVABILITY" "$OBSERVABILITY_ENABLED")"
+INFRA_ENABLED="$(resolve_value "INFRA_ENABLED" "$CLI_INFRA" "$DOTENV_INFRA" "$INFRA_ENABLED")"
+if [[ -n "$CLI_COMPOSE_BUILD" ]]; then
+  COMPOSE_BUILD="$CLI_COMPOSE_BUILD"
+fi
 NEXUS_RUNTIME_DIR="$(resolve_value "NEXUS_RUNTIME_DIR" "$CLI_NEXUS_RUNTIME_DIR" "$DOTENV_NEXUS_RUNTIME_DIR" "/var/lib/nexus")"
 NEXUS_CORE_STORAGE_DIR="$(resolve_value "NEXUS_CORE_STORAGE_DIR" "$CLI_NEXUS_CORE_STORAGE_DIR" "$DOTENV_NEXUS_CORE_STORAGE_DIR" "$NEXUS_RUNTIME_DIR/nexus-arc")"
 LOGS_DIR="$(resolve_value "LOGS_DIR" "$CLI_LOGS_DIR" "$DOTENV_LOGS_DIR" "/var/log/nexus")"
@@ -289,6 +375,24 @@ NEXUS_STATE_DIR="$NEXUS_RUNTIME_DIR/state"
 
 case "$DEPLOY_TYPE" in
   compose)
+    case "$COMPOSE_PROFILE" in
+      local|prod) ;;
+      *)
+        die "Invalid COMPOSE_PROFILE=$COMPOSE_PROFILE (expected local or prod)"
+        ;;
+    esac
+    case "$OBSERVABILITY_ENABLED" in
+      true|false) ;;
+      *)
+        die "Invalid OBSERVABILITY_ENABLED=$OBSERVABILITY_ENABLED (expected true or false)"
+        ;;
+    esac
+    case "$INFRA_ENABLED" in
+      true|false) ;;
+      *)
+        die "Invalid INFRA_ENABLED=$INFRA_ENABLED (expected true or false)"
+        ;;
+    esac
     run_compose
     ;;
   systemd)

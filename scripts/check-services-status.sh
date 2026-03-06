@@ -1,32 +1,100 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-SERVICES=(
-  nexus-telegram.service
-  nexus-discord.service
-  nexus-processor.service
-  nexus-webhook.service
-  nexus-health.service
-)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_SCRIPT="${SCRIPT_DIR}/deploy.sh"
 
-if ! command -v systemctl >/dev/null 2>&1; then
-  echo "Error: systemctl is not available on this host."
-  exit 2
+DEPLOY_TYPE="${DEPLOY_TYPE:-compose}"
+COMPOSE_PROFILE="${COMPOSE_PROFILE:-local}"
+OBSERVABILITY="${OBSERVABILITY_ENABLED:-false}"
+INFRA="${INFRA_ENABLED:-false}"
+QUIET="false"
+
+usage() {
+  cat <<USAGE
+Usage: $0 [options]
+
+Options:
+  --docker                    Use Docker Compose deployment
+  --systemd                   Use systemd deployment
+  --compose-profile <profile> Compose profile (local|prod), default: local
+  --observability / --no-observability Include Loki/Promtail/Grafana stack (compose only)
+  --infra                    Include Postgres/Redis stack (compose only)
+  --quiet                     Compact status output
+  -h, --help
+USAGE
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --docker)
+      DEPLOY_TYPE="compose"
+      shift
+      ;;
+    --systemd)
+      DEPLOY_TYPE="systemd"
+      shift
+      ;;
+    --compose-profile|--profile)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
+      COMPOSE_PROFILE="$2"
+      shift 2
+      ;;
+    --compose-profile=*|--profile=*)
+      COMPOSE_PROFILE="${1#*=}"
+      shift
+      ;;
+    --observability)
+      OBSERVABILITY="true"
+      shift
+      ;;
+    --no-observability)
+      OBSERVABILITY="false"
+      shift
+      ;;
+    --infra)
+      INFRA="true"
+      shift
+      ;;
+    --quiet)
+      QUIET="true"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ ! -x "$DEPLOY_SCRIPT" ]]; then
+  echo "Missing deploy script: $DEPLOY_SCRIPT" >&2
+  exit 1
 fi
 
-printf "%-28s %-10s %-10s %s\n" "SERVICE" "ACTIVE" "ENABLED" "DETAIL"
-printf "%-28s %-10s %-10s %s\n" "-------" "------" "-------" "------"
+if [[ "$DEPLOY_TYPE" == "compose" ]]; then
+  OBS_ARGS=()
+  if [[ "$OBSERVABILITY" == "true" ]]; then
+    OBS_ARGS+=(--observability)
+  else
+    OBS_ARGS+=(--no-observability)
+  fi
+  INFRA_ARGS=()
+  if [[ "$INFRA" == "true" ]]; then
+    INFRA_ARGS+=(--infra)
+  fi
+  if [[ "$QUIET" == "true" ]]; then
+    exec "$DEPLOY_SCRIPT" status --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" --quiet
+  fi
+  exec "$DEPLOY_SCRIPT" status --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}"
+fi
 
-for svc in "${SERVICES[@]}"; do
-  active="$(systemctl is-active "$svc" 2>/dev/null || true)"
-  enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
-  detail="$(systemctl show "$svc" --property=SubState --property=Result --no-pager 2>/dev/null || true)"
-  detail="$(echo "$detail" | tr '\n' ' ' | sed 's/ $//')"
-
-  [[ -z "$active" ]] && active="unknown"
-  [[ -z "$enabled" ]] && enabled="unknown"
-  [[ -z "$detail" ]] && detail="not found"
-
-  printf "%-28s %-10s %-10s %s\n" "$svc" "$active" "$enabled" "$detail"
-done
+if [[ "$QUIET" == "true" ]]; then
+  exec "$DEPLOY_SCRIPT" status --systemd --quiet
+fi
+exec "$DEPLOY_SCRIPT" status --systemd
