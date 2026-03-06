@@ -190,7 +190,7 @@ biome:
     - mybiohackingdata/data_api
     # - mybiohackingdata/food
     # - mybiohackingdata/chatbot_graph
-    - mybiohackingdata/wellness-literature
+    - mybiohackingdata/biome-literature
   git_branches:
     default: develop
     repos:
