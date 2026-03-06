@@ -130,6 +130,8 @@ wallible:
       wallible/wlbl-workflow-os: main
   git_sync:
     on_workflow_start: true
+    bootstrap_missing_workspace: false
+    bootstrap_missing_repos: true
     network_auth_retries: 3
     retry_backoff_seconds: 5
     decision_timeout_seconds: 120
@@ -176,21 +178,39 @@ wallible:
       - simprecicchiani
 
 biome:
-  agents_dir: ghabs/agents/bm-agents
+  agents_dir: biome/workflow-os/agents
+  workflow_definition_path: biome/workflow-os/workflows/master.yaml
   workspace: biome
-  git_repo: Ghabs95/agents
+  git_platform: github
+  git_repo: mybiohackingdata/workflow-os
+  git_repos:
+    - mybiohackingdata/backend
+    - mybiohackingdata/integration
+    - mybiohackingdata/back-office
+    - mybiohackingdata/data_api
+    # - mybiohackingdata/food
+    # - mybiohackingdata/chatbot_graph
+    - mybiohackingdata/wellness-literature
+  git_branches:
+    default: develop
+    repos:
+      mybiohackingdata/workflow-os: main
+  git_sync:
+    on_workflow_start: true
+    bootstrap_missing_workspace: true
+    bootstrap_missing_repos: true
+    network_auth_retries: 3
+    retry_backoff_seconds: 5
+    decision_timeout_seconds: 120
   system_operations:
     default: triage
+    launch: triage
     chat:
-      business: {}
-      marketing: {}
-      triage: {}
-      developer: {}
-      reviewer: {}
-      compliance: {}
-      deployer: {}
-      designer: {}
-      docs: {}
+      biohacker:
+        context_path: wellness-literature
+        context_files:
+          - AGENTS.md
+          - README.md
   access_control:
     github_teams:
       - mybiohackingdata/developer
@@ -211,6 +231,8 @@ nexus:
       Ghabs95/nexus: main
   git_sync:
     on_workflow_start: true
+    bootstrap_missing_workspace: false
+    bootstrap_missing_repos: false
     network_auth_retries: 3
     retry_backoff_seconds: 5
     decision_timeout_seconds: 120

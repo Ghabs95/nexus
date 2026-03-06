@@ -188,6 +188,8 @@ nexus:
       Ghabs95/nexus: develop
   git_sync:
     on_workflow_start: true
+    bootstrap_missing_workspace: false
+    bootstrap_missing_repos: false
     network_auth_retries: 3
     retry_backoff_seconds: 5
     decision_timeout_seconds: 120
@@ -213,6 +215,8 @@ nexus:
     - `repos`: per-repo overrides keyed by exact repo slug
   - `git_sync` (optional) - Workflow-start sync settings
     - `on_workflow_start`: enable worktree-safe `git fetch` before first agent launch
+    - `bootstrap_missing_workspace`: when true, create missing workspace directory before sync
+    - `bootstrap_missing_repos`: when true, clone missing configured repos on base branch before fetch
     - `network_auth_retries`, `retry_backoff_seconds`, `decision_timeout_seconds`: retry and decision controls
   - `workflow_definition_path` (optional) - Project-specific override of global workflow path
   - `ai_tool_preferences` (optional) - Project-specific override of global AI tool preferences
