@@ -14,8 +14,8 @@ x-common: &common
     NEXUS_STORAGE_DSN: ${NEXUS_STORAGE_DSN:-postgresql://nexus:nexus@postgres:5432/nexus}
     REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   volumes:
-    - ./data:/app/data
-    - ./logs:/app/logs
+    - ${NEXUS_RUNTIME_DIR:-/var/lib/nexus}:${NEXUS_RUNTIME_DIR:-/var/lib/nexus}
+    - ${LOGS_DIR:-/var/lib/nexus/logs}:${LOGS_DIR:-/var/lib/nexus/logs}
     - ./config:/app/config:ro
     - /home/ubuntu/.copilot:/home/ubuntu/.copilot
     - /home/ubuntu/.gemini:/home/ubuntu/.gemini
@@ -37,6 +37,8 @@ services:
       redis:
         condition: service_healthy
     command: ["nexus-bot"]
+    environment:
+      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook:8081}
 
   processor:
     <<: *common
@@ -50,6 +52,8 @@ services:
       redis:
         condition: service_healthy
     command: ["nexus-processor"]
+    environment:
+      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook:8081}
 
   webhook:
     <<: *common
@@ -101,6 +105,8 @@ services:
       redis:
         condition: service_healthy
     command: ["nexus-bot"]
+    environment:
+      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook-prod:8081}
 
   processor-prod:
     <<: *common
@@ -115,6 +121,8 @@ services:
       redis:
         condition: service_healthy
     command: ["nexus-processor"]
+    environment:
+      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook-prod:8081}
 
   webhook-prod:
     <<: *common
