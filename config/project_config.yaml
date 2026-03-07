@@ -246,7 +246,7 @@ nexus:
       triage: {}
       compliance: {}
       writer: {}
-  # Uses the enterprise workflow (multi-tier: full/shortened/fast-track)
+  # Uses the enterprise router workflow (multi-tier: full/shortened/fast-track).
   workflow_definition_path: ghabs/nexus-arc/examples/workflows/enterprise_workflow.yaml
   # Nexus-specific overrides (inherits global profiles, defines custom preferences)
   ai_tool_preferences:
