@@ -5,7 +5,7 @@ set -euo pipefail
 NEXUS_DIR="/home/ubuntu/git/ghabs/nexus"
 ENV_FILE="$NEXUS_DIR/.env"
 LOGGING_COMPOSE_FILE="/home/ubuntu/git/ghabs/vsc-server-infra/logging/docker-compose.yml"
-SYSTEMD_UNITS=("nexus-telegram" "nexus-processor" "nexus-webhook" "nexus-health")
+SYSTEMD_UNITS=("nexus-telegram" "nexus-discord" "nexus-processor" "nexus-webhook" "nexus-health")
 COMPOSE_SERVICES=("bot" "processor" "webhook" "health")
 COMPOSE_PROFILE="${COMPOSE_PROFILE:-local}"
 COMPOSE_BUILD=true
@@ -24,6 +24,7 @@ CLI_INFRA=""
 CLI_NEXUS_RUNTIME_DIR=""
 CLI_NEXUS_CORE_STORAGE_DIR=""
 CLI_LOGS_DIR=""
+CLI_SERVICES=""
 
 usage() {
   cat <<EOF
@@ -41,6 +42,7 @@ Options:
   --nexus-runtime-dir <path>
   --nexus-core-storage-dir <path>
   --logs-dir <path>
+  --services <list>                   Comma-separated subset (e.g. "webhook,processor")
   -h, --help
 EOF
 }
@@ -145,6 +147,73 @@ resolve_value() {
   fi
 }
 
+resolve_compose_app_service() {
+  local token
+  token="$(trim "$1")"
+  case "$token" in
+    bot|telegram|discord)
+      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
+        echo "bot-prod"
+      else
+        echo "bot"
+      fi
+      ;;
+    processor)
+      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
+        echo "processor-prod"
+      else
+        echo "processor"
+      fi
+      ;;
+    webhook)
+      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
+        echo "webhook-prod"
+      else
+        echo "webhook"
+      fi
+      ;;
+    health)
+      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
+        echo "health-prod"
+      else
+        echo "health"
+      fi
+      ;;
+    bot-prod|processor-prod|webhook-prod|health-prod|bot)
+      echo "$token"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+resolve_systemd_unit() {
+  local token
+  token="$(trim "$1")"
+  token="${token%.service}"
+  case "$token" in
+    telegram|nexus-telegram)
+      echo "nexus-telegram"
+      ;;
+    discord|nexus-discord)
+      echo "nexus-discord"
+      ;;
+    processor|nexus-processor)
+      echo "nexus-processor"
+      ;;
+    webhook|nexus-webhook)
+      echo "nexus-webhook"
+      ;;
+    health|nexus-health)
+      echo "nexus-health"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
 parse_args() {
   while (($# > 0)); do
     case "$1" in
@@ -231,6 +300,15 @@ parse_args() {
         CLI_LOGS_DIR="${1#*=}"
         shift
         ;;
+      --services)
+        [[ $# -ge 2 ]] || die "Missing value for --services"
+        CLI_SERVICES="$2"
+        shift 2
+        ;;
+      --services=*)
+        CLI_SERVICES="${1#*=}"
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -270,6 +348,9 @@ run_compose() {
   local up_args=(-d)
   local app_services=()
   local target_services=()
+  local filtered_services=()
+  local token
+  local resolved
   [[ "$COMPOSE_BUILD" == "true" ]] && up_args+=(--build)
 
   COMPOSE_CMD=(docker compose -f "$NEXUS_DIR/docker-compose.yml")
@@ -292,6 +373,37 @@ run_compose() {
   if [[ "$OBSERVABILITY_ENABLED" == "true" ]]; then
     target_services+=("loki" "promtail" "grafana")
   fi
+
+  if [[ -n "$CLI_SERVICES" ]]; then
+    IFS=',' read -r -a requested <<< "$CLI_SERVICES"
+    for token in "${requested[@]}"; do
+      token="$(trim "$token")"
+      [[ -n "$token" ]] || continue
+
+      resolved="$(resolve_compose_app_service "$token")"
+      if [[ -z "$resolved" ]]; then
+        case "$token" in
+          postgres|redis|loki|promtail|grafana)
+            resolved="$token"
+            ;;
+          *)
+            die "Unknown compose service token: $token"
+            ;;
+        esac
+      fi
+
+      if ! printf '%s\n' "${target_services[@]}" | grep -Fxq "$resolved"; then
+        die "Service '$resolved' is not enabled for current profile/options"
+      fi
+
+      if ! printf '%s\n' "${filtered_services[@]}" | grep -Fxq "$resolved"; then
+        filtered_services+=("$resolved")
+      fi
+    done
+    [[ ${#filtered_services[@]} -gt 0 ]] || die "--services resolved to an empty service set"
+    target_services=("${filtered_services[@]}")
+  fi
+
   COMPOSE_SERVICES=("${target_services[@]}")
   case "$ACTION" in
     up)
@@ -319,20 +431,43 @@ run_compose() {
 
 run_systemd() {
   ensure_runtime_dirs
+  local target_units=("${SYSTEMD_UNITS[@]}")
+  local filtered_units=()
+  local token
+  local resolved
+
+  if [[ -n "$CLI_SERVICES" ]]; then
+    IFS=',' read -r -a requested <<< "$CLI_SERVICES"
+    for token in "${requested[@]}"; do
+      token="$(trim "$token")"
+      [[ -n "$token" ]] || continue
+      resolved="$(resolve_systemd_unit "$token")"
+      [[ -n "$resolved" ]] || die "Unknown systemd service token: $token"
+      if ! printf '%s\n' "${target_units[@]}" | grep -Fxq "$resolved"; then
+        die "Service '$resolved' is not managed by this deploy script"
+      fi
+      if ! printf '%s\n' "${filtered_units[@]}" | grep -Fxq "$resolved"; then
+        filtered_units+=("$resolved")
+      fi
+    done
+    [[ ${#filtered_units[@]} -gt 0 ]] || die "--services resolved to an empty unit set"
+    target_units=("${filtered_units[@]}")
+  fi
+
   case "$ACTION" in
     up)
       sudo systemctl daemon-reload
-      sudo systemctl enable --now "${SYSTEMD_UNITS[@]}"
+      sudo systemctl enable --now "${target_units[@]}"
       ;;
     down)
-      sudo systemctl disable --now "${SYSTEMD_UNITS[@]}" || true
+      sudo systemctl disable --now "${target_units[@]}" || true
       ;;
     restart)
-      sudo systemctl restart "${SYSTEMD_UNITS[@]}"
+      sudo systemctl restart "${target_units[@]}"
       ;;
     status)
       if [[ "$QUIET" == "true" ]]; then
-        for unit in "${SYSTEMD_UNITS[@]}"; do
+        for unit in "${target_units[@]}"; do
           if sudo systemctl is-active --quiet "$unit"; then
             echo "$unit: active"
           else
@@ -340,11 +475,15 @@ run_systemd() {
           fi
         done
       else
-        sudo systemctl status "${SYSTEMD_UNITS[@]}" --no-pager
+        sudo systemctl status "${target_units[@]}" --no-pager
       fi
       ;;
     logs)
-      sudo journalctl -u nexus-telegram -u nexus-processor -u nexus-webhook -u nexus-health -f
+      local journal_units=()
+      for unit in "${target_units[@]}"; do
+        journal_units+=(-u "$unit")
+      done
+      sudo journalctl "${journal_units[@]}" -f
       ;;
   esac
 }

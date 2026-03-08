@@ -74,7 +74,7 @@ ALLOWED_USER=your_telegram_user_id
 
 # Google Gemini Configuration
 AI_API_KEY=your_google_gemini_api_key
-AI_MODEL=gemini-2.0-flash
+AI_MODEL=gemini-3-flash-preview
 
 # GitHub Configuration
 PROJECT_CONFIG_PATH=path/to/your_project_config.yaml  # Per-project git_repo/git_repos settings

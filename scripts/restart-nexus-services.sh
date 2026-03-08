@@ -9,6 +9,7 @@ COMPOSE_PROFILE="${COMPOSE_PROFILE:-local}"
 OBSERVABILITY="${OBSERVABILITY_ENABLED:-false}"
 INFRA="${INFRA_ENABLED:-false}"
 COMPOSE_BUILD="true"
+TARGET_SERVICES=""
 
 usage() {
   cat <<USAGE
@@ -22,6 +23,7 @@ Options:
   --infra                    Include Postgres/Redis stack (compose only)
   --build                     Build images on restart (compose only, default)
   --no-build                  Do not build images on restart (compose only)
+  --services <list>           Comma-separated subset (e.g. "webhook,processor")
   -h, --help
 USAGE
 }
@@ -65,6 +67,15 @@ while (($# > 0)); do
       COMPOSE_BUILD="false"
       shift
       ;;
+    --services)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
+      TARGET_SERVICES="$2"
+      shift 2
+      ;;
+    --services=*)
+      TARGET_SERVICES="${1#*=}"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -93,10 +104,17 @@ if [[ "$DEPLOY_TYPE" == "compose" ]]; then
   if [[ "$INFRA" == "true" ]]; then
     INFRA_ARGS+=(--infra)
   fi
-  if [[ "$COMPOSE_BUILD" == "true" ]]; then
-    exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" --build
+  SERVICE_ARGS=()
+  if [[ -n "$TARGET_SERVICES" ]]; then
+    SERVICE_ARGS+=(--services "$TARGET_SERVICES")
   fi
-  exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" --no-build
+  if [[ "$COMPOSE_BUILD" == "true" ]]; then
+    exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" "${SERVICE_ARGS[@]}" --build
+  fi
+  exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" "${SERVICE_ARGS[@]}" --no-build
 fi
 
+if [[ -n "$TARGET_SERVICES" ]]; then
+  exec "$DEPLOY_SCRIPT" restart --systemd --services "$TARGET_SERVICES"
+fi
 exec "$DEPLOY_SCRIPT" restart --systemd
