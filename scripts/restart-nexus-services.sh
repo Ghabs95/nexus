@@ -9,6 +9,7 @@ COMPOSE_PROFILE="${COMPOSE_PROFILE:-local}"
 OBSERVABILITY="${OBSERVABILITY_ENABLED:-false}"
 INFRA="${INFRA_ENABLED:-false}"
 COMPOSE_BUILD="true"
+COMPOSE_REMOVE_ORPHANS="${COMPOSE_REMOVE_ORPHANS:-false}"
 TARGET_SERVICES=""
 
 usage() {
@@ -19,8 +20,10 @@ Options:
   --docker                    Use Docker Compose deployment
   --systemd                   Use systemd deployment
   --compose-profile <profile> Compose profile (local|prod), default: local
-  --observability / --no-observability Include Loki/Promtail/Grafana stack (compose only)
-  --infra                    Include Postgres/Redis stack (compose only)
+  --observability             Include Loki/Promtail/Grafana stack (compose only)
+  --infra                     Include Postgres/Redis stack (compose only)
+  --remove-orphans            Remove compose orphans on restart
+  --no-remove-orphans         Keep non-target containers (default)
   --build                     Build images on restart (compose only, default)
   --no-build                  Do not build images on restart (compose only)
   --services <list>           Comma-separated subset (e.g. "webhook,processor")
@@ -57,6 +60,14 @@ while (($# > 0)); do
       ;;
     --infra)
       INFRA="true"
+      shift
+      ;;
+    --remove-orphans)
+      COMPOSE_REMOVE_ORPHANS="true"
+      shift
+      ;;
+    --no-remove-orphans)
+      COMPOSE_REMOVE_ORPHANS="false"
       shift
       ;;
     --build)
@@ -108,10 +119,16 @@ if [[ "$DEPLOY_TYPE" == "compose" ]]; then
   if [[ -n "$TARGET_SERVICES" ]]; then
     SERVICE_ARGS+=(--services "$TARGET_SERVICES")
   fi
-  if [[ "$COMPOSE_BUILD" == "true" ]]; then
-    exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" "${SERVICE_ARGS[@]}" --build
+  ORPHAN_ARGS=()
+  if [[ "$COMPOSE_REMOVE_ORPHANS" == "true" ]]; then
+    ORPHAN_ARGS+=(--remove-orphans)
+  else
+    ORPHAN_ARGS+=(--no-remove-orphans)
   fi
-  exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" "${SERVICE_ARGS[@]}" --no-build
+  if [[ "$COMPOSE_BUILD" == "true" ]]; then
+    exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" "${SERVICE_ARGS[@]}" "${ORPHAN_ARGS[@]}" --build
+  fi
+  exec "$DEPLOY_SCRIPT" restart --docker --compose-profile "$COMPOSE_PROFILE" "${OBS_ARGS[@]}" "${INFRA_ARGS[@]}" "${SERVICE_ARGS[@]}" "${ORPHAN_ARGS[@]}" --no-build
 fi
 
 if [[ -n "$TARGET_SERVICES" ]]; then

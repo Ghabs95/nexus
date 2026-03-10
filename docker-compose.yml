@@ -24,47 +24,51 @@ x-common: &common
     - ${BASE_DIR:-/home/ubuntu/git}:${BASE_DIR:-/home/ubuntu/git}
 
 services:
-  bot:
+  telegram:
     <<: *common
-    profiles: ["local"]
-    build:
-      context: ../nexus-arc
-      dockerfile: examples/nexus-bot/Dockerfile
-    image: nexus-bot:local
+    command: ["nexus-telegram-bot"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["nexus-bot"]
+    environment:
+      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook:8081}
+
+  discord:
+    <<: *common
+    command: ["nexus-discord-bot"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook:8081}
 
   processor:
     <<: *common
-    profiles: ["local"]
-    image: nexus-bot:local
+    command: ["nexus-processor"]
     depends_on:
-      bot:
+      telegram:
+        condition: service_started
+      discord:
         condition: service_started
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["nexus-processor"]
     environment:
       NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook:8081}
 
   webhook:
     <<: *common
-    profiles: ["local"]
-    image: nexus-bot:local
+    command: ["nexus-webhook"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["nexus-webhook"]
     environment:
       PROJECT_CONFIG_PATH: /app/config/project_config.yaml
       PYTHONUNBUFFERED: "1"
@@ -74,10 +78,11 @@ services:
 
   health:
     <<: *common
-    profiles: ["local"]
-    image: nexus-bot:local
+    command: ["nexus-health"]
     depends_on:
-      bot:
+      telegram:
+        condition: service_started
+      discord:
         condition: service_started
       processor:
         condition: service_started
@@ -85,78 +90,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["nexus-health"]
-    environment:
-      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
-      PYTHONUNBUFFERED: "1"
-      HEALTH_CHECK_PORT: "8080"
-      HEALTH_CHECK_HOST: "0.0.0.0"
-    ports:
-      - "8080:8080"
-
-  bot-prod:
-    <<: *common
-    profiles: ["prod"]
-    platform: linux/amd64
-    image: ghcr.io/ghabs95/nexus-bot:latest
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: ["nexus-bot"]
-    environment:
-      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook-prod:8081}
-
-  processor-prod:
-    <<: *common
-    profiles: ["prod"]
-    platform: linux/amd64
-    image: ghcr.io/ghabs95/nexus-bot:latest
-    depends_on:
-      bot-prod:
-        condition: service_started
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: ["nexus-processor"]
-    environment:
-      NEXUS_WEBHOOK_INTERNAL_URL: ${NEXUS_WEBHOOK_INTERNAL_URL:-http://webhook-prod:8081}
-
-  webhook-prod:
-    <<: *common
-    profiles: ["prod"]
-    platform: linux/amd64
-    image: ghcr.io/ghabs95/nexus-bot:latest
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: ["nexus-webhook"]
-    environment:
-      PROJECT_CONFIG_PATH: /app/config/project_config.yaml
-      PYTHONUNBUFFERED: "1"
-      WEBHOOK_PORT: "8081"
-    ports:
-      - "8081:8081"
-
-  health-prod:
-    <<: *common
-    profiles: ["prod"]
-    platform: linux/amd64
-    image: ghcr.io/ghabs95/nexus-bot:latest
-    depends_on:
-      bot-prod:
-        condition: service_started
-      processor-prod:
-        condition: service_started
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: ["nexus-health"]
     environment:
       PROJECT_CONFIG_PATH: /app/config/project_config.yaml
       PYTHONUNBUFFERED: "1"
@@ -166,7 +99,6 @@ services:
       - "8080:8080"
 
   postgres:
-    profiles: ["prod", "local"]
     image: postgres:15-alpine
     restart: unless-stopped
     ports:
@@ -184,7 +116,6 @@ services:
       retries: 10
 
   redis:
-    profiles: ["prod", "local"]
     image: redis:7-alpine
     restart: unless-stopped
     ports:

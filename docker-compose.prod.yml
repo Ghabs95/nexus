@@ -1,0 +1,20 @@
+services:
+  telegram:
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+
+  discord:
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+
+  processor:
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+
+  webhook:
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest
+
+  health:
+    platform: linux/amd64
+    image: ghcr.io/ghabs95/nexus-bot:latest

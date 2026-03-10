@@ -1,0 +1,18 @@
+services:
+  telegram:
+    build:
+      context: ../nexus-arc
+      dockerfile: examples/nexus-bot/Dockerfile
+    image: nexus-bot:local
+
+  discord:
+    image: nexus-bot:local
+
+  processor:
+    image: nexus-bot:local
+
+  webhook:
+    image: nexus-bot:local
+
+  health:
+    image: nexus-bot:local

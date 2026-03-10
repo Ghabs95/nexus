@@ -91,6 +91,18 @@ done
 if [[ "$DEPLOY_TYPE" == "compose" ]]; then
   cd "$ROOT_DIR"
   COMPOSE_CMD=(docker compose -f "$ROOT_DIR/docker-compose.yml")
+  case "$COMPOSE_PROFILE" in
+    local)
+      COMPOSE_CMD+=(-f "$ROOT_DIR/docker-compose.local.yml")
+      ;;
+    prod)
+      COMPOSE_CMD+=(-f "$ROOT_DIR/docker-compose.prod.yml")
+      ;;
+    *)
+      echo "Invalid compose profile: $COMPOSE_PROFILE (expected local or prod)" >&2
+      exit 1
+      ;;
+  esac
   OBS_ARGS=()
   if [[ "$OBSERVABILITY" == "true" ]]; then
     [[ -f "$LOGGING_COMPOSE_FILE" ]] || { echo "Missing logging compose file: $LOGGING_COMPOSE_FILE" >&2; exit 1; }
@@ -103,8 +115,6 @@ if [[ "$DEPLOY_TYPE" == "compose" ]]; then
   if [[ "$INFRA" == "true" ]]; then
     INFRA_ARGS+=(--infra)
   fi
-  COMPOSE_CMD+=(--profile "$COMPOSE_PROFILE")
-
   echo "Building Docker services for profile '$COMPOSE_PROFILE'..."
   "${COMPOSE_CMD[@]}" build
 

@@ -5,12 +5,16 @@ set -euo pipefail
 NEXUS_DIR="/home/ubuntu/git/ghabs/nexus"
 ENV_FILE="$NEXUS_DIR/.env"
 LOGGING_COMPOSE_FILE="/home/ubuntu/git/ghabs/vsc-server-infra/logging/docker-compose.yml"
+BASE_COMPOSE_FILE="$NEXUS_DIR/docker-compose.yml"
+LOCAL_COMPOSE_FILE="$NEXUS_DIR/docker-compose.local.yml"
+PROD_COMPOSE_FILE="$NEXUS_DIR/docker-compose.prod.yml"
 SYSTEMD_UNITS=("nexus-telegram" "nexus-discord" "nexus-processor" "nexus-webhook" "nexus-health")
-COMPOSE_SERVICES=("bot" "processor" "webhook" "health")
+COMPOSE_SERVICES=("telegram" "discord" "processor" "webhook" "health")
 COMPOSE_PROFILE="${COMPOSE_PROFILE:-local}"
 COMPOSE_BUILD=true
 OBSERVABILITY_ENABLED="${OBSERVABILITY_ENABLED:-false}"
 INFRA_ENABLED="${INFRA_ENABLED:-false}"
+COMPOSE_REMOVE_ORPHANS="${COMPOSE_REMOVE_ORPHANS:-false}"
 
 ACTION="up"
 QUIET=false
@@ -21,6 +25,7 @@ CLI_COMPOSE_PROFILE=""
 CLI_COMPOSE_BUILD=""
 CLI_OBSERVABILITY=""
 CLI_INFRA=""
+CLI_REMOVE_ORPHANS=""
 CLI_NEXUS_RUNTIME_DIR=""
 CLI_NEXUS_CORE_STORAGE_DIR=""
 CLI_LOGS_DIR=""
@@ -38,6 +43,8 @@ Options:
   --compose-profile <local|prod>      Compose profile (default: local)
   --observability / --no-observability Include Loki/Promtail/Grafana compose stack
   --infra                             Include Postgres/Redis services
+  --remove-orphans / --no-remove-orphans
+                                      Remove compose orphans on up/restart (default: false)
   --build / --no-build                Compose up/restart image build behavior
   --nexus-runtime-dir <path>
   --nexus-core-storage-dir <path>
@@ -151,35 +158,7 @@ resolve_compose_app_service() {
   local token
   token="$(trim "$1")"
   case "$token" in
-    bot|telegram|discord)
-      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
-        echo "bot-prod"
-      else
-        echo "bot"
-      fi
-      ;;
-    processor)
-      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
-        echo "processor-prod"
-      else
-        echo "processor"
-      fi
-      ;;
-    webhook)
-      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
-        echo "webhook-prod"
-      else
-        echo "webhook"
-      fi
-      ;;
-    health)
-      if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
-        echo "health-prod"
-      else
-        echo "health"
-      fi
-      ;;
-    bot-prod|processor-prod|webhook-prod|health-prod|bot)
+    telegram|discord|processor|webhook|health)
       echo "$token"
       ;;
     *)
@@ -273,6 +252,14 @@ parse_args() {
         CLI_INFRA="true"
         shift
         ;;
+      --remove-orphans)
+        CLI_REMOVE_ORPHANS="true"
+        shift
+        ;;
+      --no-remove-orphans)
+        CLI_REMOVE_ORPHANS="false"
+        shift
+        ;;
       --nexus-runtime-dir)
         [[ $# -ge 2 ]] || die "Missing value for --nexus-runtime-dir"
         CLI_NEXUS_RUNTIME_DIR="$2"
@@ -346,25 +333,35 @@ compose_quiet_status() {
 
 run_compose() {
   local up_args=(-d)
+  local orphan_args=()
   local app_services=()
   local target_services=()
   local filtered_services=()
   local token
   local resolved
   [[ "$COMPOSE_BUILD" == "true" ]] && up_args+=(--build)
+  [[ "$COMPOSE_REMOVE_ORPHANS" == "true" ]] && orphan_args=(--remove-orphans)
 
-  COMPOSE_CMD=(docker compose -f "$NEXUS_DIR/docker-compose.yml")
+  COMPOSE_CMD=(docker compose -f "$BASE_COMPOSE_FILE")
+  case "$COMPOSE_PROFILE" in
+    local)
+      [[ -f "$LOCAL_COMPOSE_FILE" ]] || die "Missing compose file: $LOCAL_COMPOSE_FILE"
+      COMPOSE_CMD+=(-f "$LOCAL_COMPOSE_FILE")
+      ;;
+    prod)
+      [[ -f "$PROD_COMPOSE_FILE" ]] || die "Missing compose file: $PROD_COMPOSE_FILE"
+      COMPOSE_CMD+=(-f "$PROD_COMPOSE_FILE")
+      ;;
+    *)
+      die "Invalid COMPOSE_PROFILE=$COMPOSE_PROFILE (expected local or prod)"
+      ;;
+  esac
   if [[ "$OBSERVABILITY_ENABLED" == "true" ]]; then
     [[ -f "$LOGGING_COMPOSE_FILE" ]] || die "Missing logging compose file: $LOGGING_COMPOSE_FILE"
     COMPOSE_CMD+=(-f "$LOGGING_COMPOSE_FILE")
   fi
-  COMPOSE_CMD+=(--profile "$COMPOSE_PROFILE")
 
-  if [[ "$COMPOSE_PROFILE" == "prod" ]]; then
-    app_services=("bot-prod" "processor-prod" "webhook-prod" "health-prod")
-  else
-    app_services=("bot" "processor" "webhook" "health")
-  fi
+  app_services=("telegram" "discord" "processor" "webhook" "health")
 
   target_services=("${app_services[@]}")
   if [[ "$INFRA_ENABLED" == "true" ]]; then
@@ -380,25 +377,34 @@ run_compose() {
       token="$(trim "$token")"
       [[ -n "$token" ]] || continue
 
-      resolved="$(resolve_compose_app_service "$token")"
-      if [[ -z "$resolved" ]]; then
-        case "$token" in
-          postgres|redis|loki|promtail|grafana)
-            resolved="$token"
-            ;;
-          *)
-            die "Unknown compose service token: $token"
-            ;;
-        esac
+      local resolved_candidates=()
+      if [[ "$token" == "bot" || "$token" == "bot-prod" ]]; then
+        resolved_candidates=("telegram" "discord")
+      else
+        resolved="$(resolve_compose_app_service "$token")"
+        if [[ -z "$resolved" ]]; then
+          case "$token" in
+            postgres|redis|loki|promtail|grafana)
+              resolved="$token"
+              ;;
+            *)
+              die "Unknown compose service token: $token"
+              ;;
+          esac
+        fi
+        resolved_candidates=("$resolved")
       fi
 
-      if ! printf '%s\n' "${target_services[@]}" | grep -Fxq "$resolved"; then
-        die "Service '$resolved' is not enabled for current profile/options"
-      fi
+      local candidate
+      for candidate in "${resolved_candidates[@]}"; do
+        if ! printf '%s\n' "${target_services[@]}" | grep -Fxq "$candidate"; then
+          die "Service '$candidate' is not enabled for current profile/options"
+        fi
 
-      if ! printf '%s\n' "${filtered_services[@]}" | grep -Fxq "$resolved"; then
-        filtered_services+=("$resolved")
-      fi
+        if ! printf '%s\n' "${filtered_services[@]}" | grep -Fxq "$candidate"; then
+          filtered_services+=("$candidate")
+        fi
+      done
     done
     [[ ${#filtered_services[@]} -gt 0 ]] || die "--services resolved to an empty service set"
     target_services=("${filtered_services[@]}")
@@ -407,14 +413,14 @@ run_compose() {
   COMPOSE_SERVICES=("${target_services[@]}")
   case "$ACTION" in
     up)
-      "${COMPOSE_CMD[@]}" up "${up_args[@]}" "${target_services[@]}"
+      "${COMPOSE_CMD[@]}" up "${up_args[@]}" "${orphan_args[@]}" "${target_services[@]}"
       ;;
     down)
       "${COMPOSE_CMD[@]}" stop "${target_services[@]}" || true
       "${COMPOSE_CMD[@]}" rm -f "${target_services[@]}" || true
       ;;
     restart)
-      "${COMPOSE_CMD[@]}" up "${up_args[@]}" --force-recreate "${target_services[@]}"
+      "${COMPOSE_CMD[@]}" up "${up_args[@]}" --force-recreate "${orphan_args[@]}" "${target_services[@]}"
       ;;
     status)
       if [[ "$QUIET" == "true" ]]; then
@@ -496,6 +502,7 @@ DOTENV_DEPLOY_TYPE="$(read_env_var "DEPLOY_TYPE")"
 DOTENV_COMPOSE_PROFILE="$(read_env_var "COMPOSE_PROFILE")"
 DOTENV_OBSERVABILITY="$(read_env_var "OBSERVABILITY_ENABLED")"
 DOTENV_INFRA="$(read_env_var "INFRA_ENABLED")"
+DOTENV_REMOVE_ORPHANS="$(read_env_var "COMPOSE_REMOVE_ORPHANS")"
 DOTENV_NEXUS_RUNTIME_DIR="$(read_env_var "NEXUS_RUNTIME_DIR")"
 DOTENV_NEXUS_CORE_STORAGE_DIR="$(read_env_var "NEXUS_CORE_STORAGE_DIR")"
 DOTENV_LOGS_DIR="$(read_env_var "LOGS_DIR")"
@@ -504,6 +511,7 @@ DEPLOY_TYPE="$(resolve_value "DEPLOY_TYPE" "$CLI_DEPLOY_TYPE" "$DOTENV_DEPLOY_TY
 COMPOSE_PROFILE="$(resolve_value "COMPOSE_PROFILE" "$CLI_COMPOSE_PROFILE" "$DOTENV_COMPOSE_PROFILE" "$COMPOSE_PROFILE")"
 OBSERVABILITY_ENABLED="$(resolve_value "OBSERVABILITY_ENABLED" "$CLI_OBSERVABILITY" "$DOTENV_OBSERVABILITY" "$OBSERVABILITY_ENABLED")"
 INFRA_ENABLED="$(resolve_value "INFRA_ENABLED" "$CLI_INFRA" "$DOTENV_INFRA" "$INFRA_ENABLED")"
+COMPOSE_REMOVE_ORPHANS="$(resolve_value "COMPOSE_REMOVE_ORPHANS" "$CLI_REMOVE_ORPHANS" "$DOTENV_REMOVE_ORPHANS" "$COMPOSE_REMOVE_ORPHANS")"
 if [[ -n "$CLI_COMPOSE_BUILD" ]]; then
   COMPOSE_BUILD="$CLI_COMPOSE_BUILD"
 fi
@@ -530,6 +538,12 @@ case "$DEPLOY_TYPE" in
       true|false) ;;
       *)
         die "Invalid INFRA_ENABLED=$INFRA_ENABLED (expected true or false)"
+        ;;
+    esac
+    case "$COMPOSE_REMOVE_ORPHANS" in
+      true|false) ;;
+      *)
+        die "Invalid COMPOSE_REMOVE_ORPHANS=$COMPOSE_REMOVE_ORPHANS (expected true or false)"
         ;;
     esac
     run_compose

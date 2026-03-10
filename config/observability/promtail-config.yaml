@@ -17,7 +17,7 @@ scrape_configs:
       - docker: {}
     relabel_configs:
       - source_labels: ['__meta_docker_container_name']
-        regex: '/(nexus-(bot|processor|webhook|health)-[0-9]+)'
+        regex: '/(nexus-(telegram|discord|processor|webhook|health)-[0-9]+)'
         action: keep
       - source_labels: ['__meta_docker_container_name']
         regex: '/(nexus-[^-]+)-[0-9]+'
